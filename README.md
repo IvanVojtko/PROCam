@@ -69,8 +69,9 @@ changes grew well beyond what fits in a pull request:
   that does the processing for you.
 
 Rather than push a different direction onto the original project, it is
-released as its own app with its own name, app ID (`com.procam`) and settings
-(`/apps/procam`). RAWfish remains the place for its own goals; ProCam is the
+released as its own app with its own name, app ID (`com.procam`), settings
+(`/apps/procam`), QML module (`com.procam.camera`) and Camera2 bridge library
+(`libprocamcamera2.so`), so it installs side by side with RAWfish. RAWfish remains the place for its own goals; ProCam is the
 computational photography branch of that family.
 
 ## Device support
@@ -91,9 +92,7 @@ device.
 
 1. Download the latest `procam-*.aarch64.rpm` from
    [Releases](https://github.com/IvanVojtko/PROCam/releases).
-2. Uninstall RAWfish first if you have it: both apps ship the same camera
-   bridge and QML module, so they cannot be installed side by side.
-3. Install the package, either by opening it in the file manager or from a
+2. Install the package, either by opening it in the file manager or from a
    terminal:
 
    ```sh
@@ -150,7 +149,7 @@ with the `SailfishOS-5.1.0.11-aarch64` target, and Android NDK r27 for the
 Camera2 bridge.
 
 ```sh
-# 1. The Android Camera2 bridge (libsfoscamera2.so)
+# 1. The Android Camera2 bridge (libprocamcamera2.so)
 ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.2.12479018 sh sfos-camera2-bridge/scripts/build-android.sh
 
 # 2. The RPM, as a shadow build so the source tree stays clean

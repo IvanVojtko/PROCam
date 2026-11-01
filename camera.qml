@@ -8,7 +8,7 @@ import QtQuick 2.1
 import QtMultimedia 5.0
 import Amber.QrFilter 1.0
 import Sailfish.Silica 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 import "pages"
 
 ApplicationWindow {

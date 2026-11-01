@@ -5,7 +5,7 @@
 
 import QtQuick 2.1
 import Sailfish.Silica 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 
 GalleryView {
     id: root

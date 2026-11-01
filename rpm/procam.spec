@@ -12,11 +12,11 @@ License:    BSD-3-Clause AND GPL-2.0-or-later AND GPL-3.0-or-later
 URL:        https://github.com/IvanVojtko/PROCam
 Source0:    %{name}-%{version}.tar.bz2
 
-# libsfoscamera2.so is an Android/Bionic library loaded through libhybris from
+# libprocamcamera2.so is an Android/Bionic library loaded through libhybris from
 # /usr/libexec/droid-hybris. Its NDK dependencies are provided by the Android
 # compatibility image, not by Sailfish RPM packages.
-%global __requires_exclude_from ^.*/usr/libexec/droid-hybris/system/lib64/libsfoscamera2\.so$
-%global __provides_exclude_from ^.*/usr/libexec/droid-hybris/system/lib64/libsfoscamera2\.so$
+%global __requires_exclude_from ^.*/usr/libexec/droid-hybris/system/lib64/libprocamcamera2\.so$
+%global __provides_exclude_from ^.*/usr/libexec/droid-hybris/system/lib64/libprocamcamera2\.so$
 %global __requires_exclude ^(libandroid\.so.*|libcamera2ndk\.so.*|libmediandk\.so.*|libnativewindow\.so.*|liblog\.so.*|libdl_android\.so.*)$
 
 BuildRequires:  pkgconfig(Qt5Core)
@@ -38,8 +38,6 @@ BuildRequires:  qt5-qttools
 BuildRequires:  qt5-qttools-linguist
 BuildRequires:  oneshot
 
-# Same QML module (com.vivid.camera) and Camera2 bridge library as RAWfish.
-Conflicts: rawfish
 Requires:  sailfishsilica-qt5 >= 1.1.79
 Requires:  libtiff
 Requires:  qt5-qtdeclarative-import-models2
@@ -108,17 +106,25 @@ merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
 %{_datadir}/jolla-settings/pages/procam/SettingsPage.qml
 %dir %{_datadir}/jolla-settings/entries
 %{_datadir}/jolla-settings/entries/procam.json
-%{_libdir}/qt5/qml/com/vivid/camera
+%{_libdir}/qt5/qml/com/procam/camera
 %dir %{_libexecdir}/procam
 %{_libexecdir}/procam/sfos-camera2-probe
 %{_libexecdir}/procam/sfos-raw16-to-jpeg
 %dir %{_libexecdir}/droid-hybris
 %dir %{_libexecdir}/droid-hybris/system
 %dir %{_libexecdir}/droid-hybris/system/lib64
-%{_libexecdir}/droid-hybris/system/lib64/libsfoscamera2.so
+%{_libexecdir}/droid-hybris/system/lib64/libprocamcamera2.so
 %{_sysconfdir}/dconf/db/vendor.d/00-procam.txt
 
 %changelog
+* Sun Nov 01 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.2-1
+- Installs side by side with RAWfish: own QML module (com.procam.camera) and
+  Camera2 bridge library (libprocamcamera2.so); the conflict is gone.
+- Faces in hard sun keep their colour: the lit side of a face is checked
+  after tone mapping and the shadow lift reduced until it no longer clips.
+- Gentler saturation on skin, and in selfies less clarity and sharpening on
+  skin, so pores and stubble look natural.
+- The gallery thumbnail shows the newest photo once processing finishes.
 * Sun Nov 01 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0-1
 - First ProCam release. RAW-based rendering for every photo: HDR bursts with
   motion-aware exposure, night mode (16 frames), super-resolution and sharp 2x

@@ -42,7 +42,7 @@ public:
 class CameraPlugin : public QQmlExtensionPlugin
 {
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID "com.vivid.camera")
+    Q_PLUGIN_METADATA(IID "com.procam.camera")
 
 public:
 
@@ -50,7 +50,7 @@ public:
     {
         Q_UNUSED(uri)
         Q_UNUSED(engine)
-        Q_ASSERT(QLatin1String(uri) == QLatin1String("com.vivid.camera"));
+        Q_ASSERT(QLatin1String(uri) == QLatin1String("com.procam.camera"));
 
         AppTranslator *engineeringEnglish = new AppTranslator(engine);
         AppTranslator *translator = new AppTranslator(engine);
@@ -61,14 +61,14 @@ public:
     virtual void registerTypes(const char *uri)
     {
         Q_UNUSED(uri)
-        Q_ASSERT(QLatin1String(uri) == QLatin1String("com.vivid.camera"));
+        Q_ASSERT(QLatin1String(uri) == QLatin1String("com.procam.camera"));
 
-        qmlRegisterType<CaptureModel>("com.vivid.camera", 1, 0, "CaptureModel");
-        qmlRegisterType<Camera2Preview>("com.vivid.camera", 1, 0, "Camera2Preview");
-        qmlRegisterType<DeclarativeCameraExtensions>("com.vivid.camera", 1, 0, "CameraExtensions");
-        qmlRegisterType<DeclarativeSettings>("com.vivid.camera", 1, 0, "SettingsBase");
-        qmlRegisterSingletonType<DeclarativeSettings>("com.vivid.camera", 1, 0, "Settings", DeclarativeSettings::factory);
-        qmlRegisterSingletonType<CameraConfigs>("com.vivid.camera", 1, 0, "CameraConfigs", singletonFactory<CameraConfigs>);
+        qmlRegisterType<CaptureModel>("com.procam.camera", 1, 0, "CaptureModel");
+        qmlRegisterType<Camera2Preview>("com.procam.camera", 1, 0, "Camera2Preview");
+        qmlRegisterType<DeclarativeCameraExtensions>("com.procam.camera", 1, 0, "CameraExtensions");
+        qmlRegisterType<DeclarativeSettings>("com.procam.camera", 1, 0, "SettingsBase");
+        qmlRegisterSingletonType<DeclarativeSettings>("com.procam.camera", 1, 0, "Settings", DeclarativeSettings::factory);
+        qmlRegisterSingletonType<CameraConfigs>("com.procam.camera", 1, 0, "CameraConfigs", singletonFactory<CameraConfigs>);
     }
 };
 

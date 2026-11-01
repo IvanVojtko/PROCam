@@ -59,7 +59,7 @@ jobs:
           sdkmanager "ndk;${ANDROID_NDK_VERSION}"
           export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           sh sfos-camera2-bridge/scripts/build-android.sh
-          test -s sfos-camera2-bridge/build/android/libsfoscamera2.so
+          test -s sfos-camera2-bridge/build/android/libprocamcamera2.so
 
       - name: Build and verify Sailfish RPM
         id: build_rpm
@@ -74,7 +74,7 @@ jobs:
               mkdir -p "$HOME/procam-build"
               cd "$HOME/procam-build"
               cp -a /workspace/. .
-              test -s sfos-camera2-bridge/build/android/libsfoscamera2.so
+              test -s sfos-camera2-bridge/build/android/libprocamcamera2.so
               mb2 -t "$SAILFISH_TARGET" build
               found=0
               for package in RPMS/procam-[0-9]*.aarch64.rpm; do
@@ -83,9 +83,9 @@ jobs:
                 for file in \
                     /usr/bin/procam \
                     /usr/libexec/procam/sfos-camera2-probe \
-                    /usr/libexec/droid-hybris/system/lib64/libsfoscamera2.so \
-                    /usr/lib64/qt5/qml/com/vivid/camera/calibration/raisr-2x.bin \
-                    /usr/lib64/qt5/qml/com/vivid/camera/capture/moon.svg; do
+                    /usr/libexec/droid-hybris/system/lib64/libprocamcamera2.so \
+                    /usr/lib64/qt5/qml/com/procam/camera/calibration/raisr-2x.bin \
+                    /usr/lib64/qt5/qml/com/procam/camera/capture/moon.svg; do
                   grep -Fx "$file" /tmp/procam-files.txt
                 done
                 found=1

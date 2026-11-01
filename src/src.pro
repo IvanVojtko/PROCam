@@ -7,7 +7,7 @@ TEMPLATE = lib
 TARGET  = vividcameraplugin
 TARGET = $$qtLibraryTarget($$TARGET)
 
-MODULENAME = com/vivid/camera
+MODULENAME = com/procam/camera
 TARGETPATH = $$[QT_INSTALL_QML]/$$MODULENAME
 
 QT += gui-private qml quick multimedia concurrent

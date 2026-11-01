@@ -6,7 +6,7 @@
 import QtQuick 2.0
 import QtQuick.Window 2.1
 import Sailfish.Silica 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 import Nemo.FileManager 1.0
 import Nemo.DBus 2.0
 

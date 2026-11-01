@@ -23,12 +23,18 @@ MouseArea {
     Behavior on opacity { FadeAnimation {} }
 
     ListView {
+        id: list
+
         anchors.fill: parent
         interactive: false
         clip: true
         model: root.captureModel
-        // Only the first (newest) entry is ever in view.
+        // Only the first (newest) entry is ever in view. A ListView keeps
+        // the item it shows when rows are inserted before it, so a new photo
+        // (inserted at the top) would stay hidden behind the previous one.
         cacheBuffer: 0
+        onCountChanged: positionViewAtBeginning()
+        onModelChanged: positionViewAtBeginning()
         delegate: Thumbnail {
             width: root.width
             height: root.height

@@ -10,7 +10,7 @@ import Nemo.KeepAlive 1.2
 import Sailfish.Silica 1.0
 import Sailfish.Media 1.0
 import Sailfish.Policy 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 import com.jolla.settings.system 1.0
 import "capture"
 import "gallery"

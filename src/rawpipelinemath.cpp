@@ -1904,14 +1904,42 @@ static void keptRange(int width, int height, double kept, int *first, int *last)
     *last = shortSide - *first;
 }
 
+// A face's surroundings for skin-aware processing: centre and half size of
+// its box, in output pixels.
+struct FaceZone {
+    float cx, cy, halfWidth, halfHeight;
+};
+
+// How much pixel (x, y) with display colour rgb (gamma) is skin on or near a
+// face, 0..1: within 1.3x the face's half size, fading out by 1.8x, and red
+// to orange (R > G >= B, HSV hue up to about 50 degrees).
+static float skinWeight(const std::vector<FaceZone> &zones, int x, int y, const float rgb[3])
+{
+    float zone = 0;
+    for (const FaceZone &z : zones) {
+        const float d = std::max(std::abs(x - z.cx) / z.halfWidth, std::abs(y - z.cy) / z.halfHeight);
+        zone = std::max(zone, std::min(1.0f, std::max(0.0f, (1.8f - d) / 0.5f)));
+    }
+    if (zone <= 0 || rgb[0] <= rgb[1] || rgb[1] < rgb[2] || rgb[0] - rgb[2] < 0.02f) return 0.0f;
+    // HSV hue 0..60 degrees as 0..1.
+    const float hue = (rgb[1] - rgb[2]) / (rgb[0] - rgb[2]);
+    auto step = [](float a, float b, float v) {
+        const float t = std::min(1.0f, std::max(0.0f, (v - a) / (b - a)));
+        return t * t * (3 - 2 * t);
+    };
+    return zone * step(0.0f, 0.12f, hue) * (1.0f - step(0.6f, 0.85f, hue));
+}
+
 // Clarity: local contrast at a medium scale (5 px) in the mid-tones of the
 // display luma `y`, never in deep shadows or highlights; apply(i, delta)
 // receives the change for pixel i (y itself is updated). Noise-aware: most
 // of an image is flat, so the median deviation from the 5 px blur measures
 // the noise at that scale; only what exceeds 1.5x that is boosted (flat
-// walls otherwise got a third grainier).
+// walls otherwise got a third grainier). `scale`, if given, multiplies the
+// amount per pixel.
 template <typename Apply>
-static void applyClarity(std::vector<float> &y, int width, int height, float amount, Apply apply)
+static void applyClarity(std::vector<float> &y, int width, int height, float amount, Apply apply,
+                         const std::vector<float> *scale = nullptr)
 {
     const std::vector<float> wide = gaussianBlur(y, width, height, 5.0);
     std::vector<float> deviation;
@@ -1929,7 +1957,8 @@ static void applyClarity(std::vector<float> &y, int width, int height, float amo
             highSide = highSide * highSide * (3 - 2 * highSide);
             const float d = f - wide[i];
             const float excess = std::max(0.0f, std::abs(d) - floor);
-            const float delta = std::max(-0.06f, std::min(0.06f, amount * lowSide * highSide * (d < 0 ? -excess : excess)));
+            const float gain = scale ? amount * (*scale)[i] : amount;
+            const float delta = std::max(-0.06f, std::min(0.06f, gain * lowSide * highSide * (d < 0 ? -excess : excess)));
             y[i] = f + delta;
             apply(i, delta);
         }
@@ -1939,11 +1968,14 @@ static void applyClarity(std::vector<float> &y, int width, int height, float amo
 // Mean linear level of the central part of the largest face (a face box also
 // holds hair and background) in an image whose pixel (x, y) shows sensor
 // position origin + (x, y) * step; -1 without a face of at least 0.3% of the
-// image.
+// image. `bright`, if given, receives its 90th percentile: the lit side of a
+// face in hard light.
 static double largestFaceLevel(const std::vector<float> &luma, int width, int height, const FaceRects &faces,
-                               double originX, double originY, double step, int sensorWidth, int sensorHeight)
+                               double originX, double originY, double step, int sensorWidth, int sensorHeight,
+                               double *bright = nullptr)
 {
     double level = -1, bestArea = 0;
+    std::vector<float> values;
     for (const std::array<float, 4> &face : faces) {
         auto toX = [&](float v) { return std::max(0, std::min(width, int((v * sensorWidth - originX) / step))); };
         auto toY = [&](float v) { return std::max(0, std::min(height, int((v * sensorHeight - originY) / step))); };
@@ -1954,12 +1986,20 @@ static double largestFaceLevel(const std::vector<float> &luma, int width, int he
         x0 += insetX; x1 -= insetX; y0 += insetY; y1 -= insetY;
         const int stride = std::max(1, int(std::sqrt(area / 4000)));
         double sum = 0;
-        long count = 0;
+        values.clear();
         for (int y = y0; y < y1; y += stride)
-            for (int x = x0; x < x1; x += stride, ++count) sum += std::max(0.0f, luma[std::size_t(y) * width + x]);
-        if (count == 0) continue;
-        level = sum / count;
+            for (int x = x0; x < x1; x += stride) {
+                values.push_back(std::max(0.0f, luma[std::size_t(y) * width + x]));
+                sum += values.back();
+            }
+        if (values.empty()) continue;
+        level = sum / values.size();
         bestArea = area;
+        if (bright) {
+            auto at = values.begin() + std::ptrdiff_t(values.size() * 9 / 10);
+            std::nth_element(values.begin(), at, values.end());
+            *bright = *at;
+        }
     }
     return level;
 }
@@ -1967,6 +2007,10 @@ static double largestFaceLevel(const std::vector<float> &luma, int width, int he
 // Where a face should land after tone mapping (linear): from a darker skin
 // in shade to a lighter one in good light (sRGB about 100 to 187).
 static const double FaceLow = 0.13, FaceHigh = 0.5;
+// The lit side of a face (its 90th percentile) stays below this, so skin in
+// sun keeps its colour after contrast and saturation instead of clipping to
+// pale pink (a face half in sun, half in shade averages within range).
+static const double FaceBright = 0.6;
 
 // fuseExposures() for one flat area of linear level y (gamma-encoded result),
 // with the same weights; the pyramid only matters at edges.
@@ -2004,6 +2048,48 @@ static void fitFace(double face, double *shortGain, double *longGain, double max
                 *longGain = l;
             }
         }
+    }
+}
+
+// fitFace() models a flat area, but the fusion pyramid blends its weights
+// over a wide neighbourhood: a small face in a dark scene (a portrait in a
+// forest) follows the long exposure much more than modelled and its lit side
+// clips. Checked on a fusion of the luma at 1/8 scale (the same coarse
+// levels, a few ms each): the long gain, then both, come down in quarter
+// stops until the face's lit side is below FaceBright, the short one by at
+// most 2 stops (a face the sensor clipped cannot be recovered).
+static void protectLitFace(const std::vector<float> &luma, int width, int height, const FaceRects &faces,
+                           double originX, double originY, double step, int sensorWidth, int sensorHeight,
+                           double *shortGain, double *longGain)
+{
+    const int f = 8, w = width / f, h = height / f;
+    if (w < 32 || h < 32) return;
+    std::vector<float> small(std::size_t(w) * h);
+    parallelFor(0, h, [&](int y) {
+        for (int x = 0; x < w; ++x) {
+            double sum = 0;
+            for (int yy = 0; yy < f; ++yy) {
+                const float *row = &luma[std::size_t(y * f + yy) * width + x * f];
+                for (int xx = 0; xx < f; ++xx) sum += row[xx];
+            }
+            small[std::size_t(y) * w + x] = float(sum / (f * f));
+        }
+    });
+    const double cap = curve().toGamma(float(FaceBright));
+    const double s0 = *shortGain, l0 = *longGain;
+    for (int i = 0;; ++i) {
+        // Long down to the short one first (the shadow lift), then both.
+        const double l = std::max(s0, l0 * std::pow(2.0, -0.25 * i));
+        const double s = std::min(s0, l0 * std::pow(2.0, -0.25 * i));
+        if (s < 0.25 * s0 * 0.999) return;
+        const std::vector<float> fused = fuseExposures(small, w, h, s, l);
+        double bright = -1;
+        largestFaceLevel(fused, w, h, faces, originX + 0.5 * (f - 1) * step, originY + 0.5 * (f - 1) * step,
+                         step * f, sensorWidth, sensorHeight, &bright);
+        if (bright < 0) return;
+        *shortGain = s;
+        *longGain = l;
+        if (bright <= cap) return;
     }
 }
 
@@ -2359,13 +2445,18 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
     // Faces: mid-tones follow the long exposure, so a face lands near
     // faceLevel * longGain. Keep it within FaceLow..FaceHigh: a face in hard
     // light is not blown by the shadow lift, a backlit one is lifted.
+    double faceBright = -1;
     const double faceLevel = options.faces.empty() ? -1.0
             : largestFaceLevel(luma, width, height, options.faces, originX, originY, pixelStep,
-                               sensorWidth, sensorHeight);
+                               sensorWidth, sensorHeight, &faceBright);
     // A face may be lifted up to 3 stops above the highlight exposure, past
     // the scene-key limit: against a bright sky it is the subject.
-    if (faceLevel > 1e-5 && options.localToneMapping > 0)
+    if (faceLevel > 1e-5 && options.localToneMapping > 0) {
         fitFace(faceLevel, &shortGain, &longGain, std::max(longGain, shortGain * 8.0));
+        if (faceBright > faceLevel)
+            protectLitFace(luma, width, height, options.faces, originX, originY, pixelStep, sensorWidth,
+                           sensorHeight, &shortGain, &longGain);
+    }
     std::vector<float>().swap(samples);
     if (stats) {
         stats->shortGain = shortGain;
@@ -2373,10 +2464,17 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         stats->highlightLevel = highlight;
         stats->keyLevel = key;
         stats->faceLevel = faceLevel;
+        stats->faceBright = faceBright;
     }
     std::vector<float> fused;
     if (options.localToneMapping > 0) {
         fused = fuseExposures(luma, width, height, shortGain, longGain);
+        if (stats && faceLevel > 1e-5) {
+            double b = -1;
+            largestFaceLevel(fused, width, height, options.faces, originX, originY, pixelStep, sensorWidth,
+                             sensorHeight, &b);
+            stats->faceOutput = b;
+        }
     } else {
         fused.resize(pixels);
         parallelFor(0, height, [&](int y) {
@@ -2458,6 +2556,19 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         });
         smoothLuma = gaussianBlur(curvedLuma, width, height, 2.0);
     }
+    // Skin: the saturation boost, there for the camera's flat colour, turns
+    // skin red-pink and clips its red channel in sun. Skin hues on and
+    // around a face get a third of it (leaves and clothes elsewhere keep it).
+    std::vector<FaceZone> faceZones;
+    for (const std::array<float, 4> &face : options.faces) {
+        const float x0 = float((face[0] * sensorWidth - originX) / pixelStep);
+        const float x1 = float((face[2] * sensorWidth - originX) / pixelStep);
+        const float y0 = float((face[1] * sensorHeight - originY) / pixelStep);
+        const float y1 = float((face[3] * sensorHeight - originY) / pixelStep);
+        if (x1 - x0 >= 8 && y1 - y0 >= 8)
+            faceZones.push_back({0.5f * (x0 + x1), 0.5f * (y0 + y1), 0.5f * (x1 - x0), 0.5f * (y1 - y0)});
+    }
+    const float skinSaturation = saturation > 1.0f ? 1.0f + (saturation - 1.0f) / 3.0f : saturation;
     parallelFor(0, height, [&](int y) {
         for (int x = 0; x < width; ++x) {
             const std::size_t i = std::size_t(y) * width + x;
@@ -2469,8 +2580,10 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
                                                 : toneEnds(smoothLuma[i]) + (curved - smoothLuma[i]);
             // Darkened shadows keep their colour in proportion.
             const float chromaScale = lc < curved ? lc / std::max(curved, 1e-4f) : 1.0f;
+            const float pixelSaturation = faceZones.empty() ? saturation
+                    : saturation + (skinSaturation - saturation) * skinWeight(faceZones, x, y, g);
             for (int k = 0; k < 3; ++k)
-                p[k] = std::max(0.0f, std::min(1.0f, lc + saturation * chromaScale * (g[k] - l)));
+                p[k] = std::max(0.0f, std::min(1.0f, lc + pixelSaturation * chromaScale * (g[k] - l)));
             fused[i] = lc;
         }
     });
@@ -2839,9 +2952,38 @@ RgbImage renderYuvBurst(const std::vector<const YuvFrame *> &frames, const YuvOp
             }
         });
     }
+    // Skin on and around faces gets a third of the clarity and less
+    // sharpening: selfies are close-ups, where boosted pores, wrinkles and
+    // stubble look harsh rather than detailed.
+    std::vector<float> skin;
+    if (!options.faces.empty() && !zoom.active()) {
+        std::vector<FaceZone> zones;
+        for (const std::array<float, 4> &f : options.faces) {
+            const float x0 = f[0] * outWidth, x1 = f[2] * outWidth, y0 = f[1] * outHeight, y1 = f[3] * outHeight;
+            if (x1 - x0 >= 8 && y1 - y0 >= 8)
+                zones.push_back({0.5f * (x0 + x1), 0.5f * (y0 + y1), 0.5f * (x1 - x0), 0.5f * (y1 - y0)});
+        }
+        if (!zones.empty()) {
+            skin.assign(y.size(), 0.0f);
+            parallelFor(0, outHeight, [&](int row) {
+                for (int x = 0; x < outWidth; ++x) {
+                    const std::size_t i = std::size_t(row) * outWidth + x;
+                    const float luma = y[i], cb = uFull.data[i], cr = vFull.data[i];
+                    const float rgb[3] = {luma + 1.402f * cr, luma - 0.344136f * cb - 0.714136f * cr, luma + 1.772f * cb};
+                    skin[i] = skinWeight(zones, x, row, rgb);
+                }
+            });
+        }
+    }
     if (options.clarity > 0) {
         const float clarity = float(options.clarity * std::max(0.3, std::min(1.0, 1.0 - liftedSigma / 0.03)));
-        applyClarity(y, outWidth, outHeight, clarity, [](std::size_t, float) {});
+        std::vector<float> clarityScale;
+        if (!skin.empty()) {
+            clarityScale.resize(skin.size());
+            for (std::size_t i = 0; i < skin.size(); ++i) clarityScale[i] = 1.0f - 0.7f * skin[i];
+        }
+        applyClarity(y, outWidth, outHeight, clarity, [](std::size_t, float) {},
+                     clarityScale.empty() ? nullptr : &clarityScale);
     }
 
     // Luma sharpening with coring above the merged noise, less in shadows.
@@ -2856,7 +2998,8 @@ RgbImage renderYuvBurst(const std::vector<const YuvFrame *> &frames, const YuvOp
                 const float magnitude = std::abs(detail);
                 const float cored = magnitude <= coring ? 0.0f : (magnitude - coring) * (detail < 0 ? -1.0f : 1.0f);
                 const float shadow = std::max(0.3f, std::min(1.0f, (y[i] - 0.05f) / 0.2f));
-                y[i] += amount * shadow * cored;
+                const float onSkin = skin.empty() ? 1.0f : 1.0f - 0.4f * skin[i];
+                y[i] += amount * shadow * onSkin * cored;
             }
         });
     }

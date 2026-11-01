@@ -3,7 +3,7 @@
 
 import QtQuick 2.0
 import Sailfish.Silica 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 
 // Camera switching without focal lengths: flip between front and rear, and
 // on the rear side toggle the ultra-wide camera. Stacked vertically so the

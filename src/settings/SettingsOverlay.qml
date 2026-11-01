@@ -6,7 +6,7 @@
 import QtQuick 2.4
 import QtMultimedia 5.6
 import Sailfish.Silica 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 import Nemo.Configuration 1.0
 import "../capture"
 

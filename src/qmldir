@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-module com.vivid.camera
+module com.procam.camera
 plugin vividcameraplugin
 CaptureView 1.0 capture/CaptureView.qml
 GalleryView 1.0 gallery/GalleryView.qml

@@ -237,6 +237,8 @@ struct FinishStats {
     double shortGain = 1, longGain = 1;
     double highlightLevel = 0, keyLevel = 0;
     double faceLevel = -1; // linear, at the captured exposure; -1 without a face
+    double faceBright = -1; // its 90th percentile, the lit side
+    double faceOutput = -1; // the face's lit side after tone mapping (gamma)
     // Tone refinements applied: display black point (0 = none), white
     // stretch (1 = none), and the measured output extremes.
     double blackPoint = 0, whiteScale = 1, lowLevel = 0, highLevel = 0;

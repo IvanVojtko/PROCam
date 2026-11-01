@@ -459,7 +459,7 @@ int main(int argc, char **argv)
 
     const char *bridge_name = getenv("SFOS_CAMERA2_BRIDGE");
     if (!bridge_name || !*bridge_name) {
-        bridge_name = "libsfoscamera2.so";
+        bridge_name = "libprocamcamera2.so";
     }
 
     void *bridge = android_dlopen(bridge_name, RTLD_NOW);
@@ -515,7 +515,7 @@ int main(int argc, char **argv)
         if (!preview_ppm) {
             fprintf(stderr,
                     "The installed bridge does not support Camera2 preview. "
-                    "Install libsfoscamera2.so 0.10.0 or newer.\n");
+                    "Install libprocamcamera2.so 0.10.0 or newer.\n");
             return 14;
         }
 
@@ -660,7 +660,7 @@ int main(int argc, char **argv)
         if (!capture_jpeg) {
             fprintf(stderr,
                     "The installed bridge does not support direct JPEG capture. "
-                    "Install libsfoscamera2.so 0.6.0 or newer.\n");
+                    "Install libprocamcamera2.so 0.6.0 or newer.\n");
             return 14;
         }
 
@@ -800,7 +800,7 @@ int main(int argc, char **argv)
         if (!capture_jpeg) {
             fprintf(stderr,
                     "The installed bridge does not support direct JPEG capture. "
-                    "Install libsfoscamera2.so 0.6.0 or newer.\n");
+                    "Install libprocamcamera2.so 0.6.0 or newer.\n");
             return 14;
         }
 

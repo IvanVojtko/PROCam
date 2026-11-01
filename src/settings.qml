@@ -7,7 +7,7 @@ import QtQuick 2.0
 import QtMultimedia 5.6
 import Nemo.Configuration 1.0
 import "settings/SimpleMode.js" as SimpleMode
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 
 SettingsBase {
     property bool _normalizingCamera2Settings: false

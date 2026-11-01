@@ -31,7 +31,7 @@ mkdir -p "$output_dir"
 "$compiler" \
     -std=c11 -O2 -g -fPIC -fvisibility=hidden -pthread \
     -Wall -Wextra -Werror \
-    -shared -Wl,--no-undefined -Wl,--build-id=sha1 \
+    -shared -Wl,--no-undefined -Wl,--build-id=sha1 -Wl,-soname,libprocamcamera2.so \
     "$project_dir/android/camera2_bridge.c" \
     "$project_dir/android/camera2_common.c" \
     "$project_dir/android/raw_capture.c" \
@@ -39,6 +39,6 @@ mkdir -p "$output_dir"
     "$project_dir/android/jpeg_capture.c" \
     -I"$project_dir/android" \
     -lcamera2ndk -lmediandk -landroid -lm \
-    -o "$output_dir/libsfoscamera2.so"
+    -o "$output_dir/libprocamcamera2.so"
 
-echo "Built $output_dir/libsfoscamera2.so"
+echo "Built $output_dir/libprocamcamera2.so"

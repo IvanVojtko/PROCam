@@ -570,6 +570,8 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             p.insert(QStringLiteral("target_gain"), options.targetGain);
             p.insert(QStringLiteral("short_gain"), finishStats.shortGain);
             if (finishStats.faceLevel >= 0) p.insert(QStringLiteral("face_level"), finishStats.faceLevel);
+            if (finishStats.faceBright >= 0) p.insert(QStringLiteral("face_bright"), finishStats.faceBright);
+            if (finishStats.faceOutput >= 0) p.insert(QStringLiteral("face_output"), finishStats.faceOutput);
             if (options.blackPoint || options.whitePoint) {
                 p.insert(QStringLiteral("tone_levels"), QJsonArray{finishStats.lowLevel, finishStats.highLevel});
                 p.insert(QStringLiteral("black_point"), finishStats.blackPoint);

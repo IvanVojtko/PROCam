@@ -6,7 +6,7 @@ QMAKE_STRIP = :
 
 SUBDIRS = sailfish
 
-android_bridge.files = build/android/libsfoscamera2.so
+android_bridge.files = build/android/libprocamcamera2.so
 android_bridge.path = /usr/libexec/droid-hybris/system/lib64
 
 INSTALLS += android_bridge

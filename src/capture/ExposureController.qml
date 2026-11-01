@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 import QtQuick 2.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 import "ExposureMath.js" as ExposureMath
 
 Item {

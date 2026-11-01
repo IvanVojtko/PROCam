@@ -1235,6 +1235,68 @@ private slots:
         QVERIFY(std::abs(lumaStats(after, 0.5) - lumaStats(before, 0.5)) < 0.08 * lumaStats(before, 0.5));
     }
 
+    void yuvSkinKeepsSoftTexture()
+    {
+        // A selfie: two identical patches of textured skin, one of them a
+        // detected face. Clarity and sharpening boost the face's texture
+        // less; the other patch is rendered as without a face.
+        const int width = 640, height = 480;
+        auto inPatch = [](int x, int y) { return y >= 140 && y < 340 && ((x >= 80 && x < 240) || (x >= 400 && x < 560)); };
+        std::mt19937 textureRng(7);
+        std::normal_distribution<double> textureNoise(0.0, 9.0);
+        std::vector<double> texture(std::size_t(width / 2) * (height / 2));
+        for (double &t : texture) t = textureNoise(textureRng);
+        std::vector<YuvFrame> frames(4);
+        for (int f = 0; f < 4; ++f) {
+            std::mt19937 rng(80 + f);
+            std::normal_distribution<double> noise(0.0, 1.0);
+            YuvFrame &frame = frames[f];
+            frame.width = width;
+            frame.height = height;
+            frame.data.assign(std::size_t(width) * height + 2 * std::size_t(width / 2) * (height / 2), 128);
+            uint8_t *u = &frame.data[std::size_t(width) * height];
+            uint8_t *v = u + std::size_t(width / 2) * (height / 2);
+            for (int y = 0; y < height; ++y)
+                for (int x = 0; x < width; ++x) {
+                    // The same texture in both patches (pores, stubble).
+                    const int tx = (x >= 400 ? x - 320 : x) / 6, ty = y / 6;
+                    const double base = inPatch(x, y) ? 150 + texture[std::size_t(ty) * (width / 2) + tx] : 90;
+                    frame.data[std::size_t(y) * width + x] = uint8_t(std::max(0.0, std::min(255.0, base + noise(rng))));
+                    if (inPatch(x, y) && x % 2 == 0 && y % 2 == 0) {
+                        u[std::size_t(y / 2) * (width / 2) + x / 2] = 112; // skin: Cb < 0, Cr > 0
+                        v[std::size_t(y / 2) * (width / 2) + x / 2] = 150;
+                    }
+                }
+        }
+        std::vector<const YuvFrame *> pointers;
+        for (const YuvFrame &f : frames) pointers.push_back(&f);
+        YuvOptions options;
+        options.clarity = 0.4;
+        const RgbImage plain = renderYuvBurst(pointers, options, nullptr);
+        options.faces.push_back({{80.0f / width, 140.0f / height, 240.0f / width, 340.0f / height}});
+        const RgbImage withFace = renderYuvBurst(pointers, options, nullptr);
+        // Green channel's deviation from its 9x9 mean inside a patch.
+        auto textureOf = [&](const RgbImage &image, int x0) {
+            auto g = [&](int xx, int yy) { return double(image.rgb[(std::size_t(yy) * width + xx) * 3 + 1]); };
+            double sum = 0;
+            int n = 0;
+            for (int y = 170; y < 310; ++y)
+                for (int x = x0 + 30; x < x0 + 130; ++x, ++n) {
+                    double mean = 0;
+                    for (int dy = -4; dy <= 4; ++dy)
+                        for (int dx = -4; dx <= 4; ++dx) mean += g(x + dx, y + dy);
+                    const double d = g(x, y) - mean / 81;
+                    sum += d * d;
+                }
+            return std::sqrt(sum / n);
+        };
+        const double facePlain = textureOf(plain, 80), faceSoft = textureOf(withFace, 80);
+        const double otherPlain = textureOf(plain, 400), otherWithFace = textureOf(withFace, 400);
+        qInfo("skin texture: face %.2f -> %.2f, other patch %.2f -> %.2f", facePlain, faceSoft, otherPlain, otherWithFace);
+        QVERIFY(faceSoft < 0.9 * facePlain);
+        QVERIFY(std::abs(otherWithFace - otherPlain) < 0.03 * otherPlain);
+    }
+
     void yuvBurstReducesNoise()
     {
         // Front / ultra-wide cameras: display-referred 8-bit YUV frames with
@@ -1825,6 +1887,63 @@ private slots:
               lampWithout, lampWith, backlitWithout, backlitWith);
         QVERIFY(lampWith < lampWithout - 5 && lampWith <= 200);
         QVERIFY(backlitWith > backlitWithout + 10 && backlitWith >= 75); // 3 stops above the sky
+    }
+
+    void sunlitFaceKeepsColour()
+    {
+        // A small face half in sun in a dark forest (the fusion pyramid lets
+        // the shadow lift spill onto it): its lit side must not clip, and its
+        // skin is boosted less than the same colour elsewhere.
+        const int w = 512, h = 384;
+        Scene scene;
+        scene.width = w;
+        scene.height = h;
+        scene.rgb.resize(std::size_t(w) * h * 3);
+        auto inFace = [](int x, int y) { return x >= 230 && x < 290 && y >= 150 && y < 230; };
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                float v = y < 60 ? 0.3f : 0.012f; // sky, forest
+                if (inFace(x, y)) v = x < 260 ? 0.2f : 0.04f;
+                if (x >= 60 && x < 120 && y >= 250 && y < 330) v = 0.06f; // skin-coloured patch, no face
+                float *p = &scene.rgb[(std::size_t(y) * w + x) * 3];
+                const bool warm = inFace(x, y) || (x >= 60 && x < 120 && y >= 250);
+                p[0] = v * (warm ? 1.5f : 1.0f); p[1] = v; p[2] = v * (warm ? 0.75f : 1.0f);
+            }
+        const Planes frame = toPlanes(mosaicFrame(scene, 3, 0, 0, 1.0, 2e-5, 1e-7, 23), 1.0);
+        auto render = [&](bool withFace, FinishStats *stats, bool fusion = true) {
+            FinishOptions options = finishOptions(3);
+            options.targetGain = 3.0;
+            if (!fusion) options.localToneMapping = 0;
+            if (withFace) options.faces.push_back({{230.0f / w, 150.0f / h, 290.0f / w, 230.0f / h}});
+            return finish(frame, options, stats);
+        };
+        FinishStats plainStats, faceStats;
+        const RgbImage plain = render(false, &plainStats), withFace = render(true, &faceStats);
+        auto mean = [&](const RgbImage &image, int x0, int y0, int x1, int y1, int k) {
+            double sum = 0;
+            int n = 0;
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x, ++n) sum += image.rgb[(std::size_t(y) * w + x) * 3 + k];
+            return sum / n;
+        };
+        const double litPlain = mean(plain, 238, 170, 256, 210, 0), litFace = mean(withFace, 238, 170, 256, 210, 0);
+        const double shadeFace = mean(withFace, 268, 170, 284, 210, 1);
+        // Skin chroma (R - B) in the face's shaded half, at equal brightness
+        // (no fusion): the face gets less of the boost; the patch outside
+        // keeps all of it.
+        const RgbImage flatPlain = render(false, nullptr, false), flatFace = render(true, nullptr, false);
+        auto chroma = [&](const RgbImage &image, int x0, int y0, int x1, int y1) {
+            return mean(image, x0, y0, x1, y1, 0) - mean(image, x0, y0, x1, y1, 2);
+        };
+        const double skinFace = chroma(flatFace, 268, 170, 284, 210) / chroma(flatPlain, 268, 170, 284, 210);
+        const double skinPatch = chroma(flatFace, 70, 260, 110, 320) / chroma(flatPlain, 70, 260, 110, 320);
+        qInfo("sunlit face red: %.0f -> %.0f with face (gains %.2f/%.2f -> %.2f/%.2f); shade green %.0f; "
+              "skin chroma x%.2f in face, x%.2f outside",
+              litPlain, litFace, plainStats.shortGain, plainStats.longGain, faceStats.shortGain, faceStats.longGain,
+              shadeFace, skinFace, skinPatch);
+        QVERIFY(litPlain >= 250 && litFace < 245);
+        QVERIFY(shadeFace > 40);
+        QVERIFY(skinFace < 0.9 && std::abs(skinPatch - 1.0) < 0.01);
     }
 
     void toneEndsAddNoGrain()

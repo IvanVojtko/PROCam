@@ -12,7 +12,7 @@ import Nemo.Notifications 1.0
 import org.nemomobile.systemsettings 1.0
 import Sailfish.Silica 1.0
 import Sailfish.Policy 1.0
-import com.vivid.camera 1.0
+import com.procam.camera 1.0
 
 import "../settings"
 
