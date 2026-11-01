@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: 2026 ProCam Contributors
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Publishes a GitHub release with the RPM. Two ways to start it:
+#
+# * Actions -> Release -> Run workflow, with a version such as 1.4.0: the
+#   selected branch is tested, tagged v1.4.0, built and released.
+# * Push a tag yourself: git tag -a v1.4.0 -m "ProCam 1.4.0" && git push origin v1.4.0
+#
+# Tags with a suffix (v1.4.0-beta.1) are published as pre-releases.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, without the v (e.g. 1.4.0 or 1.4.0-beta.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      create_tag: ${{ steps.version.outputs.create_tag }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve tag
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="v${INPUT_VERSION#v}"
+            create_tag=true
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "::error::Tag ${tag} already exists; pick a new version."
+              exit 1
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+            create_tag=false
+          fi
+          if ! printf '%s' "${tag}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'${tag}' is not a version tag like v1.4.0 or v1.4.0-beta.1."
+            exit 1
+          fi
+          prerelease=false
+          case "${tag}" in *-*) prerelease=true ;; esac
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "create_tag=${create_tag}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${tag} (pre-release: ${prerelease})"
+
+  tests:
+    needs: prepare
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ github.sha }}
+
+  # Only once the tests pass, so a failed release leaves no tag behind.
+  tag:
+    name: Create tag
+    needs: [prepare, tests]
+    if: needs.prepare.outputs.create_tag == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Push tag
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "ProCam ${TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${TAG}"
+
+  rpm:
+    needs: [prepare, tests, tag]
+    # Runs after the tag job, or when it was skipped (a pushed tag).
+    if: ${{ !cancelled() && needs.tests.result == 'success' && needs.tag.result != 'failure' }}
+    uses: ./.github/workflows/rpm.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+      artifact: procam-release-rpm
+
+  publish:
+    name: Publish release
+    needs: [prepare, rpm]
+    if: ${{ !cancelled() && needs.rpm.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download RPM
+        uses: actions/download-artifact@v5
+        with:
+          name: procam-release-rpm
+          path: RPMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          RPM_NAME: ${{ needs.rpm.outputs.rpm_name }}
+        run: |
+          set -euo pipefail
+          cd RPMS
+          sha256sum ./*.rpm > SHA256SUMS
+          cat > notes.md <<EOF
+          Install on the Jolla Phone 2 (Sailfish OS 5.1, aarch64):
+
+          \`\`\`
+          devel-su pkcon install-local ${RPM_NAME}
+          \`\`\`
+
+          SHA-256 checksums are in \`SHA256SUMS\`.
+          EOF
+          flags=(--repo "${GITHUB_REPOSITORY}" --title "ProCam ${TAG}" --notes-file notes.md --generate-notes --verify-tag)
+          if [ "${PRERELEASE}" = "true" ]; then flags+=(--prerelease); fi
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" ./*.rpm SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${TAG}" ./*.rpm SHA256SUMS "${flags[@]}"
+          fi

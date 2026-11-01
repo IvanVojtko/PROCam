@@ -69,7 +69,7 @@ Item {
             var item
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures1"
+                "/opt/tests/procam/auto/captures1"
             ]
 
             tryCompare(captureModel, "count", fileNames1.length)
@@ -79,11 +79,11 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames1[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames1[i])
             }
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures2"
+                "/opt/tests/procam/auto/captures2"
             ]
 
 
@@ -94,11 +94,11 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames2[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames2[i])
             }
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures3"
+                "/opt/tests/procam/auto/captures3"
             ]
 
             tryCompare(captureModel, "count", fileNames3.length)
@@ -108,12 +108,12 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames3[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames3[i])
             }
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures1",
-                "/opt/tests/rawfish/auto/captures3"
+                "/opt/tests/procam/auto/captures1",
+                "/opt/tests/procam/auto/captures3"
             ]
 
             var fileNames = fileNames1.concat(fileNames3).sort(function (left, right) { return -left.slice(11).localeCompare(right.slice(11)) })
@@ -125,12 +125,12 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames[i])
             }
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures1",
-                "/opt/tests/rawfish/auto/captures2"
+                "/opt/tests/procam/auto/captures1",
+                "/opt/tests/procam/auto/captures2"
             ]
 
             fileNames = fileNames1.concat(fileNames2).sort(function (left, right) { return -left.slice(11).localeCompare(right.slice(11)) })
@@ -142,11 +142,11 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames[i])
             }
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures2"
+                "/opt/tests/procam/auto/captures2"
             ]
 
             tryCompare(captureModel, "count", fileNames2.length)
@@ -156,7 +156,7 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames2[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames2[i])
             }
         }
 
@@ -165,7 +165,7 @@ Item {
             var item
 
             captureModel.directories = [
-                "/opt/tests/rawfish/auto/captures1"
+                "/opt/tests/procam/auto/captures1"
             ]
 
             tryCompare(captureModel, "count", fileNames1.length)
@@ -175,10 +175,10 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames1[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames1[i])
             }
 
-            var url = "file:///opt/tests/rawfish/auto/captures1/20300000_000000.jpg"
+            var url = "file:///opt/tests/procam/auto/captures1/20300000_000000.jpg"
             var mimeType = "image/jpeg"
 
             captureModel.appendCapture(url, mimeType)
@@ -201,10 +201,10 @@ Item {
                 item = repeater.itemAt(i)
                 verify(item)
 
-                compare(item.url, "file:///opt/tests/rawfish/auto/" + fileNames1[i])
+                compare(item.url, "file:///opt/tests/procam/auto/" + fileNames1[i])
             }
 
-            url = "file:///opt/tests/rawfish/auto/captures1/RAWfish_20210514_160039.jpg"
+            url = "file:///opt/tests/procam/auto/captures1/ProCam_20210514_160039.jpg"
 
             captureModel.appendCapture(url, mimeType)
 

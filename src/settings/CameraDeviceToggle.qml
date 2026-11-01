@@ -27,7 +27,7 @@ Grid {
     readonly property bool _supportNotEnabled: !!model && model.length > 1 && labels.length === 0
     on_SupportNotEnabledChanged: {
         if (_supportNotEnabled)
-            console.warn("Device supports multiple back cameras, please define dconf /apps/rawfish/backCameraLabels")
+            console.warn("Device supports multiple back cameras, please define dconf /apps/procam/backCameraLabels")
     }
 
     Repeater {

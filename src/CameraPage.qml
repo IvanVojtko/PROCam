@@ -94,8 +94,11 @@ Page {
         height: page.height
         wrapMode: PagedView.NoWrap
 
+        // The viewfinder's horizontal swipe switches photo/video (Android
+        // style); the gallery opens from the thumbnail and swipes back.
         interactive: (!galleryLoader.item || !galleryLoader.item.positionLocked)
                      && !captureView.recording
+                     && page.galleryActive
         currentIndex: 1
         focus: true
 
@@ -150,6 +153,8 @@ Page {
 
                 visible: switcherView.moving || captureView.active
 
+                onGalleryRequested: switcherView.moveTo(0)
+
                 onLoaded: {
                     if (galleryLoader.source == "") {
                         galleryLoader.setSource(galleryView, { page: page })
@@ -170,14 +175,13 @@ Page {
                 Binding {
                     target: captureView.viewfinder
                     property: "y"
+                    // Both viewfinders fill the screen; only the slide
+                    // towards the gallery moves them.
                     value: captureView._camera2ViewfinderActive
                            ? captureView.camera2TopInset
                            : !captureView.isPortrait
                              ? captureView._viewfinderPosition
-                               + (page.orientation == Orientation.Landscape
-                                  ? captureView.viewfinderOffset : -captureView.viewfinderOffset)
-                             : (page.orientation == Orientation.Portrait ? captureView.viewfinderOffset
-                                                                         : -captureView.viewfinderOffset)
+                             : 0
                 }
             }
         }

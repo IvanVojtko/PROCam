@@ -13,5 +13,5 @@ SOURCES += raw16-to-ppm.c
 
 LIBS += -lm
 
-target.path = /usr/libexec/rawfish
+target.path = /usr/libexec/procam
 INSTALLS += target

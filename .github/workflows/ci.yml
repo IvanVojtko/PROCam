@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 ProCam Contributors
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Every push and pull request: host tests, then a test RPM (downloadable from
+# the run's artifacts for 14 days).
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSES/**'
+      - 'licenses/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  rpm:
+    needs: tests
+    uses: ./.github/workflows/rpm.yml

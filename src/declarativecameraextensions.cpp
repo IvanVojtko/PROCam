@@ -9,6 +9,8 @@
 #include "dnglensshading.h"
 #include "imageadjustments.h"
 #include "rawbracket.h"
+#include "rawpipeline.h"
+#include "rawpipelinemath.h"
 
 #include <QDir>
 #include <QDateTime>
@@ -57,6 +59,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/resource.h>
 #include <cstdlib>
 #include <initializer_list>
 #include <stdint.h>
@@ -81,6 +86,14 @@ DeclarativeCameraExtensions::DeclarativeCameraExtensions(QObject *parent)
 
 DeclarativeCameraExtensions::~DeclarativeCameraExtensions()
 {
+    // Bursts still queued are dropped with their frames; the running one
+    // finishes so it does not write into freed state.
+    if (m_burstWatcher) {
+        m_burstWatcher->disconnect(this);
+        if (m_burstWatcher->isRunning()) {
+            m_burstWatcher->waitForFinished();
+        }
+    }
     if (m_bracketCombineWatcher) {
         m_bracketCombineWatcher->disconnect(this);
         if (m_bracketCombineWatcher->isRunning()) {
@@ -109,7 +122,7 @@ static QString rawCaptureProbePath()
 {
     const QString override = QString::fromLocal8Bit(qgetenv("SFOS_CAMERA2_PROBE"));
     return override.isEmpty()
-            ? QStringLiteral("/usr/libexec/rawfish/sfos-camera2-probe")
+            ? QStringLiteral("/usr/libexec/procam/sfos-camera2-probe")
             : override;
 }
 
@@ -117,14 +130,15 @@ static QString rawFastJpegConverterPath()
 {
     const QString override = QString::fromLocal8Bit(qgetenv("SFOS_RAW16_JPEG_CONVERTER"));
     return override.isEmpty()
-            ? QStringLiteral("/usr/libexec/rawfish/sfos-raw16-to-jpeg")
+            ? QStringLiteral("/usr/libexec/procam/sfos-raw16-to-jpeg")
             : override;
 }
 
 static bool rawRenderEngineSupported(const QString &engine)
 {
     return engine == QLatin1String("internal")
-            || engine == QLatin1String("fastjpeg");
+            || engine == QLatin1String("fastjpeg")
+            || engine == QLatin1String("enhanced");
 }
 
 static bool rawCaptureFormatSupported(const QString &format)
@@ -169,7 +183,7 @@ static QStringList camera2OutputSizes(const QJsonObject &camera,
     return sizes;
 }
 
-static QString rawfishUserDeviceProfileDir()
+static QString procamUserDeviceProfileDir()
 {
     const QString dataPath = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     return dataPath.isEmpty()
@@ -177,38 +191,52 @@ static QString rawfishUserDeviceProfileDir()
             : QDir(dataPath).filePath(QStringLiteral("device-profiles"));
 }
 
-static QString rawfishGeneratedHalProfileFileName()
+// Lens shading lookup for RAW rendering, as in writeTiffDng(). Call on the
+// GUI thread (DeviceInfo).
+static RawPipeline::RenderSettings rawPipelineSettings()
+{
+    static const DeviceInfo deviceInfo;
+    RawPipeline::RenderSettings settings;
+    const QString profileDir = procamUserDeviceProfileDir();
+    if (!profileDir.isEmpty())
+        settings.calibrationDirs.append(QDir(profileDir).filePath(QStringLiteral("lens-shading")));
+    settings.calibrationDirs.append(QStringLiteral(DEPLOYMENT_PATH "calibration"));
+    settings.deviceModel = deviceInfo.prettyName();
+    return settings;
+}
+
+static QString procamGeneratedHalProfileFileName()
 {
     return QStringLiteral("generated-hal.json");
 }
 
-static QString rawfishOverrideHalProfileFileName()
+static QString procamOverrideHalProfileFileName()
 {
     return QStringLiteral("override-hal.json");
 }
 
-static QString rawfishGeneratedHalProfilePath()
+static QString procamGeneratedHalProfilePath()
 {
-    const QString dir = rawfishUserDeviceProfileDir();
+    const QString dir = procamUserDeviceProfileDir();
     return dir.isEmpty()
             ? QString()
-            : QDir(dir).filePath(rawfishGeneratedHalProfileFileName());
+            : QDir(dir).filePath(procamGeneratedHalProfileFileName());
 }
 
-static QString rawfishOverrideHalProfilePath()
+static QString procamOverrideHalProfilePath()
 {
-    const QString dir = rawfishUserDeviceProfileDir();
+    const QString dir = procamUserDeviceProfileDir();
     return dir.isEmpty()
             ? QString()
-            : QDir(dir).filePath(rawfishOverrideHalProfileFileName());
+            : QDir(dir).filePath(procamOverrideHalProfileFileName());
 }
 
-static QStringList rawfishOverrideHalProfilePaths()
+static QStringList procamOverrideHalProfilePaths()
 {
     QStringList paths;
-    const QString dir = rawfishUserDeviceProfileDir();
+    const QString dir = procamUserDeviceProfileDir();
     if (!dir.isEmpty()) {
-        const QString path = QDir(dir).filePath(rawfishOverrideHalProfileFileName());
+        const QString path = QDir(dir).filePath(procamOverrideHalProfileFileName());
         paths.append(path);
     }
     return paths;
@@ -234,10 +262,10 @@ static QJsonObject cameraLensObject(const QJsonObject &camera)
     return camera.value(QStringLiteral("lens")).toObject();
 }
 
-static QJsonObject rawfishOverrideObject(const QJsonObject &profile)
+static QJsonObject procamOverrideObject(const QJsonObject &profile)
 {
     return profile.value(QStringLiteral("overrides")).toObject()
-            .value(QStringLiteral("rawfish")).toObject();
+            .value(QStringLiteral("procam")).toObject();
 }
 
 static QJsonArray cameraIsoRange(const QJsonObject &camera)
@@ -502,10 +530,10 @@ static bool overrideProfileMatches(const QJsonObject &profile,
     return deviceProfileMatches(profile, camera, raw16Sizes, halMaxShutterNs);
 }
 
-static qint64 rawfishOverrideHalProfileMtime()
+static qint64 procamOverrideHalProfileMtime()
 {
     qint64 mtime = 0;
-    for (const QString &path : rawfishOverrideHalProfilePaths()) {
+    for (const QString &path : procamOverrideHalProfilePaths()) {
         const QFileInfo file(path);
         if (file.exists()) {
             mtime = qMax(mtime, file.lastModified().toMSecsSinceEpoch());
@@ -518,7 +546,7 @@ static bool writeGeneratedHalProfile(const QJsonObject &probe,
                                      QString *writtenPath,
                                      QString *error)
 {
-    const QString path = rawfishGeneratedHalProfilePath();
+    const QString path = procamGeneratedHalProfilePath();
     if (path.isEmpty()) {
         if (error) {
             *error = QStringLiteral("Qt config location is empty");
@@ -552,7 +580,7 @@ static bool writeGeneratedHalProfile(const QJsonObject &probe,
     QJsonObject config;
     config.insert(QStringLiteral("schema_version"), 1);
     config.insert(QStringLiteral("kind"),
-                  QStringLiteral("rawfish-device-config"));
+                  QStringLiteral("procam-device-config"));
     config.insert(QStringLiteral("source"), QStringLiteral("hal-probe"));
     config.insert(QStringLiteral("generated_at"),
                   QDateTime::currentDateTime().toString(Qt::ISODate));
@@ -607,13 +635,13 @@ static void appendDeviceProfileObject(QVector<QPair<QJsonObject, QString> > *pro
     }
 }
 
-static QVector<QPair<QJsonObject, QString> > rawfishDeviceProfiles()
+static QVector<QPair<QJsonObject, QString> > procamDeviceProfiles()
 {
     QVector<QPair<QJsonObject, QString> > profiles;
     qDebug() << "override-hal"
-             << "config_dir=" + rawfishUserDeviceProfileDir();
+             << "config_dir=" + procamUserDeviceProfileDir();
 
-    for (const QString &path : rawfishOverrideHalProfilePaths()) {
+    for (const QString &path : procamOverrideHalProfilePaths()) {
         const QFileInfo info(path);
         qDebug() << "override-hal"
                  << "path=" + path
@@ -692,12 +720,12 @@ static QVariantList camera2NoiseReductionValues(const QJsonObject &camera)
     return values;
 }
 
-static QString rawfishPicturesPath()
+static QString procamPicturesPath()
 {
     const QString picturesPath = QStandardPaths::writableLocation(
                 QStandardPaths::PicturesLocation);
     return (picturesPath.isEmpty() ? QDir::homePath() + QLatin1String("/Pictures")
-                                   : picturesPath) + QLatin1String("/RAWfish");
+                                   : picturesPath) + QLatin1String("/ProCam");
 }
 
 static bool readableImageExists(const QString &path, QString *error)
@@ -765,9 +793,9 @@ static void appendRawCaptureLog(const QString &message)
     if (picturesPath.isEmpty()) {
         picturesPath = QDir::homePath() + QLatin1String("/Pictures");
     }
-    const QString logDirectory = picturesPath + QLatin1String("/RAWfish");
+    const QString logDirectory = picturesPath + QLatin1String("/ProCam");
     QDir().mkpath(logDirectory);
-    QFile file(logDirectory + QLatin1String("/rawfish-capture.log"));
+    QFile file(logDirectory + QLatin1String("/procam-capture.log"));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return;
     }
@@ -862,7 +890,7 @@ bool DeclarativeCameraExtensions::rawImageCaptureAvailable() const
 
 QString DeclarativeCameraExtensions::camera2DeviceConfigDir() const
 {
-    return rawfishUserDeviceProfileDir();
+    return procamUserDeviceProfileDir();
 }
 
 QString DeclarativeCameraExtensions::ensureCamera2GeneratedHalConfig(
@@ -875,7 +903,7 @@ QString DeclarativeCameraExtensions::ensureCamera2GeneratedHalConfig(
         appendRawCaptureLog(message);
         return message;
     };
-    const QString path = rawfishGeneratedHalProfilePath();
+    const QString path = procamGeneratedHalProfilePath();
     if (path.isEmpty()) {
         return fail(QStringLiteral("Qt application data location is empty"));
     }
@@ -945,7 +973,7 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
 {
     const QString effectiveCameraId = cameraId.isEmpty()
             ? QStringLiteral("0") : cameraId;
-    const qint64 overrideProfileMtime = rawfishOverrideHalProfileMtime();
+    const qint64 overrideProfileMtime = procamOverrideHalProfileMtime();
     if (m_camera2CapabilitiesLoaded &&
             m_camera2CapabilitiesCameraId == effectiveCameraId &&
             m_camera2OverrideProfileMtime == overrideProfileMtime) {
@@ -1026,7 +1054,7 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
     if (matchShutterRange.count() >= 2) {
         matchHalMaxShutterNs = qint64(matchShutterRange.at(1).toDouble());
     }
-    const QVector<QPair<QJsonObject, QString> > profiles = rawfishDeviceProfiles();
+    const QVector<QPair<QJsonObject, QString> > profiles = procamDeviceProfiles();
     for (const QPair<QJsonObject, QString> &candidate : profiles) {
         if (overrideProfileMatches(candidate.first, selectedCamera,
                                    matchRaw16Sizes, matchHalMaxShutterNs,
@@ -1096,7 +1124,7 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
     }
     m_camera2Scenes = camera2NamedValues(selectedCamera, QStringLiteral("scene"),
                                          QStringLiteral("modes"));
-    const QJsonArray excludedScenes = rawfishOverrideObject(m_camera2DeviceProfile)
+    const QJsonArray excludedScenes = procamOverrideObject(m_camera2DeviceProfile)
             .value(QStringLiteral("scene_exclude")).toArray();
     for (const QJsonValue &value : excludedScenes) {
         if (!value.isString()) {
@@ -1182,8 +1210,11 @@ QSize DeclarativeCameraExtensions::camera2PreferredPreviewSize(const QString &ca
     if (camera.value(QStringLiteral("status")).toString() != QLatin1String("ok") ||
             m_camera2SelectedCamera.value(QStringLiteral("id")).toString() != id)
         return QSize();
+    // 1440x1080: sharper than 1280x960 now that preview frames travel as
+    // YUV, and still within Camera2's guaranteed PREVIEW size, so the HAL
+    // keeps the RAW stream alongside it.
     return preferredPreviewSize(camera2OutputSizes(camera, QStringLiteral("preview_outputs")),
-                                m_camera2PreviewSizes);
+                                m_camera2PreviewSizes, QSize(1440, 1080));
 }
 
 int DeclarativeCameraExtensions::camera2PreviewOrientation(const QString &cameraId,
@@ -1196,13 +1227,19 @@ int DeclarativeCameraExtensions::camera2PreviewOrientation(const QString &camera
     if (camera.value(QStringLiteral("status")).toString() != QLatin1String("ok") ||
             m_camera2SelectedCamera.value(QStringLiteral("id")).toString() != id)
         return fallback;
-    const QJsonValue value = rawfishOverrideObject(m_camera2DeviceProfile)
+    const QJsonValue value = procamOverrideObject(m_camera2DeviceProfile)
             .value(QStringLiteral("preview_orientation"));
     if (value.isDouble()) {
         const double degrees = value.toDouble();
         if (degrees == 0 || degrees == 90 || degrees == 180 || degrees == 270)
             return int(degrees);
     }
+    // SENSOR_ORIENTATION: clockwise rotation that makes the image upright
+    // (front cameras are usually mounted the other way round, 270).
+    const int sensor = camera.value(QStringLiteral("lens")).toObject()
+            .value(QStringLiteral("sensor_orientation")).toInt(-1);
+    if (sensor == 0 || sensor == 90 || sensor == 180 || sensor == 270)
+        return sensor;
     return fallback;
 }
 
@@ -1216,9 +1253,102 @@ bool DeclarativeCameraExtensions::camera2PreviewMirror(const QString &cameraId,
     if (camera.value(QStringLiteral("status")).toString() != QLatin1String("ok") ||
             m_camera2SelectedCamera.value(QStringLiteral("id")).toString() != id)
         return fallback;
-    const QJsonValue value = rawfishOverrideObject(m_camera2DeviceProfile)
+    const QJsonValue value = procamOverrideObject(m_camera2DeviceProfile)
             .value(QStringLiteral("preview_mirror"));
-    return value.isBool() ? value.toBool() : fallback;
+    if (value.isBool())
+        return value.toBool();
+    // Front cameras preview mirrored, like every phone camera app.
+    const QString facing = camera.value(QStringLiteral("lens")).toObject()
+            .value(QStringLiteral("facing")).toString();
+    if (facing == QLatin1String("front"))
+        return true;
+    if (facing == QLatin1String("back"))
+        return false;
+    return fallback;
+}
+
+QString DeclarativeCameraExtensions::camera2LensFacing(const QString &cameraId)
+{
+    if (m_camera2ProbeJson.isEmpty() && !loadCamera2Capabilities(cameraId))
+        return QStringLiteral("unknown");
+    const QJsonObject camera = camera2ProbeCamera(m_camera2ProbeJson, cameraId);
+    if (camera.value(QStringLiteral("id")).toString() != cameraId)
+        return QStringLiteral("unknown");
+    const QString facing = camera.value(QStringLiteral("lens")).toObject()
+            .value(QStringLiteral("facing")).toString();
+    return facing.isEmpty() ? QStringLiteral("unknown") : facing;
+}
+
+QVariantMap DeclarativeCameraExtensions::camera2CameraRoles()
+{
+    QVariantMap roles;
+    roles.insert(QStringLiteral("front"), QString());
+    roles.insert(QStringLiteral("main"), QString());
+    roles.insert(QStringLiteral("ultrawide"), QString());
+    if (m_camera2ProbeJson.isEmpty() && !loadCamera2Capabilities(QString()))
+        return roles;
+
+    struct Lens {
+        QString id;
+        QString facing;
+        bool raw = false;
+        double focal = 0, sensorWidth = 0;
+        // Horizontal field of view in radians, 0 when unknown.
+        double fov() const
+        {
+            return focal > 0 && sensorWidth > 0 ? 2 * std::atan(sensorWidth / (2 * focal)) : 0;
+        }
+    };
+    QVector<Lens> back;
+    for (const QJsonValue &value : camera2ProbeCameras(m_camera2ProbeJson)) {
+        const QJsonObject camera = value.toObject();
+        if (camera.value(QStringLiteral("status")).toString() != QLatin1String("ok"))
+            continue;
+        const QJsonObject lens = camera.value(QStringLiteral("lens")).toObject();
+        Lens entry;
+        entry.id = camera.value(QStringLiteral("id")).toString();
+        entry.facing = lens.value(QStringLiteral("facing")).toString();
+        entry.raw = !camera.value(QStringLiteral("raw_outputs")).toArray().isEmpty();
+        entry.focal = lens.value(QStringLiteral("focal_length_mm")).toDouble();
+        entry.sensorWidth = lens.value(QStringLiteral("sensor_physical_size_mm")).toArray().at(0).toDouble();
+        if (entry.id.isEmpty())
+            continue;
+        if (entry.facing == QLatin1String("front")) {
+            if (roles.value(QStringLiteral("front")).toString().isEmpty())
+                roles.insert(QStringLiteral("front"), entry.id);
+        } else if (entry.facing == QLatin1String("back")) {
+            back.append(entry);
+        }
+    }
+    if (back.isEmpty())
+        return roles; // older bridge without facing: callers fall back
+
+    // Main: the back camera with RAW output (the primary sensor), else the first.
+    const Lens *main = &back.first();
+    for (const Lens &lens : back) {
+        if (lens.raw) {
+            main = &lens;
+            break;
+        }
+    }
+    roles.insert(QStringLiteral("main"), main->id);
+    // Ultra-wide: the widest other back camera, clearly wider than the main
+    // one. Without sensor sizes, a much shorter focal length.
+    const Lens *wide = nullptr;
+    for (const Lens &lens : back) {
+        if (lens.id == main->id)
+            continue;
+        const bool wider = main->fov() > 0 && lens.fov() > 0
+                ? lens.fov() > main->fov() * 1.15
+                : lens.focal > 0 && main->focal > 0 && lens.focal < main->focal * 0.75;
+        if (!wider)
+            continue;
+        if (!wide || (lens.fov() > 0 && wide->fov() > 0 ? lens.fov() > wide->fov() : lens.focal < wide->focal))
+            wide = &lens;
+    }
+    if (wide)
+        roles.insert(QStringLiteral("ultrawide"), wide->id);
+    return roles;
 }
 
 QVariantMap DeclarativeCameraExtensions::camera2SimpleModeOverrides(const QString &cameraId)
@@ -1230,7 +1360,7 @@ QVariantMap DeclarativeCameraExtensions::camera2SimpleModeOverrides(const QStrin
                 .value(QStringLiteral("status")).toString() != QLatin1String("ok")) {
         return QVariantMap();
     }
-    return rawfishOverrideObject(m_camera2DeviceProfile)
+    return procamOverrideObject(m_camera2DeviceProfile)
             .value(QStringLiteral("simple_mode")).toObject().toVariantMap();
 }
 
@@ -1390,6 +1520,116 @@ QStringList DeclarativeCameraExtensions::camera2BracketModel(
     return model;
 }
 
+bool DeclarativeCameraExtensions::camera2BurstSupported(const QString &cameraId)
+{
+    return loadCamera2Capabilities(cameraId) && m_camera2ManualBracketingSupported
+            && cameraExposureObject(m_camera2SelectedCamera).value(QStringLiteral("manual_supported")).toBool()
+            && cameraExposureObject(m_camera2SelectedCamera).value(QStringLiteral("result_exposure_supported")).toBool()
+            && !camera2BurstRawSize(cameraId, QString()).isEmpty();
+}
+
+QString DeclarativeCameraExtensions::camera2BurstFormat(const QString &cameraId)
+{
+    if (!loadCamera2Capabilities(cameraId)) return QString();
+    if (!m_camera2Raw16Sizes.isEmpty())
+        return camera2BurstRawSize(cameraId, QString()).isEmpty() ? QString() : QStringLiteral("raw16");
+    return camera2BurstRawSize(cameraId, QString()).isEmpty() ? QString() : QStringLiteral("yuv");
+}
+
+QString DeclarativeCameraExtensions::camera2BurstRawSize(const QString &cameraId,
+                                                        const QString &preferred)
+{
+    if (!loadCamera2Capabilities(cameraId)) return QString();
+    if (m_camera2Raw16Sizes.isEmpty()) {
+        // No RAW: a YUV burst at up to 16 MP in the aspect ratio of the
+        // largest output (the sensor's), e.g. the binned mode of a quad-Bayer
+        // front sensor rather than its upscaled full resolution.
+        qint64 largestPixels = 0;
+        double aspect = 4.0 / 3.0;
+        for (const QString &size : m_camera2PreviewSizes) {
+            const QStringList parts = size.split(QLatin1Char('x'));
+            const qint64 pixels = parts.size() == 2 ? qint64(parts[0].toInt()) * parts[1].toInt() : 0;
+            if (pixels > largestPixels) {
+                largestPixels = pixels;
+                aspect = double(parts[0].toInt()) / std::max(1, parts[1].toInt());
+            }
+        }
+        QString best;
+        qint64 bestPixels = 0;
+        for (const QString &size : m_camera2PreviewSizes) {
+            const QStringList parts = size.split(QLatin1Char('x'));
+            if (parts.size() != 2) continue;
+            const int width = parts[0].toInt(), height = parts[1].toInt();
+            const qint64 pixels = qint64(width) * height;
+            if (height <= 0 || pixels > qint64(4096) * 4096 || pixels <= bestPixels
+                    || std::abs(double(width) / height - aspect) > 0.02)
+                continue;
+            best = size;
+            bestPixels = pixels;
+        }
+        return best;
+    }
+    if (camera2WarmRawCaptureSupported(cameraId, preferred)) return preferred;
+    QString best;
+    qint64 bestPixels = 0;
+    for (const QString &size : m_camera2Raw16Sizes) {
+        const QStringList parts = size.split(QLatin1Char('x'));
+        const qint64 pixels = parts.size() == 2 ? qint64(parts[0].toInt()) * parts[1].toInt() : 0;
+        if (pixels > bestPixels && camera2WarmRawCaptureSupported(cameraId, size)) {
+            best = size;
+            bestPixels = pixels;
+        }
+    }
+    return best;
+}
+
+void DeclarativeCameraExtensions::logCaptureEvent(const QString &message)
+{
+    appendRawCaptureLog(QStringLiteral("qml ") + message);
+}
+
+QVariantMap DeclarativeCameraExtensions::camera2BurstPlan(
+        const QString &cameraId, const QString &meteredShutterNs, int meteredIso,
+        const QVariantList &histogram, bool night, const QVariantMap &scene)
+{
+    QVariantMap result;
+    if (!loadCamera2Capabilities(cameraId)) return result;
+    const QJsonArray range = cameraExposureObject(m_camera2SelectedCamera)
+            .value(QStringLiteral("shutter_ns_range")).toArray();
+    if (range.size() != 2 || range[0].toDouble() <= 0) return result;
+    // Share of preview pixels in the top histogram bin, worst channel.
+    double clipped = 0;
+    for (const QString &channel : {QStringLiteral("r"), QStringLiteral("g"), QStringLiteral("b")}) {
+        double total = 0;
+        for (const QVariant &bin : histogram) total += bin.toMap().value(channel).toDouble();
+        if (total > 0) clipped = std::max(clipped, histogram.last().toMap().value(channel).toDouble() / total);
+    }
+    qint64 maxShutter = qint64(range[1].toDouble());
+    if (m_camera2MaxShutterNs > 0) maxShutter = qMin(maxShutter, m_camera2MaxShutterNs);
+    // YUV frames have the tone curve applied: equal exposures, no headroom.
+    const bool yuv = m_camera2Raw16Sizes.isEmpty();
+    RawPipeline::BurstScene burstScene;
+    burstScene.motion = scene.value(QStringLiteral("motion"), -1.0).toDouble();
+    burstScene.subjectMotion = scene.value(QStringLiteral("subjectMotion"), 0.0).toDouble();
+    burstScene.faceLuma = scene.value(QStringLiteral("faceLuma"), -1.0).toDouble();
+    burstScene.faceClipped = scene.value(QStringLiteral("faceClipped"), 0.0).toDouble();
+    const RawPipeline::BurstPlan plan = RawPipeline::planBurst(
+                meteredShutterNs.toLongLong(), meteredIso, clipped, qint64(range[0].toDouble()),
+                maxShutter, int(camera2IsoMin(m_camera2SelectedCamera)),
+                // Night mode: 16 frames (a stop cleaner); a normal burst
+                // gains little beyond 8 indoors and would only take longer.
+                int(camera2IsoMax(m_camera2SelectedCamera)), night ? 16 : 8, yuv, night, burstScene);
+    if (plan.frames < 2) return result;
+    result.insert(QStringLiteral("frames"), plan.frames);
+    result.insert(QStringLiteral("shutterNs"), QString::number(plan.exposureNs));
+    result.insert(QStringLiteral("iso"), plan.iso);
+    result.insert(QStringLiteral("targetGain"), plan.targetGain);
+    result.insert(QStringLiteral("underexposureEv"), plan.underexposureEv);
+    result.insert(QStringLiteral("clippedFraction"), clipped);
+    result.insert(QStringLiteral("night"), night);
+    return result;
+}
+
 QString DeclarativeCameraExtensions::camera2MaxShutterNs(const QString &cameraId)
 {
     return loadCamera2Capabilities(cameraId) && m_camera2MaxShutterNs > 0
@@ -1472,7 +1712,7 @@ QStringList DeclarativeCameraExtensions::rawCaptureExposureModel(
         return defaults;
     }
     return stringListFromJsonArray(
-                rawfishOverrideObject(m_camera2DeviceProfile)
+                procamOverrideObject(m_camera2DeviceProfile)
                 .value(QStringLiteral("exposure_multipliers")).toArray(),
                 defaults);
 }
@@ -1485,7 +1725,7 @@ QVariantList DeclarativeCameraExtensions::rawCaptureRotationModel(
         return defaults;
     }
 
-    const QJsonObject rotationValues = rawfishOverrideObject(m_camera2DeviceProfile)
+    const QJsonObject rotationValues = procamOverrideObject(m_camera2DeviceProfile)
             .value(QStringLiteral("rotation_values")).toObject();
     QJsonArray values = rotationValues.value(mode).toArray();
     if (values.isEmpty()) {
@@ -1502,7 +1742,7 @@ QVariantList DeclarativeCameraExtensions::rawCaptureFocusTimeoutModel(
         return defaults;
     }
     return intListFromJsonArray(
-                rawfishOverrideObject(m_camera2DeviceProfile)
+                procamOverrideObject(m_camera2DeviceProfile)
                 .value(QStringLiteral("af_wait_times")).toArray(),
                 defaults);
 }
@@ -1547,7 +1787,19 @@ QString DeclarativeCameraExtensions::camera2PreferredCaptureSize(
     if (!size.isEmpty() && sizes.contains(size)) {
         return size;
     }
-    return sizes.isEmpty() ? QString() : sizes.first();
+    // The largest size up to 16 MP: beyond that, quad-Bayer sensors only give
+    // the HAL's remosaicked output, which is softer than the binned frame.
+    QString best;
+    qint64 bestPixels = 0;
+    for (const QString &candidate : sizes) {
+        const QStringList parts = candidate.split(QLatin1Char('x'));
+        const qint64 pixels = parts.size() == 2 ? qint64(parts[0].toInt()) * parts[1].toInt() : 0;
+        if (pixels > bestPixels && pixels <= qint64(4096) * 4096) {
+            best = candidate;
+            bestPixels = pixels;
+        }
+    }
+    return !best.isEmpty() ? best : sizes.isEmpty() ? QString() : sizes.first();
 }
 
 QString DeclarativeCameraExtensions::camera2WarmCaptureSize(const QString &cameraId)
@@ -1564,6 +1816,40 @@ QString DeclarativeCameraExtensions::camera2WarmCaptureSize(const QString &camer
         return size;
     }
     return camera2PreferredCaptureSize(cameraId, QStringLiteral("jpeg"));
+}
+
+bool DeclarativeCameraExtensions::camera2WarmJpegCaptureSupported(const QString &cameraId,
+                                                                  const QString &size)
+{
+    if (!loadCamera2Capabilities(cameraId) || !m_camera2JpegSizes.contains(size)) {
+        return false;
+    }
+    const QString pinned = m_camera2DeviceProfile.value(QStringLiteral("overrides")).toObject()
+            .value(QStringLiteral("warm_capture_size")).toString();
+    if (!pinned.isEmpty()) {
+        return size == pinned;
+    }
+    const QStringList parts = size.split(QLatin1Char('x'));
+    return parts.size() == 2
+            && qint64(parts[0].toInt()) * parts[1].toInt() <= qint64(4096) * 4096;
+}
+
+bool DeclarativeCameraExtensions::camera2WarmRawCaptureSupported(const QString &cameraId,
+                                                                 const QString &size)
+{
+    if (!loadCamera2Capabilities(cameraId) || !m_camera2Raw16Sizes.contains(size)) {
+        return false;
+    }
+    const QString pinned = m_camera2DeviceProfile.value(QStringLiteral("overrides")).toObject()
+            .value(QStringLiteral("warm_raw_capture_size")).toString();
+    if (!pinned.isEmpty()) {
+        return size == pinned;
+    }
+    // Up to 16 MP: larger RAW16 frames make the preview session and bursts
+    // too heavy. The bridge drops the RAW stream if the HAL refuses it.
+    const QStringList parts = size.split(QLatin1Char('x'));
+    return parts.size() == 2
+            && qint64(parts[0].toInt()) * parts[1].toInt() <= qint64(4096) * 4096;
 }
 
 QString DeclarativeCameraExtensions::preferredCamera2CameraId(const QString &cameraId)
@@ -1634,7 +1920,7 @@ QString DeclarativeCameraExtensions::exportCamera2CompatibilityReport(
                   camera2CompatibilityLevel(cameraId));
     report.insert(QStringLiteral("compatibility_summary"),
                   camera2CompatibilitySummary(cameraId));
-    report.insert(QStringLiteral("rawfish_probe_path"), rawCaptureProbePath());
+    report.insert(QStringLiteral("procam_probe_path"), rawCaptureProbePath());
     report.insert(QStringLiteral("helper_installed"), rawImageCaptureAvailable());
     report.insert(QStringLiteral("probe_valid"), m_camera2CapabilitiesValid);
     report.insert(QStringLiteral("selected_camera"), m_camera2SelectedCamera);
@@ -1652,10 +1938,10 @@ QString DeclarativeCameraExtensions::exportCamera2CompatibilityReport(
                   ? QJsonDocument::fromJson(m_camera2ProbeJson).object()
                   : QJsonObject());
 
-    QDir directory(rawfishPicturesPath());
+    QDir directory(procamPicturesPath());
     directory.mkpath(QStringLiteral("."));
     const QString path = directory.filePath(QStringLiteral(
-        "RAWfish_camera2_compatibility_%1.json").arg(
+        "ProCam_camera2_compatibility_%1.json").arg(
         QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"))));
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -1693,12 +1979,13 @@ void DeclarativeCameraExtensions::setCaptureMetadata(const QVariantMap &metadata
 }
 
 void DeclarativeCameraExtensions::setNextCaptureBracketMetadata(
-        int index, int count, qreal ev, const QString &baseShutterNs)
+        int index, int count, qreal ev, const QString &baseShutterNs, bool burst)
 {
-    if (index == 0 && count == 2 && !m_rawCaptureProcess
+    if (index == 0 && count >= 2 && !m_rawCaptureProcess
             && !m_rawRenderWatcher && !m_bracketCombineWatcher) m_rawBracketCancelled = false;
     m_bracketIndex = index;
     m_bracketCount = count;
+    m_bracketBurst = burst && count >= 2;
     m_bracketEv = ev;
     m_bracketBaseShutterNs = baseShutterNs;
     if (index >= 0 && count > 0) {
@@ -1706,6 +1993,7 @@ void DeclarativeCameraExtensions::setNextCaptureBracketMetadata(
         m_captureMetadata.insert(QStringLiteral("bracket_count"), count);
         m_captureMetadata.insert(QStringLiteral("bracket_ev"), ev);
         m_captureMetadata.insert(QStringLiteral("bracket_base_shutter_ns"), baseShutterNs);
+        if (m_bracketBurst) m_captureMetadata.insert(QStringLiteral("burst"), true);
     }
 
 }
@@ -1758,7 +2046,7 @@ bool DeclarativeCameraExtensions::captureRawImage(const QString &targetPath, con
     loadCamera2Capabilities(cameraId);
 
     m_rawCaptureDirectory.reset(new QTemporaryDir(
-                QDir::tempPath() + QLatin1String("/rawfish-raw-XXXXXX")));
+                QDir::tempPath() + QLatin1String("/procam-raw-XXXXXX")));
     if (!m_rawCaptureDirectory->isValid()) {
         clearRawImageCapture();
         emit rawImageCaptureFailed(QStringLiteral("Could not create temporary RAW capture directory"));
@@ -2007,6 +2295,16 @@ bool DeclarativeCameraExtensions::processRawImage(
     m_rawCaptureExposure = exposure.isEmpty() ? QStringLiteral("1.0") : exposure;
     m_rawCaptureSaveFormat = rawSaveFormat.isEmpty()
             ? QStringLiteral("none") : rawSaveFormat;
+    // A burst keeps the first frame's RAW/DNG, not one file per frame,
+    // unless every frame is asked for: then each one as RAW + JSON (frame 0
+    // also as DNG if chosen).
+    if (m_bracketBurst && m_keepBurstFrames) {
+        const bool dng = m_rawCaptureSaveFormat == QLatin1String("dng")
+                || m_rawCaptureSaveFormat == QLatin1String("both");
+        m_rawCaptureSaveFormat = dng && m_bracketIndex == 0 ? QStringLiteral("both") : QStringLiteral("raw16");
+    } else if (m_bracketBurst && m_bracketIndex > 0) {
+        m_rawCaptureSaveFormat = QStringLiteral("none");
+    }
     m_rawRenderEngine = rawRenderEngineSupported(rawRenderEngine)
             ? rawRenderEngine : QStringLiteral("internal");
     m_rawCaptureProgressiveJpeg = progressiveJpeg;
@@ -2031,42 +2329,25 @@ bool DeclarativeCameraExtensions::processRawImage(
         emit rawImageCaptureFailed(error);
         return false;
     }
-    if (m_bracketCount == 2) return stageRawBracketFrame();
-    if (!(m_rawRenderEngine == QLatin1String("fastjpeg")
-            ? renderRawImageWithFastJpegConverter() : renderRawImage())) {
-        const QString error = m_rawCaptureErrors.isEmpty()
-                ? QStringLiteral("RAW image conversion failed")
-                : m_rawCaptureErrors;
-        clearRawImageCapture();
-        emit rawImageCaptureFailed(error);
-        return false;
-    }
-    QString imageError;
-    if (!readableImageExists(localTargetPath, &imageError)) {
-        clearRawImageCapture();
-        emit rawImageCaptureFailed(imageError);
-        return false;
-    }
-    if (!copyJsonSidecar(m_rawCapturePrefix + QLatin1String(".json"),
-                         localTargetPath)) {
-        const QString error = m_rawCaptureErrors.isEmpty()
-                ? QStringLiteral("Could not save RAW metadata sidecar")
-                : m_rawCaptureErrors;
-        clearRawImageCapture();
-        emit rawImageCaptureFailed(error);
-        return false;
-    }
-    QString exifError;
-    if (!ExifUtils::writeJpegExifFromJsonFile(localTargetPath,
-                                              jsonSidecarPath(localTargetPath),
-                                              &exifError)) {
-        clearRawImageCapture();
-        emit rawImageCaptureFailed(exifError);
-        return false;
-    }
+    if (m_bracketCount >= 2) return stageRawBracketFrame();
+    // Render off the GUI thread; finishRawImageRender() completes the capture.
+    return startRawImageRender();
+}
 
-    clearRawImageCapture();
-    emit rawImageCaptured(localTargetPath, QStringLiteral("image/jpeg"));
+bool DeclarativeCameraExtensions::startRawImageRender()
+{
+    const RawPipeline::RenderSettings settings = rawPipelineSettings();
+    m_rawRenderStart = m_rawCaptureTimer.elapsed();
+    m_rawRenderWatcher.reset(new QFutureWatcher<bool>);
+    connect(m_rawRenderWatcher.data(), &QFutureWatcher<bool>::finished,
+            this, &DeclarativeCameraExtensions::finishRawImageRender);
+    m_rawRenderWatcher->setFuture(QtConcurrent::run([this, settings]() {
+        if (m_rawRenderEngine == QLatin1String("fastjpeg"))
+            return renderRawImageWithFastJpegConverter();
+        if (m_rawRenderEngine == QLatin1String("enhanced"))
+            return renderRawImageEnhanced(settings);
+        return renderRawImage();
+    }));
     return true;
 }
 
@@ -2117,6 +2398,78 @@ bool DeclarativeCameraExtensions::combineRawBracket(
         return true;
     }));
     return true;
+}
+
+bool DeclarativeCameraExtensions::combineRawBurst(
+        const QString &targetPath, const QVariantList &sourcePaths,
+        int jpegQuality, qreal targetGain)
+{
+    // Queued: the capture is complete once its frames are staged, so the
+    // next photo can be taken while earlier bursts are still merging.
+    QStringList paths;
+    for (const QVariant &path : sourcePaths) {
+        if (!path.toString().isEmpty()) paths.append(path.toString());
+    }
+    if (targetPath.isEmpty() || paths.size() < 2) {
+        emit rawImageCaptureFailed(QStringLiteral("Burst merge target is incomplete"));
+        return false;
+    }
+    BurstJob job;
+    job.target = targetPath;
+    job.sources = paths;
+    job.quality = qBound(1, jpegQuality, 100);
+    job.settings = rawPipelineSettings();
+    job.settings.targetGain = std::isfinite(targetGain) && targetGain > 0 ? targetGain : 1.0;
+    job.directory = QSharedPointer<QTemporaryDir>(m_rawBracketDirectory.take());
+    m_burstJobs.append(job);
+    emit pendingRendersChanged();
+    startNextBurstRender();
+    return true;
+}
+
+int DeclarativeCameraExtensions::pendingRenders() const
+{
+    return m_burstJobs.size();
+}
+
+void DeclarativeCameraExtensions::startNextBurstRender()
+{
+    if (m_burstWatcher || m_burstJobs.isEmpty()) return;
+    const BurstJob job = m_burstJobs.first();
+    m_burstWatcher.reset(new QFutureWatcher<QString>);
+    connect(m_burstWatcher.data(), &QFutureWatcher<QString>::finished,
+            this, &DeclarativeCameraExtensions::finishBurstRender);
+    m_burstPool.setMaxThreadCount(1);
+    m_burstWatcher->setFuture(QtConcurrent::run(&m_burstPool, [job]() {
+        // Background merges must not stall the viewfinder or the next
+        // capture: lower priority for this thread and the workers it starts
+        // (Linux threads inherit their creator's nice value).
+        setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 5);
+        QString error;
+        if (!RawPipeline::renderBurst(job.target, job.sources, job.quality, job.settings, &error))
+            return error.isEmpty() ? QStringLiteral("Burst merge failed") : error;
+        if (!ExifUtils::writeJpegExifFromJsonFile(job.target, jsonSidecarPath(job.target), &error))
+            return error.isEmpty() ? QStringLiteral("Could not write photo metadata") : error;
+        return QString();
+    }));
+}
+
+void DeclarativeCameraExtensions::finishBurstRender()
+{
+    QFutureWatcher<QString> *watcher = m_burstWatcher.take();
+    const QString error = watcher ? watcher->result() : QStringLiteral("Burst merge failed");
+    if (watcher) watcher->deleteLater();
+    if (m_burstJobs.isEmpty()) return;
+    const BurstJob job = m_burstJobs.takeFirst(); // releasing it removes the staged frames
+    emit pendingRendersChanged();
+    if (error.isEmpty()) {
+        emit burstRendered(job.target);
+    } else {
+        QFile::remove(job.target);
+        QFile::remove(jsonSidecarPath(job.target));
+        emit burstRenderFailed(error);
+    }
+    startNextBurstRender();
 }
 
 void DeclarativeCameraExtensions::finishRawImageCapture(int exitCode, QProcess::ExitStatus exitStatus)
@@ -2181,51 +2534,50 @@ void DeclarativeCameraExtensions::finishRawImageCapture(int exitCode, QProcess::
             emit rawImageCaptureFailed(error);
             return;
         }
+        // The frame is captured: give feedback now, rotate/adjust/re-encode
+        // (seconds for 50 MP) off the GUI thread.
+        emit rawImageExposed();
         const QString sidecarPath = jsonSidecarPath(targetPath);
         bool exposureOk = false;
         qreal exposure = m_rawCaptureExposure.toDouble(&exposureOk);
         if (!exposureOk) {
             exposure = 1.0;
         }
-        if (m_rawCaptureRotationDegrees != 0 ||
-                ImageAdjustments::requested(exposure, m_rawCaptureColorTemperature,
-                                            m_rawCaptureColorTint)) {
-            QImage image(targetPath);
-            if (image.isNull()) {
-                clearRawImageCapture();
-                emit rawImageCaptureFailed(QStringLiteral(
-                    "Could not load Camera2 JPEG for adjustment"));
-                return;
+        const int rotation = m_rawCaptureRotationDegrees;
+        const int temperature = m_rawCaptureColorTemperature, tint = m_rawCaptureColorTint;
+        const int quality = m_rawCaptureJpegQuality;
+        m_rawRenderWatcher.reset(new QFutureWatcher<bool>);
+        connect(m_rawRenderWatcher.data(), &QFutureWatcher<bool>::finished,
+                this, &DeclarativeCameraExtensions::finishJpegRewrite);
+        m_rawRenderWatcher->setFuture(QtConcurrent::run([=]() {
+            if (rotation != 0 || ImageAdjustments::requested(exposure, temperature, tint)) {
+                QImage image(targetPath);
+                if (image.isNull()) {
+                    m_rawCaptureErrors = QStringLiteral("Could not load Camera2 JPEG for adjustment");
+                    return false;
+                }
+                if (rotation != 0) {
+                    image = image.transformed(QTransform().rotate(rotation));
+                }
+                ImageAdjustments::apply(&image, exposure, temperature, tint);
+                QImageWriter writer(targetPath, "JPG");
+                writer.setQuality(quality);
+                if (!writer.write(image)) {
+                    m_rawCaptureErrors = QStringLiteral("Could not save adjusted Camera2 JPEG");
+                    return false;
+                }
             }
-            if (m_rawCaptureRotationDegrees != 0) {
-                image = image.transformed(QTransform().rotate(m_rawCaptureRotationDegrees));
+            QString exifError;
+            if (!ExifUtils::writeJpegExifFromJsonFile(targetPath, sidecarPath, &exifError)) {
+                m_rawCaptureErrors = exifError;
+                return false;
             }
-            ImageAdjustments::apply(&image, exposure, m_rawCaptureColorTemperature,
-                                    m_rawCaptureColorTint);
-            QImageWriter writer(targetPath, "JPG");
-            writer.setQuality(m_rawCaptureJpegQuality);
-            if (!writer.write(image)) {
-                clearRawImageCapture();
-                emit rawImageCaptureFailed(QStringLiteral(
-                    "Could not save adjusted Camera2 JPEG"));
-                return;
-            }
-        }
-        QString exifError;
-        if (!ExifUtils::writeJpegExifFromJsonFile(targetPath, sidecarPath,
-                                                  &exifError)) {
-            clearRawImageCapture();
-            emit rawImageCaptureFailed(exifError);
-            return;
-        }
-        qDebug() << "capture-timing app jpeg complete"
-                 << "t" << m_rawCaptureTimer.elapsed();
-        clearRawImageCapture();
-        emit rawImageCaptured(targetPath, QStringLiteral("image/jpeg"));
+            return true;
+        }));
         return;
     }
 
-    if (m_rawCaptureStage == RawCaptureCapturing && m_bracketCount == 2 && m_rawBracketCancelled) {
+    if (m_rawCaptureStage == RawCaptureCapturing && m_bracketCount >= 2 && m_rawBracketCancelled) {
         clearRawImageCapture();
         return;
     }
@@ -2252,23 +2604,36 @@ void DeclarativeCameraExtensions::finishRawImageCapture(int exitCode, QProcess::
         qDebug() << "capture-timing app raw preserve"
                  << "start" << preserveStart
                  << "end" << m_rawCaptureTimer.elapsed();
-        if (m_bracketCount == 2) {
+        if (m_bracketCount >= 2) {
             stageRawBracketFrame();
             return;
         }
-        m_rawRenderStart = m_rawCaptureTimer.elapsed();
-        m_rawRenderWatcher.reset(new QFutureWatcher<bool>);
-        connect(m_rawRenderWatcher.data(), &QFutureWatcher<bool>::finished,
-                this, &DeclarativeCameraExtensions::finishRawImageRender);
-        m_rawRenderWatcher->setFuture(QtConcurrent::run([this]() {
-            return m_rawRenderEngine == QLatin1String("fastjpeg")
-                    ? renderRawImageWithFastJpegConverter() : renderRawImage();
-        }));
+        emit rawImageExposed();
+        startRawImageRender();
         return;
     }
 
     clearRawImageCapture();
     emit rawImageCaptureFailed(QStringLiteral("RAW image capture finished in an unknown state"));
+}
+
+void DeclarativeCameraExtensions::finishJpegRewrite()
+{
+    QFutureWatcher<bool> *watcher = m_rawRenderWatcher.take();
+    const bool ok = watcher && watcher->result();
+    if (watcher) {
+        watcher->deleteLater();
+    }
+    const QString targetPath = m_rawCaptureTargetPath;
+    const QString error = m_rawCaptureErrors.isEmpty()
+            ? QStringLiteral("Could not finish Camera2 JPEG") : m_rawCaptureErrors;
+    qDebug() << "capture-timing app jpeg complete" << "t" << m_rawCaptureTimer.elapsed();
+    clearRawImageCapture();
+    if (!ok) {
+        emit rawImageCaptureFailed(error);
+        return;
+    }
+    emit rawImageCaptured(targetPath, QStringLiteral("image/jpeg"));
 }
 
 void DeclarativeCameraExtensions::finishRawImageRender()
@@ -2499,7 +2864,7 @@ bool writeTiffDng(const QString &metadataPath, const QString &dngPath,
     TIFFMergeFieldInfo(tiff, dngPrivateFields,
                         sizeof(dngPrivateFields) / sizeof(dngPrivateFields[0]));
 
-    const QByteArray software = QByteArrayLiteral("RAWfish Camera2");
+    const QByteArray software = QByteArrayLiteral("ProCam Camera2");
     const QByteArray uniqueModel = QStringLiteral("Sailfish Camera2 camera %1")
             .arg(metadata.value(QStringLiteral("camera_id")).toString())
             .toUtf8();
@@ -2597,14 +2962,14 @@ bool writeTiffDng(const QString &metadataPath, const QString &dngPath,
     // tools/calibration/generate_lens_shading.py and
     // src/calibration/README.md). A calibration in the user's device-profiles
     // directory overrides the one bundled with the app, without rebuilding or
-    // repackaging RAWfish. If neither has a matching file, no correction is
+    // repackaging ProCam. If neither has a matching file, no correction is
     // written.
     QStringList calibrationDirs;
-    const QString profileDir = rawfishUserDeviceProfileDir();
+    const QString profileDir = procamUserDeviceProfileDir();
     if (!profileDir.isEmpty()) {
         const QString userCalibrationDir =
                 QDir(profileDir).filePath(QStringLiteral("lens-shading"));
-        // RAWfish only reads from this directory; it is created (idempotent)
+        // ProCam only reads from this directory; it is created (idempotent)
         // so users can see where an override is expected.
         QDir().mkpath(userCalibrationDir);
         calibrationDirs.append(userCalibrationDir);
@@ -2696,6 +3061,7 @@ bool DeclarativeCameraExtensions::saveJsonSidecar(const QString &targetPath,
     const bool pixelsRotated =
             format == QLatin1String("RAW16") ||
             format == QLatin1String("RAW10") ||
+            format == QLatin1String("I420") ||
             m_rawCaptureStage == RawCaptureJpegCapturing;
     const int captureOrientation = m_rawCaptureRotationDegrees;
     object.insert(QStringLiteral("capture_orientation"), captureOrientation);
@@ -3019,6 +3385,49 @@ bool DeclarativeCameraExtensions::renderRawImage()
     return true;
 }
 
+bool DeclarativeCameraExtensions::renderRawImageEnhanced(const RawPipeline::RenderSettings &base)
+{
+    // Worker thread: everything else it needs is in the sidecar.
+    RawPipeline::RenderSettings settings = base;
+    bool exposureOk = false;
+    settings.exposure = m_rawCaptureExposure.toDouble(&exposureOk);
+    if (!exposureOk || settings.exposure <= 0) settings.exposure = 1.0;
+    const QString metadataPath = m_rawCapturePrefix + QLatin1String(".json");
+    QImage image;
+    QJsonObject info;
+    QString error;
+    if (!RawPipeline::renderImage({metadataPath}, settings, &image, &info, &error)) {
+        m_rawCaptureErrors = error;
+        return false;
+    }
+    if (m_rawCaptureRotationDegrees != 0) {
+        image = image.transformed(QTransform().rotate(m_rawCaptureRotationDegrees));
+    }
+    ImageAdjustments::apply(&image, 1.0, m_rawCaptureColorTemperature,
+                            m_rawCaptureColorTint);
+    QJsonObject context;
+    context.insert(QStringLiteral("raw_pipeline"), info);
+    if (!ExifUtils::enrichSidecar(metadataPath, context, &error)) {
+        m_rawCaptureErrors = error;
+        return false;
+    }
+    const QFileInfo targetInfo(m_rawCaptureTargetPath);
+    QDir().mkpath(targetInfo.absolutePath());
+    QFile::remove(m_rawCaptureTargetPath);
+    QImageWriter writer(m_rawCaptureTargetPath, "JPG");
+    writer.setQuality(m_rawCaptureJpegQuality);
+    writer.setProgressiveScanWrite(m_rawCaptureProgressiveJpeg);
+    if (!writer.write(image)) {
+        m_rawCaptureErrors = QStringLiteral("Could not save converted RAW image: %1")
+                .arg(writer.errorString());
+        return false;
+    }
+    QString rawError;
+    const QString rawPath = rawPathFromMetadata(metadataPath, &rawError);
+    if (rawError.isEmpty()) copyFileTimes(rawPath, m_rawCaptureTargetPath);
+    return true;
+}
+
 bool DeclarativeCameraExtensions::renderRawImageWithFastJpegConverter()
 {
     const QString jpegConverter = rawFastJpegConverterPath();
@@ -3170,10 +3579,22 @@ bool DeclarativeCameraExtensions::preserveRawCaptureFiles()
         m_rawCaptureErrors = metadataError;
         return false;
     }
-    const bool saveRaw16 = m_rawCaptureSaveFormat == QLatin1String("raw16")
-            || m_rawCaptureSaveFormat == QLatin1String("both");
-    const bool saveDng = m_rawCaptureSaveFormat == QLatin1String("dng")
-            || m_rawCaptureSaveFormat == QLatin1String("both");
+    // Cameras without RAW stream YUV (I420) or, as a fallback, JPEG frames:
+    // only kept when every burst frame is asked for, never as DNG.
+    QString frameFormat;
+    {
+        QFile sidecar(m_rawCapturePrefix + QLatin1String(".json"));
+        if (sidecar.open(QIODevice::ReadOnly))
+            frameFormat = QJsonDocument::fromJson(sidecar.readAll()).object()
+                    .value(QStringLiteral("format")).toString();
+    }
+    const bool yuvFrame = frameFormat == QLatin1String("I420");
+    const bool processedFrame = yuvFrame || frameFormat == QLatin1String("JPEG");
+    const bool saveRaw16 = (m_rawCaptureSaveFormat == QLatin1String("raw16")
+            || m_rawCaptureSaveFormat == QLatin1String("both"))
+            && (!processedFrame || (yuvFrame && m_bracketBurst && m_keepBurstFrames));
+    const bool saveDng = (m_rawCaptureSaveFormat == QLatin1String("dng")
+            || m_rawCaptureSaveFormat == QLatin1String("both")) && !processedFrame;
     if (!saveRaw16 && !saveDng) {
         return true;
     }
@@ -3189,7 +3610,8 @@ bool DeclarativeCameraExtensions::preserveRawCaptureFiles()
         const QString rawSource = rawPathFromMetadata(
                     m_rawCapturePrefix + QLatin1String(".json"), &metadataError);
         const QString rawDestination = m_rawCaptureArchivePrefix
-                + (rawSource.endsWith(QLatin1String(".raw10"))
+                + (yuvFrame ? QLatin1String(".yuv")
+                   : rawSource.endsWith(QLatin1String(".raw10"))
                    ? QLatin1String(".raw10") : QLatin1String(".raw16"));
         if (!metadataError.isEmpty()) {
             m_rawCaptureErrors = metadataError;
@@ -3225,14 +3647,22 @@ bool DeclarativeCameraExtensions::preserveRawCaptureFiles()
 bool DeclarativeCameraExtensions::stageRawBracketFrame()
 {
     if (m_rawBracketCancelled) { clearRawImageCapture(); return false; }
-    if (m_bracketIndex == 0) m_rawBracketDirectory.reset(new QTemporaryDir);
     QString error;
     const QString source = rawPathFromMetadata(m_rawCapturePrefix + QStringLiteral(".json"), &error);
+    if (m_bracketIndex == 0) {
+        // Next to the frames, so staging is a rename rather than a 25 MB copy
+        // per frame; /tmp is often another filesystem.
+        m_rawBracketDirectory.reset(new QTemporaryDir(
+                QFileInfo(source).absolutePath() + QStringLiteral("/.procam-frames-XXXXXX")));
+        if (!m_rawBracketDirectory->isValid()) m_rawBracketDirectory.reset(new QTemporaryDir);
+    }
     const QString prefix = m_rawBracketDirectory && m_rawBracketDirectory->isValid()
             ? m_rawBracketDirectory->path() + QStringLiteral("/frame%1").arg(m_bracketIndex) : QString();
     const QString raw = prefix + QStringLiteral(".raw");
     const QString metadata = prefix + QStringLiteral(".json");
-    if (prefix.isEmpty() || !error.isEmpty() || !QFile::copy(source, raw)
+    const bool ownsSource = !m_rawCaptureDirectory && source.endsWith(QStringLiteral(".warm.raw16"));
+    if (prefix.isEmpty() || !error.isEmpty()
+            || !((ownsSource && QFile::rename(source, raw)) || QFile::copy(source, raw))
             || !writeMetadataWithRawPath(m_rawCapturePrefix + QStringLiteral(".json"), metadata, raw, &error)) {
         clearRawImageCapture();
         m_rawBracketDirectory.reset();
@@ -3247,7 +3677,7 @@ bool DeclarativeCameraExtensions::stageRawBracketFrame()
         emit rawImageCaptureFailed(error);
         return false;
     }
-    if (!m_rawCaptureDirectory && source.endsWith(QStringLiteral(".warm.raw16"))) {
+    if (ownsSource) {
         QFile::remove(source);
         QFile::remove(m_rawCapturePrefix + QStringLiteral(".json"));
     }
@@ -3282,6 +3712,7 @@ void DeclarativeCameraExtensions::clearRawImageCapture()
     m_rawCaptureColorTint = 0;
     m_bracketIndex = -1;
     m_bracketCount = 0;
+    m_bracketBurst = false;
     m_bracketEv = 0.0;
     m_bracketBaseShutterNs.clear();
     m_rawRenderStart = 0;

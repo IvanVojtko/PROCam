@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2014 - 2021 Jolla Ltd.
+# SPDX-FileCopyrightText: 2025 Jolla Mobile Ltd
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+[Desktop Entry]
+Type=Application
+NoDisplay=true
+Name=ProCam
+Icon=procam-sfos
+Exec=/usr/bin/invoker --type=silica-media,silica-qt5 -A -- /usr/bin/procam
+Comment=ProCam
+X-Maemo-Service=com.procam.camera
+X-Maemo-Method=com.procam.camera.ui.showViewfinder

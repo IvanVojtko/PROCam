@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: 2026 ProCam Contributors
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Builds the Android Camera2 bridge with the NDK and the aarch64 RPM with the
+# Sailfish Platform SDK. Called by ci.yml and release.yml.
+#
+# The SDK derives the RPM version from git: a commit tagged v1.4.0 builds
+# procam-1.4.0-<Release>, any other commit a version with the latest tag,
+# branch, date and hash appended.
+name: RPM
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit, branch or tag to build (default the triggering ref).
+        required: false
+        default: ''
+        type: string
+      artifact:
+        description: Name of the uploaded RPM artifact.
+        required: false
+        default: procam-rpm
+        type: string
+    outputs:
+      rpm_name:
+        description: File name of the built RPM.
+        value: ${{ jobs.build.outputs.rpm_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build aarch64 RPM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      rpm_name: ${{ steps.build_rpm.outputs.rpm_name }}
+    env:
+      ANDROID_NDK_VERSION: '27.2.12479018'
+      SAILFISH_IMAGE: coderus/sailfishos-platform-sdk@sha256:31ba115546972af3630f4690acc204a4e09701358ae39be1883ca70e0eadda86
+      SAILFISH_TARGET: SailfishOS-5.1.0.11-aarch64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          # Tags are needed for the version.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Build Android Camera2 bridge
+        run: |
+          set -euo pipefail
+          sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          sh sfos-camera2-bridge/scripts/build-android.sh
+          test -s sfos-camera2-bridge/build/android/libsfoscamera2.so
+
+      - name: Build and verify Sailfish RPM
+        id: build_rpm
+        run: |
+          set -euo pipefail
+          mkdir -p RPMS
+          chmod a+w RPMS
+          docker run --rm --privileged \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -e SAILFISH_TARGET \
+            "$SAILFISH_IMAGE" /bin/bash -euc '
+              mkdir -p "$HOME/procam-build"
+              cd "$HOME/procam-build"
+              cp -a /workspace/. .
+              test -s sfos-camera2-bridge/build/android/libsfoscamera2.so
+              mb2 -t "$SAILFISH_TARGET" build
+              found=0
+              for package in RPMS/procam-[0-9]*.aarch64.rpm; do
+                test -f "$package" || continue
+                rpm -qpl "$package" > /tmp/procam-files.txt
+                for file in \
+                    /usr/bin/procam \
+                    /usr/libexec/procam/sfos-camera2-probe \
+                    /usr/libexec/droid-hybris/system/lib64/libsfoscamera2.so \
+                    /usr/lib64/qt5/qml/com/vivid/camera/calibration/raisr-2x.bin \
+                    /usr/lib64/qt5/qml/com/vivid/camera/capture/moon.svg; do
+                  grep -Fx "$file" /tmp/procam-files.txt
+                done
+                found=1
+              done
+              test "$found" -eq 1
+              cp RPMS/*.rpm /workspace/RPMS/
+            '
+          rpm_name="$(basename "$(find RPMS -maxdepth 1 -name 'procam-[0-9]*.aarch64.rpm' | sort | head -n 1)")"
+          test -n "$rpm_name"
+          echo "rpm_name=${rpm_name}" >> "$GITHUB_OUTPUT"
+          echo "Built ${rpm_name}"
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact }}
+          path: RPMS/*.rpm
+          if-no-files-found: error
+          retention-days: 14

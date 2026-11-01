@@ -4,12 +4,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-Name:       rawfish
-Summary:    Camera application
-Version:    1.3.1
-Release:    9
+Name:       procam
+Summary:    Computational photography camera for the Jolla Phone 2
+Version:    1.4.0
+Release:    1
 License:    BSD-3-Clause AND GPL-2.0-or-later AND GPL-3.0-or-later
-URL:        https://github.com/Logic-gate/RAWfish
+URL:        https://github.com/IvanVojtko/PROCam
 Source0:    %{name}-%{version}.tar.bz2
 
 # libsfoscamera2.so is an Android/Bionic library loaded through libhybris from
@@ -38,6 +38,8 @@ BuildRequires:  qt5-qttools
 BuildRequires:  qt5-qttools-linguist
 BuildRequires:  oneshot
 
+# Same QML module (com.vivid.camera) and Camera2 bridge library as RAWfish.
+Conflicts: rawfish
 Requires:  sailfishsilica-qt5 >= 1.1.79
 Requires:  libtiff
 Requires:  qt5-qtdeclarative-import-models2
@@ -71,14 +73,16 @@ Requires:  mapplauncherd-booster-silica-qt5-media
 %{_oneshot_requires_post}
 
 %description
-The RAWfish application.
+ProCam is a camera app for the Jolla Phone 2 with computational photography:
+merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
+2x zoom, rendered on the phone by its own RAW pipeline.
 
 %prep
 %setup -q -n %{name}-%{version}
 
 %build
 
-%qmake5 rawfish.pro
+%qmake5 procam.pro
 %make_build
 
 %install
@@ -90,30 +94,42 @@ The RAWfish application.
 %files
 %license LICENSES/BSD-3-Clause.txt
 %license licenses/RawBracket-MIT.txt
-%{_datadir}/applications/rawfish.desktop
-%{_datadir}/icons/hicolor/500x500/apps/rawfish-sfos.png
-%dir %{_datadir}/rawfish
-%{_datadir}/rawfish/camera.qml
-%{_datadir}/rawfish/pages
-%{_datadir}/rawfish/cover
-%{_bindir}/rawfish
-%{_datadir}/dbus-1/services/com.rawfish.camera.service
+%{_datadir}/applications/procam.desktop
+%{_datadir}/icons/hicolor/500x500/apps/procam-sfos.png
+%dir %{_datadir}/procam
+%{_datadir}/procam/camera.qml
+%{_datadir}/procam/pages
+%{_datadir}/procam/cover
+%{_bindir}/procam
+%{_datadir}/dbus-1/services/com.procam.camera.service
 %dir %{_datadir}/jolla-settings
 %dir %{_datadir}/jolla-settings/pages
-%dir %{_datadir}/jolla-settings/pages/rawfish
-%{_datadir}/jolla-settings/pages/rawfish/SettingsPage.qml
+%dir %{_datadir}/jolla-settings/pages/procam
+%{_datadir}/jolla-settings/pages/procam/SettingsPage.qml
 %dir %{_datadir}/jolla-settings/entries
-%{_datadir}/jolla-settings/entries/rawfish.json
+%{_datadir}/jolla-settings/entries/procam.json
 %{_libdir}/qt5/qml/com/vivid/camera
-%dir %{_libexecdir}/rawfish
-%{_libexecdir}/rawfish/sfos-camera2-probe
-%{_libexecdir}/rawfish/sfos-raw16-to-jpeg
+%dir %{_libexecdir}/procam
+%{_libexecdir}/procam/sfos-camera2-probe
+%{_libexecdir}/procam/sfos-raw16-to-jpeg
 %dir %{_libexecdir}/droid-hybris
 %dir %{_libexecdir}/droid-hybris/system
 %dir %{_libexecdir}/droid-hybris/system/lib64
 %{_libexecdir}/droid-hybris/system/lib64/libsfoscamera2.so
-%{_sysconfdir}/dconf/db/vendor.d/00-rawfish.txt
+%{_sysconfdir}/dconf/db/vendor.d/00-procam.txt
 
 %changelog
+* Sun Nov 01 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0-1
+- First ProCam release. RAW-based rendering for every photo: HDR bursts with
+  motion-aware exposure, night mode (16 frames), super-resolution and sharp 2x
+  zoom, face-aware exposure and tone mapping, refined tone (black and white
+  points, clarity), neutral white balance on the front and ultra-wide cameras,
+  4:3 or 16:9, RAW/DNG in Normal mode, GPU viewfinder with YUV preview frames.
+* Sat Oct 31 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.3.1-9
+- Fork of RAWfish renamed to ProCam: enhanced RAW renderer, HDR bursts,
+  super-resolution and sharp 2x zoom, fullscreen viewfinder.
+- Night mode, YUV bursts for the front and ultra-wide cameras, 16:9 photos,
+  RAW files in Normal mode, GPU-drawn viewfinder.
+- GitHub CI (host tests, RPM) and tag-based releases.
 * Thu Sep 24 2026 RAWfish Contributors <rawfish@users.noreply.github.com> - 1.3.1-3
 - Package RAWfish release 3.

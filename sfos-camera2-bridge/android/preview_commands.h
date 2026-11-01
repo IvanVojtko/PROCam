@@ -1,13 +1,17 @@
 // Standalone control protocol definitions and capture parser (no Android dependencies).
-#ifndef RAWFISH_PREVIEW_COMMANDS_H
-#define RAWFISH_PREVIEW_COMMANDS_H
+#ifndef PROCAM_PREVIEW_COMMANDS_H
+#define PROCAM_PREVIEW_COMMANDS_H
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#define PREVIEW_MAX_RAW_BRACKET 3
+// Pairs use two slots; equal-exposure bursts (capture-raw-burst) up to eight.
+// Night mode bursts of 16 frames; normal HDR uses 8. 16 frames' paths
+// (about 2.6 KB) fit the 8 KB command line.
+#define PREVIEW_MAX_RAW_BRACKET 16
+#define PREVIEW_CAPTURE_MAX_ARGS (3 + 2 * PREVIEW_MAX_RAW_BRACKET)
 
 enum preview_command_type {
     PREVIEW_COMMAND_NONE = 0,
@@ -80,11 +84,11 @@ static bool preview_parse_capture_command(const char *line, struct preview_comma
     strcpy(copy, start);
     char *save = NULL;
     char *name = strtok_r(copy, " \t\r", &save);
-    char *args[11];
+    char *args[PREVIEW_CAPTURE_MAX_ARGS];
     int n = 0;
     char *token;
     while ((token = strtok_r(NULL, " \t\r", &save))) {
-        if (n == 11) return true;
+        if (n == PREVIEW_CAPTURE_MAX_ARGS) return true;
         args[n++] = token;
     }
     if (!strcmp(name, "capture-jpeg") && n == 1) {
@@ -117,6 +121,27 @@ static bool preview_parse_capture_command(const char *line, struct preview_comma
         for (int i=0; i<4; ++i) for (int j=i+1; j<4; ++j)
             if (!strcmp(paths[i], paths[j])) return true;
         command->bracket_count = 2;
+        command->type = PREVIEW_COMMAND_CAPTURE_RAW_BRACKET;
+    } else if (!strcmp(name, "capture-raw-burst") && n >= 3) {
+        // capture-raw-burst <count> <iso> <exposure_ns> (<raw> <metadata>){count}
+        // Equal exposures for merging; shares the bracket capture slots.
+        int64_t count, iso, exposure;
+        if (!preview_capture_integer(args[0], PREVIEW_MAX_RAW_BRACKET, &count) || count < 2 ||
+                n != 3 + 2 * count ||
+                !preview_capture_integer(args[1], INT32_MAX, &iso) ||
+                !preview_capture_integer(args[2], INT64_MAX, &exposure)) return true;
+        for (int i = 0; i < count; ++i) {
+            const char *raw = args[3 + 2 * i], *metadata = args[4 + 2 * i];
+            if (strlen(raw) >= sizeof(command->bracket_paths[i]) ||
+                    strlen(metadata) >= sizeof(command->bracket_metadata_paths[i])) return true;
+            strcpy(command->bracket_paths[i], raw);
+            strcpy(command->bracket_metadata_paths[i], metadata);
+            command->bracket_sensor_sensitivity[i] = (int32_t)iso;
+            command->bracket_exposure_time_ns[i] = exposure;
+        }
+        for (int i = 3; i < n; ++i) for (int j = i + 1; j < n; ++j)
+            if (!strcmp(args[i], args[j])) return true;
+        command->bracket_count = (int)count;
         command->type = PREVIEW_COMMAND_CAPTURE_RAW_BRACKET;
     }
     return true;

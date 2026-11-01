@@ -10,7 +10,7 @@ associated color shift (red/blue falloff faster or slower than green) when
 saving RAW captures as DNG. The correction is written into the DNG itself as
 a standard `OpcodeList2` / `GainMap` opcode (see DNG spec >= 1.3), so it is
 applied automatically by any DNG-aware raw processor (Lightroom, darktable,
-RawTherapee, etc.) -- RAWfish does not need to do any pixel processing
+RawTherapee, etc.) -- ProCam does not need to do any pixel processing
 itself.
 
 ## How it works
@@ -29,8 +29,8 @@ itself.
   (`src/declarativecameraextensions.cpp`) attaches them to every DNG saved,
   by building that exact file name from the capture's own device
   model/camera id/resolution and looking it up -- first in
-  the `lens-shading/` subdirectory of RAWfish's device-profiles directory
-  (normally `~/.local/share/com.rawfish/rawfish/device-profiles/`; a
+  the `lens-shading/` subdirectory of ProCam's device-profiles directory
+  (normally `~/.local/share/com.procam/procam/device-profiles/`; a
   user-writable override, no rebuild/repackage needed), then in this
   directory as bundled with the app.
 * If neither directory has a matching file, or the one found does not
@@ -45,11 +45,11 @@ itself.
    since it hides texture in the card). Avoid mixed lighting and keep the
    card as flat as possible -- an unevenly lit card is the most common
    cause of a lopsided result (see "Diagnostics" below).
-2. Capture one or more RAW DNGs of the card with RAWfish
+2. Capture one or more RAW DNGs of the card with ProCam
    (in the settings, choose DNG or RAW + JSON + DNG as the RAW format).
 3. Run the generator -- no flags needed beyond the DNGs themselves; device
    model, camera id, resolution and CFA are all read straight from the
-   DNGs' own tags (`Model`/`UniqueCameraModel`, both written by RAWfish
+   DNGs' own tags (`Model`/`UniqueCameraModel`, both written by ProCam
    itself), and the output file name is derived from those same values:
 
    ```
@@ -66,9 +66,9 @@ itself.
    `tools/calibration/verify_gain_map.py` (see below) for a quantitative
    check that doesn't depend on eyeballing a viewer.
 5. Copy the generated file into either:
-   - `~/.local/share/com.rawfish/rawfish/device-profiles/lens-shading/` on
+   - `~/.local/share/com.procam/procam/device-profiles/lens-shading/` on
      the device, to use it immediately without rebuilding or repackaging
-     RAWfish (RAWfish creates this directory itself the first time it
+     ProCam (ProCam creates this directory itself the first time it
      saves a DNG, if it doesn't exist yet); or
    - this directory in the source tree, to bundle it with the app -- e.g.
      to contribute it upstream.
@@ -128,3 +128,21 @@ The generator prints two checks after averaging, before writing the file:
 * `tools/calibration/verify_gain_map.py` accepts multiple DNG files at
   once (e.g. a glob of an entire capture session) and prints a per-file
   pass/fail summary, exiting non-zero if any file did not improve.
+
+# Zoom upscaling filters
+
+`raisr-2x.bin` holds the learned 2x upscaling filters (RAISR: Romano,
+Isidoro, Milanfar 2016) used by the enhanced renderer when a photo is taken
+zoomed in: the centre of the frame is rendered on a finer grid from the burst
+(super-resolution), and these filters sharpen the brightness of the upscaled
+crop. 216 filters of 9x9 taps, chosen per pixel by edge angle, strength and
+coherence; about 70 KB. Without the file the upscale is bilinear.
+
+Retrain from a folder of sharp photos with the host tool in `tools/raisr`:
+
+    qmake tools/raisr/raisr.pro && make
+    ./raisr-train --augment --prescale 1.5 --test held-out.jpg photos/*.jpg raisr-2x.bin
+
+A file with the same name in the `lens-shading/` device-profiles directory
+overrides the bundled one. The bundled filters were trained on three ProCam
+photos from the Jolla Phone 2 and are a starting point.

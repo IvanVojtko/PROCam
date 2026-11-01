@@ -90,7 +90,7 @@ void CameraConfigs::handleStatus()
                 m_supportedImageResolutions.clear();
 
                 QSize maxImageResolution;
-                QVariant value(MDConfItem("/apps/rawfish/maxImageResolution").value());
+                QVariant value(MDConfItem("/apps/procam/maxImageResolution").value());
                 if (!value.isNull()) {
                     QStringList values = value.toString().split('x');
                     if (values.size() == 2) {
@@ -117,7 +117,7 @@ void CameraConfigs::handleStatus()
                 m_supportedVideoResolutions.clear();
 
                 QSize maxVideoResolution;
-                QVariant value(MDConfItem("/apps/rawfish/maxVideoResolution").value());
+                QVariant value(MDConfItem("/apps/procam/maxVideoResolution").value());
                 if (!value.isNull()) {
                     QStringList values = value.toString().split('x');
                     if (values.size() == 2) {
@@ -169,9 +169,9 @@ void CameraConfigs::handleStatus()
                 QCameraInfo cameraInfo(*m_camera);
                 QVariant value;
                 if (cameraInfo.position() == QCamera::FrontFace) {
-                    value = MDConfItem("/apps/rawfish/secondary/image/exposureModeValues").value();
+                    value = MDConfItem("/apps/procam/secondary/image/exposureModeValues").value();
                 } else {
-                    value = MDConfItem("/apps/rawfish/primary/image/exposureModeValues").value();
+                    value = MDConfItem("/apps/procam/primary/image/exposureModeValues").value();
                 }
                 if (!value.isNull()) {
                     QList<QVariant> values = value.toList();

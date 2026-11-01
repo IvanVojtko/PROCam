@@ -4,7 +4,7 @@
 
 ## Project
 
-**Project name:** `RAWfish`
+**Project name:** `ProCam`
 
 **Policy version:** AI Usage Policy, Version 1
 

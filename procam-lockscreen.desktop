@@ -6,13 +6,13 @@
 [Desktop Entry]
 Type=Application
 NoDisplay=true
-Name=RAWfish
-Icon=rawfish-sfos
-Exec=/usr/bin/invoker --type=silica-media,silica-qt5 -A -- /usr/bin/rawfish-lockscreen
-Comment=RAWfish
+Name=ProCam
+Icon=procam-sfos
+Exec=/usr/bin/invoker --type=silica-media,silica-qt5 -A -- /usr/bin/procam-lockscreen
+Comment=ProCam
 
 [X-Sailjail]
-ApplicationName=rawfish-lockscreen
-OrganizationName=com.rawfish
-DataDirectory=rawfish
+ApplicationName=procam-lockscreen
+OrganizationName=com.procam
+DataDirectory=procam
 Permissions=Camera;Audio;Microphone;Pictures;Videos;MediaIndexing;Location;Privileged;RemovableMedia

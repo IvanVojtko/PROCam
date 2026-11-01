@@ -29,14 +29,14 @@ ApplicationSettings {
     ConfigurationValue {
         id: backCameraAspectRatio
 
-        key: "/apps/rawfish/back/image/aspectRatio"
+        key: "/apps/procam/back/image/aspectRatio"
         defaultValue: CameraConfigs.AspectRatio_4_3
     }
 
     ConfigurationValue {
         id: frontCameraAspectRatio
 
-        key: "/apps/rawfish/front/image/aspectRatio"
+        key: "/apps/procam/front/image/aspectRatio"
         defaultValue: CameraConfigs.AspectRatio_4_3
     }
 
@@ -54,6 +54,15 @@ ApplicationSettings {
         description: "Show metering, waiting and exposure-limit messages at the top of the viewfinder."
         checked: Settings.global.showExposureStatus
         onClicked: Settings.global.showExposureStatus = !checked
+    }
+
+    IconTextSwitch {
+        automaticCheck: false
+        text: "Keep every burst frame"
+        description: "Save all frames of each HDR and night photo as RAW (YUV for the front and ultra-wide cameras) with a JSON sidecar, about 25 MB each. For diagnostics and training data."
+        enabled: AccessPolicy.cameraEnabled
+        checked: Settings.global.keepBurstFrames
+        onClicked: Settings.global.keepBurstFrames = !checked
     }
 
     IconTextSwitch {
@@ -84,14 +93,14 @@ ApplicationSettings {
         automaticCheck: false
         icon.source: "image://theme/icon-m-developer-mode"
         text: "Advanced mode"
-        description: "Show RAWfish manual controls and RAW capture settings."
+        description: "Show ProCam manual controls and RAW capture settings."
         enabled: AccessPolicy.cameraEnabled
         checked: Settings.global.advancedMode
         onClicked: Settings.global.advancedMode = !Settings.global.advancedMode
     }
 
     SectionHeader {
-        text: "RAWfish compatibility"
+        text: "ProCam compatibility"
         visible: Settings.global.advancedMode
     }
 
@@ -118,7 +127,7 @@ ApplicationSettings {
 
     ComboBox {
         label: "RAW capture files"
-        visible: Settings.global.advancedMode
+        description: "Kept next to each photo, in Normal and Pro mode. Not available for cameras without RAW output."
         enabled: AccessPolicy.cameraEnabled
         currentIndex: {
             switch (Settings.global.rawCaptureSaveFormat) {

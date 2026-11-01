@@ -8,9 +8,9 @@ TEMPLATE = subdirs
 OTHER_FILES += auto/* exifmetadata.cpp exifmetadata.pro
 
 auto.files = auto/*
-auto.path = /opt/tests/rawfish/auto
+auto.path = /opt/tests/procam/auto
 
 definition.files = test-definition/tests.xml
-definition.path = /opt/tests/rawfish/test-definition
+definition.path = /opt/tests/procam/test-definition
 
 INSTALLS += auto definition

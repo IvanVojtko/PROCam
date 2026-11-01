@@ -4,14 +4,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 TEMPLATE = aux
-TARGET  = rawfishsettingsplugin
+TARGET  = procamsettingsplugin
 TARGET = $$qtLibraryTarget($$TARGET)
 
-settingsqml.path = /usr/share/jolla-settings/pages/rawfish
+settingsqml.path = /usr/share/jolla-settings/pages/procam
 settingsqml.files = SettingsPage.qml
 
 plugin_entry.path = /usr/share/jolla-settings/entries
-plugin_entry.files = rawfish.json
+plugin_entry.files = procam.json
 
 DEFINES += \
         DEPLOYMENT_PATH=\"\\\"\"$${TARGETPATH}/\"\\\"\"

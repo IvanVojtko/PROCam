@@ -50,7 +50,7 @@ template <class Function> void runAsync(const Function &function)
 
 QByteArray cameraSortName(const QByteArray &fileName)
 {
-    const QByteArray prefix = QByteArrayLiteral("RAWfish_");
+    const QByteArray prefix = QByteArrayLiteral("ProCam_");
     return fileName.startsWith(prefix) ? fileName.mid(prefix.size()) : fileName;
 }
 
@@ -623,7 +623,7 @@ bool CaptureModel::compare(const Capture &left, const Capture &right)
 bool CaptureModel::isCameraFile(const QByteArray &fileName) const
 {
     static const QRegularExpression cameraFileRegEx = [] {
-        QRegularExpression regex("\\A(?:RAWfish_)?\\d{8}_\\d{6}(?:_\\d+)?.(?:jpg|mp4)\\z");
+        QRegularExpression regex("\\A(?:ProCam_)?\\d{8}_\\d{6}(?:_\\d+)?.(?:jpg|mp4)\\z");
 
         regex.optimize();
 

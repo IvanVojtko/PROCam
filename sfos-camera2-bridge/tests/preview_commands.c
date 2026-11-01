@@ -48,6 +48,32 @@ int main(void) {
     invalid("capture-raw-bracket 2 a b 100 10 c d 100 40");
     invalid("capture-raw-bracket 2 a b 100 40 a d 100 10");
     invalid("capture-raw-bracket 2 a b 100 40 c d 100 10 extra");
+    const char *burst="capture-raw-burst 4 800 33333333 /tmp/0.raw /tmp/0.json /tmp/1.raw /tmp/1.json "
+                      "/tmp/2.raw /tmp/2.json /tmp/3.raw /tmp/3.json";
+    assert(preview_parse_capture_command(burst, &command));
+    assert(command.type == PREVIEW_COMMAND_CAPTURE_RAW_BRACKET);
+    assert(command.bracket_count == 4);
+    assert(!strcmp(command.bracket_paths[3], "/tmp/3.raw"));
+    assert(!strcmp(command.bracket_metadata_paths[2], "/tmp/2.json"));
+    assert(command.bracket_sensor_sensitivity[3] == 800);
+    assert(command.bracket_exposure_time_ns[0] == 33333333);
+    assert(command.bracket_exposure_time_ns[3] == 33333333);
+    char longest[4096];
+    int used = snprintf(longest, sizeof(longest), "capture-raw-burst 16 100 1000000");
+    for (int i = 0; i < 16; ++i)
+        used += snprintf(longest + used, sizeof(longest) - used, " /tmp/f%d.raw /tmp/f%d.json", i, i);
+    assert(preview_parse_capture_command(longest, &command));
+    assert(command.type == PREVIEW_COMMAND_CAPTURE_RAW_BRACKET && command.bracket_count == 16);
+    assert(!strcmp(command.bracket_paths[15], "/tmp/f15.raw"));
+    invalid("capture-raw-burst");
+    invalid("capture-raw-burst 1 100 1000 a b");
+    invalid("capture-raw-burst 17 100 1000 a b c d e f g h i j k l m n o p q r s t u v w x y z A B C D E F G H");
+    invalid("capture-raw-burst 2 100 1000 a b c");
+    invalid("capture-raw-burst 2 100 1000 a b c d e");
+    invalid("capture-raw-burst 2 0 1000 a b c d");
+    invalid("capture-raw-burst 2 100 0 a b c d");
+    invalid("capture-raw-burst 2 100 1000 a b a d");
+    invalid("capture-raw-burst 2x 100 1000 a b c d");
     invalid("capture-raw");
     invalid("capture-raw a");
     invalid("capture-raw a b extra");

@@ -6,7 +6,7 @@
 Generate a per-channel lens-shading (vignetting + color-shift) calibration
 file from one or more RAW DNG captures of a flat, neutral-grey target.
 
-The output JSON is consumed by the RAWfish camera plugin
+The output JSON is consumed by the ProCam camera plugin
 (src/dnglensshading.cpp) to emit a DNG GainMap OpcodeList (OpcodeList2) when
 saving RAW captures, so viewers/editors correct the falloff automatically.
 
@@ -16,7 +16,7 @@ Usage:
     The device model, camera id, CFA pattern and resolution are all read
     directly from the DNGs themselves (see read_dng_identity() below) --
     nothing needs to be typed by hand, and the output file name is derived
-    from those same values, so it is always the exact name RAWfish itself
+    from those same values, so it is always the exact name ProCam itself
     will look for (see calibration_file_name() and dnglensshading.cpp's
     calibrationFileName(), which must produce byte-for-byte identical names).
     Use --output-dir to write somewhere other than the current directory.
@@ -53,7 +53,7 @@ How it works:
 
 The calibration is only valid for the specific device model, camera_id,
 sensor resolution and CFA pattern it was generated from -- all four are
-baked into the output file name, which is how RAWfish finds (or refuses to
+baked into the output file name, which is how ProCam finds (or refuses to
 misapply) it. Regenerate it whenever any of those change (e.g. a different
 binning mode/RAW capture resolution, or running this tool against DNGs from
 a different phone).
@@ -134,7 +134,7 @@ def calibration_file_name(device_model, camera_id, width, height):
 
 def read_dng_identity(path):
     """
-    Read the camera identity RAWfish itself writes into every DNG
+    Read the camera identity ProCam itself writes into every DNG
     (writeTiffDng() in src/declarativecameraextensions.cpp): standard
     TIFF Model (device model, from Nemo::DeviceInfo::prettyName()) and the
     DNG-private UniqueCameraModel ("Sailfish Camera2 camera <id>"), which is
@@ -154,11 +154,11 @@ def read_dng_identity(path):
     model = ifd.get(TIFF_TAG_MODEL)
     unique = ifd.get(TIFF_TAG_UNIQUE_CAMERA_MODEL)
     if not model or not str(model).strip():
-        raise ValueError(f"{path}: no Model tag -- was this DNG written by RAWfish?")
+        raise ValueError(f"{path}: no Model tag -- was this DNG written by ProCam?")
     match = UNIQUE_CAMERA_MODEL_RE.match(str(unique) if unique else "")
     if not match:
         raise ValueError(f"{path}: unrecognised or missing UniqueCameraModel tag "
-                          f"({unique!r}) -- was this DNG written by RAWfish?")
+                          f"({unique!r}) -- was this DNG written by ProCam?")
     return str(model).strip(), match.group(1)
 
 
@@ -428,7 +428,7 @@ def main():
     calibration = {
         "version": 1,
         # device_model/camera_id are provenance only (for humans reading the
-        # file) -- RAWfish itself never re-reads them back out of the JSON,
+        # file) -- ProCam itself never re-reads them back out of the JSON,
         # it already committed to this exact file by constructing its name
         # from those same values before opening it (see dnglensshading.cpp).
         # cfa_pattern/image_width/image_height, in contrast, ARE re-checked
@@ -459,9 +459,9 @@ def main():
         f.write("\n")
     print(f"\nWrote {output_path}")
     print("Copy it into either:")
-    print("  - ~/.local/share/rawfish/device-profiles/lens-shading/  "
+    print("  - ~/.local/share/procam/device-profiles/lens-shading/  "
           "(active on this device immediately, no rebuild/repackage)")
-    print("  - src/calibration/ in the RAWfish source tree  "
+    print("  - src/calibration/ in the ProCam source tree  "
           "(bundled with the app, e.g. to contribute it upstream)")
 
 

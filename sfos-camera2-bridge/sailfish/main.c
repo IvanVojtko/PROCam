@@ -2,7 +2,7 @@
  * @file main.c
  * @brief Sailfish command-line frontend for the Android Camera2 bridge.
  *
- * Loads the Android bridge library through libhybris, parses RAWfish helper
+ * Loads the Android bridge library through libhybris, parses ProCam helper
  * command-line options, and dispatches probe, preview, RAW, or JPEG operations.
  */
 
@@ -35,7 +35,7 @@ typedef int (*preview_ppm_fn)(
     int timeout_ms, int output_fd, int control_fd,
     int jpeg_width, int jpeg_height, int jpeg_quality,
     int jpeg_orientation_degrees, int raw_width, int raw_height,
-    float zoom_ratio,
+    int raw_format, float zoom_ratio,
     float focus_x, float focus_y,
     char *out, size_t out_size);
 typedef int (*capture_jpeg_fn)(
@@ -128,7 +128,8 @@ static void usage(FILE *stream, const char *program)
             "     [--frames N] [--timeout SECONDS] [--output PATH]\n"
             "     [--jpeg-size WIDTHxHEIGHT] [--quality N]\n"
             "     [--orientation DEGREES] [--zoom R]\n"
-            "     [--focus-x X --focus-y Y]\n"
+            "     [--raw-size WIDTHxHEIGHT] [--raw-format raw16|yuv]\n"
+            "     [--preview-format rgb|yuv] [--focus-x X --focus-y Y]\n"
             "  %s --capture-jpeg --output PATH [--camera ID]\n"
             "     [--size WIDTHxHEIGHT] [--timeout SECONDS]\n"
             "     [--quality N] [--orientation DEGREES]\n"
@@ -487,7 +488,7 @@ int main(int argc, char **argv)
         return 13;
     }
 
-    char json[32768] = {0};
+    char json[65536] = {0};
     int result;
 
     if (argc == 1) {
@@ -505,6 +506,8 @@ int main(int argc, char **argv)
         int jpeg_orientation = 0;
         int raw_width = 0;
         int raw_height = 0;
+        int raw_format = 0;
+        int preview_yuv = 0;
         float zoom_ratio = 1.0f;
         float focus_x = -1.0f;
         float focus_y = -1.0f;
@@ -540,6 +543,26 @@ int main(int argc, char **argv)
             } else if (!strcmp(argv[index], "--jpeg-size") && index + 1 < argc) {
                 if (parse_size(argv[++index], &jpeg_width, &jpeg_height) != 0) {
                     fprintf(stderr, "Invalid --jpeg-size value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--raw-format") && index + 1 < argc) {
+                const char *format = argv[++index];
+                if (!strcmp(format, "raw16")) {
+                    raw_format = 0;
+                } else if (!strcmp(format, "yuv")) {
+                    raw_format = 1;
+                } else {
+                    fprintf(stderr, "Invalid --raw-format value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--preview-format") && index + 1 < argc) {
+                const char *format = argv[++index];
+                if (!strcmp(format, "rgb")) {
+                    preview_yuv = 0;
+                } else if (!strcmp(format, "yuv")) {
+                    preview_yuv = 1;
+                } else {
+                    fprintf(stderr, "Invalid --preview-format value\n");
                     return 2;
                 }
             } else if (!strcmp(argv[index], "--raw-size") && index + 1 < argc) {
@@ -600,8 +623,8 @@ int main(int argc, char **argv)
                              timeout_seconds * 1000, output_fd, STDIN_FILENO,
                              jpeg_width, jpeg_height, jpeg_quality,
                              jpeg_orientation, raw_width, raw_height,
-                             zoom_ratio,
-                             focus_x, focus_y,
+                             raw_format | (preview_yuv ? SFOS_CAMERA2_PREVIEW_YUV_FRAMES : 0),
+                             zoom_ratio, focus_x, focus_y,
                              json, sizeof(json));
         if (output_fd != STDOUT_FILENO) {
             close(output_fd);
@@ -691,7 +714,7 @@ int main(int argc, char **argv)
                 ++index) {
             char output_path[PATH_MAX];
             if (snprintf(output_path, sizeof(output_path),
-                         "%s/rawfish-shutter-calibration-%ld-%zu.jpg",
+                         "%s/procam-shutter-calibration-%ld-%zu.jpg",
                          output_dir, (long)getpid(), index) >=
                     (int)sizeof(output_path)) {
                 fprintf(stderr, "Calibration output path is too long\n");

@@ -2,6 +2,7 @@
 #include "exifutils.h"
 #include "imageadjustments.h"
 #include "previewaids.h"
+#include "previewnode.h"
 
 #include <QDateTime>
 #include <QDebug>
@@ -17,15 +18,21 @@
 #include <QQuickWindow>
 #include <QSGSimpleTextureNode>
 #include <QSGTexture>
+#include <QUrl>
+#include <cstring>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTransform>
 #include <QVariantMap>
 #include <QtGlobal>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <climits>
 #include <cmath>
 #include <thread>
+
+static QRectF photoAspectRect(const QSizeF &size, const QString &aspect);
 
 namespace {
 
@@ -45,9 +52,9 @@ void appendRawCaptureLog(const QString &message)
     if (picturesPath.isEmpty()) {
         picturesPath = QDir::homePath() + QLatin1String("/Pictures");
     }
-    const QString logDirectory = picturesPath + QLatin1String("/RAWfish");
+    const QString logDirectory = picturesPath + QLatin1String("/ProCam");
     QDir().mkpath(logDirectory);
-    QFile file(logDirectory + QLatin1String("/rawfish-capture.log"));
+    QFile file(logDirectory + QLatin1String("/procam-capture.log"));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return;
     }
@@ -163,7 +170,7 @@ bool Camera2Preview::jpegCaptureReady() const
 
 bool Camera2Preview::rawCaptureReady() const
 {
-    return m_running && m_rawCaptureEnabled && m_process &&
+    return m_running && m_rawCaptureEnabled && m_rawStreamActive && m_process &&
             m_process->state() == QProcess::Running;
 }
 
@@ -180,7 +187,26 @@ void Camera2Preview::setCameraId(const QString &cameraId)
     }
     m_cameraId = effectiveId;
     stop();
-    m_frame = QImage();
+    // Keep a blurred, dimmed last frame until the new camera delivers one,
+    // instead of a blank or jumping viewfinder.
+    // Stored as shown (the next camera may be mounted the other way round).
+    if (hasFrame()) {
+        const QImage shown = displayFrame();
+        const QSize size = shown.size();
+        QImage small = shown.scaled(qMax(1, size.width() / 24), qMax(1, size.height() / 24),
+                                    Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        QImage blurred = small.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                .convertToFormat(QImage::Format_RGB888);
+        for (int y = 0; y < blurred.height(); ++y) {
+            uchar *line = blurred.scanLine(y);
+            for (int x = 0; x < blurred.width() * 3; ++x) line[x] = uchar(line[x] * 3 / 4);
+        }
+        m_frame = blurred;
+        m_yuvFrame.clear();
+        m_yuvSize = QSize();
+        m_frameDisplayOriented = true;
+        ++m_frameSerial;
+    }
     update();
     emit cameraIdChanged();
     restart();
@@ -216,6 +242,77 @@ void Camera2Preview::setCaptureSize(const QString &captureSize)
     m_captureSize = effectiveSize;
     emit captureSizeChanged();
     restart();
+}
+
+QString Camera2Preview::rawCaptureSize() const
+{
+    return m_rawCaptureSize.isEmpty() ? m_captureSize : m_rawCaptureSize;
+}
+
+void Camera2Preview::setRawCaptureSize(const QString &rawCaptureSize)
+{
+    if (m_rawCaptureSize == rawCaptureSize) {
+        return;
+    }
+    m_rawCaptureSize = rawCaptureSize;
+    emit rawCaptureSizeChanged();
+    if (m_rawCaptureEnabled) {
+        restart();
+    }
+}
+
+QString Camera2Preview::saveThumbnail(int captureRotation)
+{
+    if (!hasFrame()) {
+        return QString();
+    }
+    // The frame is in sensor orientation and unmirrored, like the photo
+    // before its rotation; turn it upright the same way.
+    QImage image = rgbFrame().transformed(QTransform().rotate(captureRotation));
+    image = image.copy(photoAspectRect(image.size(), m_photoAspect).toRect());
+    const qreal zoom = qMax<qreal>(1.0, m_zoom);
+    if (zoom > 1.01) {
+        const QSize size(qMax(1, int(image.width() / zoom)), qMax(1, int(image.height() / zoom)));
+        image = image.copy(QRect(QPoint((image.width() - size.width()) / 2,
+                                        (image.height() - size.height()) / 2), size));
+    }
+    image = image.scaled(256, 256, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (directory.isEmpty() || !QDir().mkpath(directory)) {
+        return QString();
+    }
+    // A fresh name each time so QML never shows a cached older thumbnail.
+    static int counter = 0;
+    counter = (counter + 1) % 8;
+    const QString path = directory + QStringLiteral("/pending-thumbnail-%1.jpg").arg(counter);
+    if (!image.save(path, "JPG", 85)) {
+        return QString();
+    }
+    return QUrl::fromLocalFile(path).toString();
+}
+
+QString Camera2Preview::rawStreamStatus() const
+{
+    return m_rawStreamStatus;
+}
+
+QString Camera2Preview::rawCaptureFormat() const
+{
+    return m_rawCaptureFormat;
+}
+
+void Camera2Preview::setRawCaptureFormat(const QString &rawCaptureFormat)
+{
+    const QString format = rawCaptureFormat == QLatin1String("yuv")
+            ? QStringLiteral("yuv") : QStringLiteral("raw16");
+    if (m_rawCaptureFormat == format) {
+        return;
+    }
+    m_rawCaptureFormat = format;
+    emit rawCaptureFormatChanged();
+    if (m_rawCaptureEnabled) {
+        restart();
+    }
 }
 
 int Camera2Preview::captureTimeout() const
@@ -353,7 +450,42 @@ void Camera2Preview::setFill(bool fill)
     }
     m_fill = fill;
     emit fillChanged();
+    emit contentRectChanged();
     update();
+}
+
+QString Camera2Preview::photoAspect() const
+{
+    return m_photoAspect;
+}
+
+void Camera2Preview::setPhotoAspect(const QString &aspect)
+{
+    if (m_photoAspect == aspect) {
+        return;
+    }
+    m_photoAspect = aspect;
+    emit photoAspectChanged();
+    emit contentRectChanged();
+    update();
+}
+
+// Centre part of a frame of `size` the photo keeps: "16:9" crops the short
+// side (as RawPipeline does before rotating), anything else keeps it all.
+static QRectF photoAspectRect(const QSizeF &size, const QString &aspect)
+{
+    QRectF rect(QPointF(0, 0), size);
+    if (aspect != QLatin1String("16:9")) {
+        return rect;
+    }
+    if (size.width() >= size.height()) {
+        const qreal height = qMin(size.height(), size.width() * 9 / 16);
+        rect = QRectF(0, (size.height() - height) / 2, size.width(), height);
+    } else {
+        const qreal width = qMin(size.width(), size.height() * 9 / 16);
+        rect = QRectF((size.width() - width) / 2, 0, width, size.height());
+    }
+    return rect;
 }
 
 qreal Camera2Preview::zoom() const
@@ -369,6 +501,7 @@ void Camera2Preview::setZoom(qreal zoom)
     }
     m_zoom = clamped;
     emit zoomChanged();
+    emit contentRectChanged();
     update();
     sendSettings();
 }
@@ -608,48 +741,98 @@ QString Camera2Preview::errorString() const
 }
 
 /**
- * @brief Uploads the latest bridge RGB frame into the Qt scene graph.
+ * @brief Hands the latest bridge RGB frame to the scene graph.
  *
- * The bridge already converts YUV420 to RGB888. This stage keeps texture
- * filtering linear so preview scaling does not add extra nearest-neighbor
- * aliasing on top of the bridge conversion.
+ * The bridge already converts YUV420 to RGB888. PreviewNode uploads it into
+ * one reused texture and rotates, mirrors and lightly sharpens it on the GPU,
+ * so the GUI thread does no per-frame image work beyond one copy.
  */
 QSGNode *Camera2Preview::updatePaintNode(QSGNode *oldNode,
                                          UpdatePaintNodeData *)
 {
-    delete oldNode;
-    if (m_frame.isNull() || width() <= 0 || height() <= 0 || !window()) {
+    if (!hasFrame() || width() <= 0 || height() <= 0 || !window()) {
+        delete oldNode;
+        m_drawnSerial = 0;
         return nullptr;
     }
 
-    QImage textureImage = m_frame;
-    if (ImageAdjustments::requested(m_renderExposure, m_colorTemperature,
-                                    m_colorTint)) {
-        textureImage = m_frame.copy();
-        ImageAdjustments::apply(&textureImage, m_renderExposure,
-                                m_colorTemperature, m_colorTint);
+    PreviewNode *node = static_cast<PreviewNode *>(oldNode);
+    if (!node) {
+        node = new PreviewNode;
+        m_drawnSerial = 0;
+    }
+    if (m_drawnSerial != m_frameSerial) {
+        const bool adjusted = ImageAdjustments::requested(m_renderExposure, m_colorTemperature,
+                                                          m_colorTint);
+        if (!m_yuvFrame.isEmpty() && !adjusted && !m_focusPeaking && !m_exposureZebras) {
+            // The usual case: the YUV planes go to the GPU as they came.
+            node->setYuvFrame(m_yuvFrame, m_yuvSize);
+        } else {
+            // Pro's colour adjustments and preview aids work on RGB.
+            QImage textureImage = rgbFrame();
+            if (adjusted) {
+                textureImage = textureImage.copy();
+                ImageAdjustments::apply(&textureImage, m_renderExposure,
+                                        m_colorTemperature, m_colorTint);
+            }
+            // Display-only copy: never feed overlays into metering, histogram or capture.
+            textureImage = PreviewAids::apply(textureImage, m_focusPeaking, m_exposureZebras);
+            if (textureImage.format() != QImage::Format_RGB888)
+                textureImage = textureImage.convertToFormat(QImage::Format_RGB888);
+            node->setFrame(textureImage);
+        }
+        m_drawnSerial = m_frameSerial;
     }
 
-    // Display-only copy: never feed overlays into metering, histogram or capture.
-    textureImage = PreviewAids::apply(textureImage, m_focusPeaking, m_exposureZebras);
-    QSGTexture *texture = window()->createTextureFromImage(textureImage);
-    if (!texture) {
-        return nullptr;
+    QRectF drawRect, sourceRect;
+    const QSize shown = displaySize();
+    frameGeometry(shown, &drawRect, &sourceRect);
+    node->setPlacement(drawRect,
+                      QRectF(sourceRect.x() / shown.width(), sourceRect.y() / shown.height(),
+                             sourceRect.width() / shown.width(), sourceRect.height() / shown.height()),
+                      frameRotation(), frameMirror());
+    return node;
+}
+
+int Camera2Preview::frameRotation() const
+{
+    return m_frameDisplayOriented ? 0 : ((m_orientation % 360) + 360) % 360;
+}
+
+bool Camera2Preview::frameMirror() const
+{
+    return !m_frameDisplayOriented && m_mirror;
+}
+
+QSize Camera2Preview::displaySize() const
+{
+    const int rotation = frameRotation();
+    return rotation == 90 || rotation == 270 ? frameSize().transposed() : frameSize();
+}
+
+QImage Camera2Preview::displayFrame() const
+{
+    QImage frame = rgbFrame();
+    if (frameRotation())
+        frame = frame.transformed(QTransform().rotate(frameRotation()));
+    if (frameMirror())
+        frame = frame.mirrored(true, false);
+    return frame;
+}
+
+bool Camera2Preview::frameGeometry(const QSizeF &imageSize, QRectF *drawRect,
+                                   QRectF *sourceRect) const
+{
+    if (imageSize.isEmpty() || width() <= 0 || height() <= 0) {
+        return false;
     }
-    texture->setFiltering(QSGTexture::Linear);
-
-    QSGSimpleTextureNode *node = new QSGSimpleTextureNode;
-    node->setOwnsTexture(true);
-    node->setTexture(texture);
-
     const QRectF target(0, 0, width(), height());
-    const QSizeF imageSize = m_frame.size();
     const qreal zoom = qMax<qreal>(1.0, m_zoom);
-    const QSizeF sourceSize(imageSize.width() / zoom,
-                            imageSize.height() / zoom);
-    const QRectF sourceRect((imageSize.width() - sourceSize.width()) / 2,
-                            (imageSize.height() - sourceSize.height()) / 2,
-                            sourceSize.width(), sourceSize.height());
+    const QRectF photo = photoAspectRect(imageSize, m_photoAspect);
+    const QSizeF sourceSize(photo.width() / zoom, photo.height() / zoom);
+    *sourceRect = QRectF(photo.center().x() - sourceSize.width() / 2,
+                         photo.center().y() - sourceSize.height() / 2,
+                         sourceSize.width(), sourceSize.height());
     const qreal scale = m_fill
             ? qMax(target.width() / sourceSize.width(),
                    target.height() / sourceSize.height())
@@ -657,13 +840,52 @@ QSGNode *Camera2Preview::updatePaintNode(QSGNode *oldNode,
                    target.height() / sourceSize.height());
     const QSizeF drawSize(sourceSize.width() * scale,
                           sourceSize.height() * scale);
-    const QRectF drawRect(target.center().x() - drawSize.width() / 2,
-                          target.center().y() - drawSize.height() / 2,
-                          drawSize.width(), drawSize.height());
+    *drawRect = QRectF(target.center().x() - drawSize.width() / 2,
+                       target.center().y() - drawSize.height() / 2,
+                       drawSize.width(), drawSize.height());
+    return true;
+}
 
-    node->setRect(drawRect);
-    node->setSourceRect(sourceRect);
-    return node;
+QRectF Camera2Preview::contentRect() const
+{
+    QRectF drawRect, sourceRect;
+    return frameGeometry(displaySize(), &drawRect, &sourceRect)
+            ? drawRect : QRectF(0, 0, width(), height());
+}
+
+QPointF Camera2Preview::mapToSensor(qreal x, qreal y) const
+{
+    QRectF drawRect, sourceRect;
+    const QSize shown = displaySize();
+    if (!frameGeometry(shown, &drawRect, &sourceRect)
+            || !drawRect.contains(QPointF(x, y))) {
+        return QPointF(-1, -1);
+    }
+    // Item -> displayed frame (normalised), through the zoom crop.
+    qreal u = (sourceRect.x() + (x - drawRect.x()) / drawRect.width() * sourceRect.width())
+            / shown.width();
+    qreal v = (sourceRect.y() + (y - drawRect.y()) / drawRect.height() * sourceRect.height())
+            / shown.height();
+    // The display rotates the frame by m_orientation, then mirrors it.
+    if (m_mirror) {
+        u = 1.0 - u;
+    }
+    qreal sensorX = u, sensorY = v;
+    switch (((m_orientation % 360) + 360) % 360) {
+    case 90: sensorX = v; sensorY = 1.0 - u; break;
+    case 180: sensorX = 1.0 - u; sensorY = 1.0 - v; break;
+    case 270: sensorX = 1.0 - v; sensorY = u; break;
+    default: break;
+    }
+    return QPointF(qBound<qreal>(0.0, sensorX, 1.0), qBound<qreal>(0.0, sensorY, 1.0));
+}
+
+void Camera2Preview::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry)
+{
+    QQuickItem::geometryChanged(newGeometry, oldGeometry);
+    if (newGeometry.size() != oldGeometry.size()) {
+        emit contentRectChanged();
+    }
 }
 
 void Camera2Preview::restartPreview()
@@ -730,7 +952,7 @@ bool Camera2Preview::captureJpeg(const QString &path)
         return false;
     }
 
-    if (!m_jpegCaptureEnabled && m_frame.isNull()) {
+    if (!m_jpegCaptureEnabled && !hasFrame()) {
         setErrorString(QStringLiteral("Camera2 preview frame is not ready"));
         return false;
     }
@@ -876,14 +1098,6 @@ bool Camera2Preview::captureRawBracket(const QVariantList &rawPaths,
         setErrorString(QStringLiteral("Camera2 RAW bracket is incomplete"));
         return false;
     }
-    if (!rawCaptureReady()) {
-        setErrorString(QStringLiteral("Camera2 RAW preview is not running"));
-        return false;
-    }
-    if (m_previewCaptureRunning) {
-        setErrorString(QStringLiteral("Camera2 RAW capture is already running"));
-        return false;
-    }
 
     QByteArray command = QByteArrayLiteral("capture-raw-bracket ")
             + QByteArray::number(count);
@@ -896,10 +1110,6 @@ bool Camera2Preview::captureRawBracket(const QVariantList &rawPaths,
             setErrorString(QStringLiteral("Camera2 RAW bracket path is empty"));
             return false;
         }
-        QDir().mkpath(QFileInfo(rawPath).absolutePath());
-        QDir().mkpath(QFileInfo(metadataPath).absolutePath());
-        QFile::remove(rawPath);
-        QFile::remove(metadataPath);
         command += QByteArrayLiteral(" ") + QFile::encodeName(rawPath)
                 + QByteArrayLiteral(" ") + QFile::encodeName(metadataPath)
                 + QByteArrayLiteral(" ")
@@ -908,6 +1118,60 @@ bool Camera2Preview::captureRawBracket(const QVariantList &rawPaths,
                 + exposureTime.toLatin1();
     }
     command += QByteArrayLiteral("\n");
+    return startRawFrameSet(command, rawPaths, metadataPaths);
+}
+
+bool Camera2Preview::captureRawBurst(const QVariantList &rawPaths,
+                                     const QVariantList &metadataPaths,
+                                     int sensorSensitivity,
+                                     const QString &exposureTime)
+{
+    const int count = rawPaths.count();
+    // Bridge limit: PREVIEW_MAX_RAW_BRACKET in preview_commands.h.
+    if (count < 2 || count > 16 || count != metadataPaths.count()
+            || sensorSensitivity <= 0 || exposureTime.toLongLong() <= 0) {
+        setErrorString(QStringLiteral("Camera2 RAW burst is incomplete"));
+        return false;
+    }
+    QByteArray command = QByteArrayLiteral("capture-raw-burst ")
+            + QByteArray::number(count) + QByteArrayLiteral(" ")
+            + QByteArray::number(sensorSensitivity) + QByteArrayLiteral(" ")
+            + QByteArray::number(exposureTime.toLongLong());
+    for (int index = 0; index < count; ++index) {
+        const QString rawPath = rawPaths.at(index).toString();
+        const QString metadataPath = metadataPaths.at(index).toString();
+        if (rawPath.isEmpty() || metadataPath.isEmpty()) {
+            setErrorString(QStringLiteral("Camera2 RAW burst path is empty"));
+            return false;
+        }
+        command += QByteArrayLiteral(" ") + QFile::encodeName(rawPath)
+                + QByteArrayLiteral(" ") + QFile::encodeName(metadataPath);
+    }
+    command += QByteArrayLiteral("\n");
+    return startRawFrameSet(command, rawPaths, metadataPaths);
+}
+
+bool Camera2Preview::startRawFrameSet(const QByteArray &command,
+                                      const QVariantList &rawPaths,
+                                      const QVariantList &metadataPaths)
+{
+    const int count = rawPaths.count();
+    if (!rawCaptureReady()) {
+        setErrorString(QStringLiteral("Camera2 RAW preview is not running"));
+        return false;
+    }
+    if (m_previewCaptureRunning) {
+        setErrorString(QStringLiteral("Camera2 RAW capture is already running"));
+        return false;
+    }
+    for (int index = 0; index < count; ++index) {
+        const QString rawPath = rawPaths.at(index).toString();
+        const QString metadataPath = metadataPaths.at(index).toString();
+        QDir().mkpath(QFileInfo(rawPath).absolutePath());
+        QDir().mkpath(QFileInfo(metadataPath).absolutePath());
+        QFile::remove(rawPath);
+        QFile::remove(metadataPath);
+    }
 
     m_previewCaptureRunning = true;
     m_pendingRawCapture = true;
@@ -925,7 +1189,8 @@ bool Camera2Preview::captureRawBracket(const QVariantList &rawPaths,
     m_pendingCaptureFinalPath = rawPaths.first().toString();
     m_pendingCaptureSize = -1;
     m_pendingCaptureStablePolls = 0;
-    m_capturePollsRemaining = qMax(1, (m_captureTimeout * 1000)
+    // Every frame is written to storage by the bridge; allow for that.
+    m_capturePollsRemaining = qMax(1, (m_captureTimeout * 1000 * qMax(1, count / 2))
                                       / m_captureTimer.interval());
     sendExposureSettings(true);
     m_restorePreviewSettingsAfterCapture = true;
@@ -946,13 +1211,13 @@ bool Camera2Preview::captureRawBracket(const QVariantList &rawPaths,
     m_completedRawBracketRawPaths.clear();
     m_completedRawBracketMetadataPaths.clear();
     m_previewCaptureRunning = false;
-    setErrorString(QStringLiteral("Could not write Camera2 RAW bracket command"));
+    setErrorString(QStringLiteral("Could not write Camera2 RAW frame command"));
     return false;
 }
 
 void Camera2Preview::savePreviewJpegAsync(const QString &path)
 {
-    QImage image = m_frame.copy();
+    QImage image = displayFrame();
     image.detach();
     const qreal exposure = m_renderExposure;
     const int colorTemperature = m_colorTemperature;
@@ -988,7 +1253,7 @@ void Camera2Preview::finishPreviewCapture(const QString &path, bool success,
     m_previewCaptureRunning = false;
     restorePreviewSettingsAfterCapture();
     if (success) {
-        if (!savePreviewMetadata(path, m_frame.size())) {
+        if (!savePreviewMetadata(path, displaySize())) {
             emit imageCaptureFailed(errorString());
             return;
         }
@@ -1163,6 +1428,8 @@ void Camera2Preview::readErrors()
                 realErrors.append(line);
             }
         }
+        for (const QString &line : realErrors)
+            appendRawCaptureLog(QStringLiteral("helper ") + line);
         if (!realErrors.isEmpty()) {
             setErrorString(realErrors.join(QLatin1Char('\n')));
         }
@@ -1277,19 +1544,7 @@ void Camera2Preview::checkCaptureResult()
         m_pendingCaptureStablePolls = 0;
         m_previewCaptureRunning = false;
         m_captureTimer.stop();
-        m_originalJpegExif = ExifUtils::originalJpegExif(path);
-        QString rewriteError;
-        if (!rewriteJpegPixels(path, m_jpegOrientation, m_renderExposure,
-                               m_colorTemperature, m_colorTint,
-                               m_jpegQuality, &rewriteError)) {
-            emit imageCaptureFailed(rewriteError);
-            return;
-        }
-        if (!savePreviewMetadata(path, sizeFromString(m_captureSize))) {
-            emit imageCaptureFailed(errorString());
-            return;
-        }
-        emit imageCaptured(path, QStringLiteral("image/jpeg"));
+        finishJpegCapture(path);
         return;
     }
 
@@ -1311,6 +1566,8 @@ void Camera2Preview::restart()
     stop();
     if (m_previewSize.width() <= 0 || m_previewSize.height() <= 0) {
         m_frame = QImage();
+        m_yuvFrame.clear();
+        m_yuvSize = QSize();
         update();
         setErrorString(QStringLiteral("Preview unavailable"));
     }
@@ -1340,6 +1597,17 @@ void Camera2Preview::startPreview()
     }
 
     m_buffer.clear();
+    // Rates cover streaming only, not the camera start-up; a new session
+    // (or camera) starts its viewfinder analysis afresh.
+    m_motionMeter.reset();
+    m_faces.clear();
+    m_lastFaces.clear();
+    m_subjectFaces.clear();
+    m_faceSeen.invalidate();
+    m_faceExposure = PreviewAnalysis::FaceExposure();
+    m_statsTimer.invalidate();
+    m_statsFrames = 0;
+    m_statsParseNs = 0;
     m_process = new QProcess(this);
     m_process->setProgram(program);
     QStringList arguments;
@@ -1349,14 +1617,17 @@ void Camera2Preview::startPreview()
               << QStringLiteral("%1x%2").arg(m_previewSize.width()).arg(m_previewSize.height())
               << QStringLiteral("--frames") << QStringLiteral("10000")
               << QStringLiteral("--timeout") << QStringLiteral("3600")
-              << QStringLiteral("--zoom") << QString::number(m_zoom, 'f', 4);
+              << QStringLiteral("--zoom") << QString::number(m_zoom, 'f', 4)
+              // I420 frames: half the bytes of RGB, converted on the GPU.
+              << QStringLiteral("--preview-format") << QStringLiteral("yuv");
     if (m_jpegCaptureEnabled) {
         arguments << QStringLiteral("--jpeg-size") << m_captureSize
                   << QStringLiteral("--quality") << QString::number(m_jpegQuality)
                   << QStringLiteral("--orientation") << QStringLiteral("0");
     }
     if (m_rawCaptureEnabled) {
-        arguments << QStringLiteral("--raw-size") << m_captureSize;
+        arguments << QStringLiteral("--raw-size") << rawCaptureSize()
+                  << QStringLiteral("--raw-format") << m_rawCaptureFormat;
     }
     if (m_focusX >= 0.0 && m_focusY >= 0.0) {
         arguments << QStringLiteral("--focus-x") << QString::number(m_focusX, 'f', 4)
@@ -1370,6 +1641,7 @@ void Camera2Preview::startPreview()
     connect(m_process,
             static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
             this, &Camera2Preview::processFinished);
+    m_rawStreamActive = false;
     m_process->start();
     if (m_process->waitForStarted(1000)) {
         m_running = true;
@@ -1493,84 +1765,274 @@ void Camera2Preview::restorePreviewSettingsAfterCapture()
 
 void Camera2Preview::parseFrames()
 {
-    bool updated = false;
+    // Walks the buffer once: every metadata packet is applied, but only the
+    // newest complete frame is decoded. After the GUI thread stalls (screen
+    // rotation relayout), older buffered frames are skipped instead of being
+    // histogrammed one by one while the viewfinder lags behind.
+    // Frames come as SF2Y (I420, the default) or SF2P (RGB888).
+    static const QByteArray rgbMagic("SF2P", 4);
+    static const QByteArray yuvMagic("SF2Y", 4);
+    static const QByteArray metadataMagic("SF2M", 4);
+    int pos = 0;
+    int latestOffset = -1, latestWidth = 0, latestHeight = 0, latestBytes = 0;
+    bool latestYuv = false;
+    auto startsWithAt = [this](const QByteArray &magic, int at) {
+        return m_buffer.size() - at >= magic.size()
+                && memcmp(m_buffer.constData() + at, magic.constData(), size_t(magic.size())) == 0;
+    };
     while (true) {
-        static const QByteArray frameMagic("SF2P", 4);
-        static const QByteArray metadataMagic("SF2M", 4);
-        if (!m_buffer.startsWith(frameMagic) &&
-                !m_buffer.startsWith(metadataMagic)) {
-            const int frameMarker = m_buffer.indexOf(frameMagic);
-            const int metadataMarker = m_buffer.indexOf(metadataMagic);
+        if (!startsWithAt(rgbMagic, pos) && !startsWithAt(yuvMagic, pos)
+                && !startsWithAt(metadataMagic, pos)) {
             int marker = -1;
-            if (frameMarker >= 0 && metadataMarker >= 0) {
-                marker = qMin(frameMarker, metadataMarker);
-            } else {
-                marker = qMax(frameMarker, metadataMarker);
+            for (const QByteArray *magic : {&rgbMagic, &yuvMagic, &metadataMagic}) {
+                const int found = m_buffer.indexOf(*magic, pos);
+                if (found >= 0 && (marker < 0 || found < marker)) marker = found;
             }
             if (marker < 0) {
-                m_buffer.clear();
+                // Keep a possible partial magic at the end.
+                pos = qMax(pos, m_buffer.size() - (rgbMagic.size() - 1));
                 break;
             }
-            m_buffer.remove(0, marker);
+            pos = marker;
         }
 
-        if (m_buffer.startsWith(metadataMagic)) {
+        if (startsWithAt(metadataMagic, pos)) {
             const int headerBytes = 8;
-            if (m_buffer.size() < headerBytes) {
+            if (m_buffer.size() - pos < headerBytes) {
                 break;
             }
-            const quint32 payloadBytesValue = readLe32(m_buffer.constData() + 4);
+            const quint32 payloadBytesValue = readLe32(m_buffer.constData() + pos + 4);
             if (payloadBytesValue == 0 || payloadBytesValue > 8192) {
-                m_buffer.remove(0, metadataMagic.size());
+                pos += metadataMagic.size();
                 continue;
             }
             const int payloadBytes = int(payloadBytesValue);
-            if (m_buffer.size() < headerBytes + payloadBytes) {
+            if (m_buffer.size() - pos < headerBytes + payloadBytes) {
                 break;
             }
-            parseMetadata(m_buffer.mid(headerBytes, payloadBytes));
-            m_buffer.remove(0, headerBytes + payloadBytes);
+            parseMetadata(m_buffer.mid(pos + headerBytes, payloadBytes));
+            pos += headerBytes + payloadBytes;
+            if (m_buffer.size() < pos) {
+                // A signal handler restarted the bridge and cleared the buffer.
+                return;
+            }
             continue;
         }
 
         const int headerBytes = 16;
-        if (m_buffer.size() < headerBytes) {
+        if (m_buffer.size() - pos < headerBytes) {
             break;
         }
 
-        const quint32 widthValue = readLe32(m_buffer.constData() + 4);
-        const quint32 heightValue = readLe32(m_buffer.constData() + 8);
-        const quint32 frameBytesValue = readLe32(m_buffer.constData() + 12);
-        const quint64 expectedBytes = quint64(widthValue) * quint64(heightValue) * 3;
+        const bool yuv = startsWithAt(yuvMagic, pos);
+        const quint32 widthValue = readLe32(m_buffer.constData() + pos + 4);
+        const quint32 heightValue = readLe32(m_buffer.constData() + pos + 8);
+        const quint32 frameBytesValue = readLe32(m_buffer.constData() + pos + 12);
+        const quint64 pixels = quint64(widthValue) * quint64(heightValue);
+        const quint64 expectedBytes = yuv
+                ? pixels + 2 * (quint64(widthValue + 1) / 2) * (quint64(heightValue + 1) / 2)
+                : pixels * 3;
         if (widthValue == 0 || heightValue == 0 || frameBytesValue == 0 ||
+                widthValue > 16384 || heightValue > 16384 ||
                 expectedBytes > quint64(INT_MAX) ||
                 frameBytesValue != expectedBytes) {
-            m_buffer.remove(0, frameMagic.size());
+            pos += rgbMagic.size();
             continue;
         }
-        const int width = int(widthValue);
-        const int height = int(heightValue);
         const int frameBytes = int(frameBytesValue);
-        if (m_buffer.size() < headerBytes + frameBytes) {
+        if (m_buffer.size() - pos < headerBytes + frameBytes) {
             break;
         }
-
-        const uchar *bits = reinterpret_cast<const uchar *>(m_buffer.constData() + headerBytes);
-        QImage frame = QImage(bits, width, height, width * 3, QImage::Format_RGB888).copy();
-        if (m_orientation != 0) {
-            frame = frame.transformed(QTransform().rotate(m_orientation));
-        }
-        if (m_mirror) {
-            frame = frame.mirrored(true, false);
-        }
-        updateHistogram(frame);
-        m_frame = frame;
-        m_buffer.remove(0, headerBytes + frameBytes);
-        updated = true;
+        latestOffset = pos + headerBytes;
+        latestWidth = int(widthValue);
+        latestHeight = int(heightValue);
+        latestBytes = frameBytes;
+        latestYuv = yuv;
+        pos += headerBytes + frameBytes;
     }
-    if (updated) {
+
+    const bool newFrame = latestOffset >= 0;
+    if (newFrame) {
+        QElapsedTimer parseTimer;
+        parseTimer.start();
+        const QSize previous = frameSize();
+        const bool wasPlaceholder = m_frameDisplayOriented;
+        // Kept in sensor orientation: the GPU rotates, mirrors and (for
+        // YUV) converts it. m_buffer is only compacted below, so the offset
+        // is still valid.
+        if (latestYuv) {
+            m_yuvFrame = m_buffer.mid(latestOffset, latestBytes);
+            m_yuvSize = QSize(latestWidth, latestHeight);
+            m_frame = QImage();
+        } else {
+            m_frame = QImage(reinterpret_cast<const uchar *>(m_buffer.constData() + latestOffset),
+                             latestWidth, latestHeight, latestWidth * 3,
+                             QImage::Format_RGB888).copy();
+            m_yuvFrame.clear();
+            m_yuvSize = QSize();
+        }
+        m_frameDisplayOriented = false;
+        ++m_frameSerial;
+        // Viewfinder analysis for the burst plan, on luma in sensor
+        // orientation (the Y plane, or green of RGB).
+        PreviewAnalysis::LumaView luma;
+        if (latestYuv) {
+            luma = PreviewAnalysis::LumaView{reinterpret_cast<const uint8_t *>(m_yuvFrame.constData()),
+                                             latestWidth, latestHeight, latestWidth, 1};
+        } else {
+            luma = PreviewAnalysis::LumaView{m_frame.constBits() + 1, m_frame.width(), m_frame.height(),
+                                             int(m_frame.bytesPerLine()), 3};
+        }
+        if (!m_motionClock.isValid()) m_motionClock.start();
+        m_motionMeter.update(luma, m_motionClock.elapsed());
+        // The histogram (exposure readouts, burst planning) need not follow
+        // every frame.
+        if (!m_histogramTimer.isValid() || m_histogramTimer.elapsed() >= 150) {
+            if (latestYuv) {
+                updateHistogramYuv();
+            } else {
+                updateHistogram(m_frame);
+            }
+            std::array<float, 4> subject;
+            m_subjectFaces.clear();
+            if (m_selfieCamera && PreviewAnalysis::backlitSubject(luma, &subject))
+                m_subjectFaces.push_back(subject);
+            m_faceExposure = PreviewAnalysis::faceExposure(luma, effectiveFaces());
+            m_histogramTimer.restart();
+            emit sceneChanged();
+        }
+        if (frameSize() != previous || wasPlaceholder) {
+            emit contentRectChanged();
+        }
+        ++m_statsFrames;
+        m_statsParseNs += parseTimer.nsecsElapsed();
+        if (!m_statsTimer.isValid()) {
+            m_statsTimer.start();
+        } else if (m_statsTimer.elapsed() >= 15000) {
+            appendRawCaptureLog(QStringLiteral("preview-stats camera=%1 size=%2x%3 format=%4 fps=%5 parse_ms=%6")
+                                .arg(m_cameraId).arg(latestWidth).arg(latestHeight)
+                                .arg(latestYuv ? QStringLiteral("yuv") : QStringLiteral("rgb"))
+                                .arg(m_statsFrames * 1000.0 / m_statsTimer.elapsed(), 0, 'f', 1)
+                                .arg(m_statsParseNs / 1e6 / qMax(1, m_statsFrames), 0, 'f', 1));
+            m_statsTimer.restart();
+            m_statsFrames = 0;
+            m_statsParseNs = 0;
+        }
+    }
+    if (pos > 0) {
+        m_buffer.remove(0, qMin(pos, m_buffer.size()));
+    }
+    if (newFrame) {
         update();
     }
+}
+
+// Full-range BT.601, as the bridge's own RGB conversion and the GPU shader.
+static inline void yuvToRgb(int y, int u, int v, uchar *rgb)
+{
+    u -= 128;
+    v -= 128;
+    rgb[0] = uchar(qBound(0, y + ((91881 * v) >> 16), 255));
+    rgb[1] = uchar(qBound(0, y - ((22554 * u + 46802 * v) >> 16), 255));
+    rgb[2] = uchar(qBound(0, y + ((116130 * u) >> 16), 255));
+}
+
+std::vector<std::array<float, 4>> Camera2Preview::effectiveFaces(QString *source) const
+{
+    if (!m_faces.empty()) {
+        if (source) *source = QStringLiteral("camera");
+        return m_faces;
+    }
+    if (!m_lastFaces.empty() && m_faceSeen.isValid() && m_faceSeen.elapsed() < 1500) {
+        if (source) *source = QStringLiteral("recent");
+        return m_lastFaces;
+    }
+    if (!m_subjectFaces.empty()) {
+        if (source) *source = QStringLiteral("backlit");
+        return m_subjectFaces;
+    }
+    if (source) *source = QStringLiteral("none");
+    return {};
+}
+
+QVariantList Camera2Preview::faces() const
+{
+    QVariantList list;
+    for (const std::array<float, 4> &face : effectiveFaces())
+        list.append(QVariant(QVariantList{face[0], face[1], face[2], face[3]}));
+    return list;
+}
+
+QVariantMap Camera2Preview::sceneInfo() const
+{
+    QString source;
+    const bool face = !effectiveFaces(&source).empty();
+    QVariantMap info;
+    info.insert(QStringLiteral("motion"), m_motionMeter.motion());
+    info.insert(QStringLiteral("subjectMotion"), m_motionMeter.subjectMotion());
+    info.insert(QStringLiteral("faceCount"), face ? int(effectiveFaces().size()) : 0);
+    info.insert(QStringLiteral("faceSource"), source);
+    info.insert(QStringLiteral("faceLuma"), face ? m_faceExposure.luma : -1.0);
+    info.insert(QStringLiteral("faceClipped"), face ? m_faceExposure.clipped : 0.0);
+    return info;
+}
+
+bool Camera2Preview::hasFrame() const
+{
+    return !m_frame.isNull() || !m_yuvFrame.isEmpty();
+}
+
+QSize Camera2Preview::frameSize() const
+{
+    return m_yuvFrame.isEmpty() ? m_frame.size() : m_yuvSize;
+}
+
+QImage Camera2Preview::rgbFrame() const
+{
+    if (m_yuvFrame.isEmpty()) {
+        return m_frame;
+    }
+    // Only on demand (thumbnail, preview capture, Pro's preview aids): the
+    // viewfinder itself converts on the GPU.
+    const int width = m_yuvSize.width(), height = m_yuvSize.height();
+    const int chromaWidth = (width + 1) / 2, chromaHeight = (height + 1) / 2;
+    const uchar *luma = reinterpret_cast<const uchar *>(m_yuvFrame.constData());
+    const uchar *u = luma + width * height;
+    const uchar *v = u + chromaWidth * chromaHeight;
+    QImage image(width, height, QImage::Format_RGB888);
+    if (image.isNull()) {
+        return image;
+    }
+    for (int y = 0; y < height; ++y) {
+        uchar *line = image.scanLine(y);
+        const uchar *lumaRow = luma + y * width;
+        const uchar *uRow = u + (y / 2) * chromaWidth, *vRow = v + (y / 2) * chromaWidth;
+        for (int x = 0; x < width; ++x)
+            yuvToRgb(lumaRow[x], uRow[x / 2], vRow[x / 2], line + 3 * x);
+    }
+    return image;
+}
+
+void Camera2Preview::updateHistogramYuv()
+{
+    // A sparse grid converted to RGB, as updateHistogram() samples.
+    const int width = m_yuvSize.width(), height = m_yuvSize.height();
+    const int chromaWidth = (width + 1) / 2, chromaHeight = (height + 1) / 2;
+    const uchar *luma = reinterpret_cast<const uchar *>(m_yuvFrame.constData());
+    const uchar *u = luma + width * height;
+    const uchar *v = u + chromaWidth * chromaHeight;
+    const int step = qMax(1, qMin(width, height) / 160);
+    QImage samples((width + step - 1) / step, (height + step - 1) / step, QImage::Format_RGB888);
+    if (samples.isNull()) {
+        return;
+    }
+    for (int y = 0, sy = 0; y < height; y += step, ++sy) {
+        uchar *line = samples.scanLine(sy);
+        for (int x = 0, sx = 0; x < width; x += step, ++sx)
+            yuvToRgb(luma[y * width + x], u[(y / 2) * chromaWidth + x / 2],
+                     v[(y / 2) * chromaWidth + x / 2], line + 3 * sx);
+    }
+    updateHistogram(samples);
 }
 
 void Camera2Preview::updateHistogram(const QImage &frame)
@@ -1649,6 +2111,41 @@ void Camera2Preview::parseMetadata(const QByteArray &payload)
                 m_liveExposureTime = shutterText;
                 emit liveExposureTimeChanged();
             }
+        }
+    }
+    if (parsedFields.value(QStringLiteral("streams")) == QLatin1String("1")) {
+        const bool raw = parsedFields.value(QStringLiteral("raw")) == QLatin1String("1");
+        const QString status = QStringLiteral("camera=%1 raw=%2 raw_error=%3 raw_size=%4 raw_format=%5")
+                .arg(m_cameraId, raw ? QStringLiteral("1") : QStringLiteral("0"),
+                     parsedFields.value(QStringLiteral("raw_error"), QStringLiteral("unknown")),
+                     parsedFields.value(QStringLiteral("raw_size")),
+                     parsedFields.value(QStringLiteral("raw_format")));
+        if (m_rawCaptureEnabled)
+            appendRawCaptureLog(QStringLiteral("preview-streams ") + status);
+        if (m_rawStreamActive != raw || m_rawStreamStatus != status) {
+            m_rawStreamActive = raw;
+            m_rawStreamStatus = status;
+            emit rawCaptureReadyChanged();
+        }
+    }
+    if (parsedFields.contains(QStringLiteral("faces"))) {
+        // rects=l,t,r,b,score;... normalised on the full sensor frame, or "-".
+        std::vector<std::array<float, 4>> faces;
+        const QString rects = parsedFields.value(QStringLiteral("rects"));
+        for (const QString &face : rects.split(QLatin1Char(';'), QString::SkipEmptyParts)) {
+            const QStringList values = face.split(QLatin1Char(','));
+            if (values.size() < 4) continue;
+            std::array<float, 4> box;
+            for (int k = 0; k < 4; ++k) box[k] = qBound(0.0f, values[k].toFloat(), 1.0f);
+            if (box[2] > box[0] && box[3] > box[1]) faces.push_back(box);
+        }
+        if (!faces.empty()) {
+            m_lastFaces = faces;
+            m_faceSeen.restart();
+        }
+        if (faces != m_faces) {
+            m_faces = faces;
+            emit sceneChanged();
         }
     }
     if (parsedFields.value(QStringLiteral("meter")) == QLatin1String("1")) {
@@ -1772,24 +2269,44 @@ void Camera2Preview::parseCaptureResult(const QMap<QString, QString> &fields)
             emit rawImageReady(rawPath, path);
             return;
         }
-        m_originalJpegExif = ExifUtils::originalJpegExif(path);
-        QString rewriteError;
-        if (!rewriteJpegPixels(path, m_jpegOrientation, m_renderExposure,
-                               m_colorTemperature, m_colorTint,
-                               m_jpegQuality, &rewriteError)) {
-            emit imageCaptureFailed(rewriteError);
-            return;
-        }
-        if (!savePreviewMetadata(path, sizeFromString(m_captureSize))) {
-            emit imageCaptureFailed(errorString());
-            return;
-        }
-        emit imageCaptured(path, QStringLiteral("image/jpeg"));
+        finishJpegCapture(path);
     } else {
         emit imageCaptureFailed(commandError
                 ? QStringLiteral("Camera2 rejected capture command (code %1)").arg(fields.value(QStringLiteral("code")))
                 : QStringLiteral("Camera2 warm capture failed"));
     }
+}
+
+void Camera2Preview::finishJpegCapture(const QString &path)
+{
+    // The JPEG is on disk: feedback now, then rotate/adjust/re-encode
+    // (seconds for large sizes) off the GUI thread.
+    emit captureExposed();
+    m_originalJpegExif = ExifUtils::originalJpegExif(path);
+    const int orientation = m_jpegOrientation, quality = m_jpegQuality;
+    const qreal exposure = m_renderExposure;
+    const int temperature = m_colorTemperature, tint = m_colorTint;
+    const QString size = m_captureSize;
+    auto *watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, path, size]() {
+        const QString rewriteError = watcher->result();
+        watcher->deleteLater();
+        if (!rewriteError.isEmpty()) {
+            emit imageCaptureFailed(rewriteError);
+            return;
+        }
+        if (!savePreviewMetadata(path, sizeFromString(size))) {
+            emit imageCaptureFailed(errorString());
+            return;
+        }
+        emit imageCaptured(path, QStringLiteral("image/jpeg"));
+    });
+    watcher->setFuture(QtConcurrent::run([=]() {
+        QString error;
+        if (!rewriteJpegPixels(path, orientation, exposure, temperature, tint, quality, &error))
+            return error.isEmpty() ? QStringLiteral("Could not rewrite Camera2 JPEG") : error;
+        return QString();
+    }));
 }
 
 void Camera2Preview::setErrorString(const QString &errorString)
@@ -1805,6 +2322,6 @@ QString Camera2Preview::helperPath() const
 {
     const QString override = QString::fromLocal8Bit(qgetenv("SFOS_CAMERA2_PROBE"));
     return override.isEmpty()
-            ? QStringLiteral("/usr/libexec/rawfish/sfos-camera2-probe")
+            ? QStringLiteral("/usr/libexec/procam/sfos-camera2-probe")
             : override;
 }

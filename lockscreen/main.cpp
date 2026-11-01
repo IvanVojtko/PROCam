@@ -56,7 +56,7 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
 
     view->setSource(path + QLatin1String("lockscreen.qml"));
     CAMERA_STARTUP_MARK("lockscreen-app", startupTimer, "lockscreen.qml loaded status=%d", view->status());
-    view->setTitle(QStringLiteral("RAWfish"));
+    view->setTitle(QStringLiteral("ProCam"));
 
     QObject::connect(view->engine(), &QQmlEngine::quit, app.data(), &QCoreApplication::quit);
 

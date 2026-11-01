@@ -3,7 +3,7 @@
  * @brief Camera2 RAW still capture implementation.
  *
  * Creates Camera2 still/preview requests, waits for optional autofocus, captures
- * a RAW16 or RAW10 buffer, and writes JSON metadata needed by RAWfish conversion/DNG
+ * a RAW16 or RAW10 buffer, and writes JSON metadata needed by ProCam conversion/DNG
  * paths.
  */
 
@@ -1243,6 +1243,7 @@ static bool write_metadata_file(const char *path, const char *camera_id,
     fputs(",\n  \"noise_profile\":", file);
     print_double_array(file, result->noise_profile,
                        result->noise_profile_count);
+    fprintf(file, ",\n  \"zoom_ratio\":%.4f", context->zoom_ratio);
     fputs(",\n  \"calibration_transform1\":", file);
     print_rational_array(file, static_data->calibration1,
                          static_data->calibration1_count);

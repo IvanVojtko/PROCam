@@ -23,14 +23,23 @@ Item {
                                           !responseInvalid && sampleReason === "valid"
     readonly property bool canLock: active && !busy && manualSupported &&
                                    (fullyManual || (fresh && actualIso > 0 && actualTime > 0))
-    readonly property real selectedEv: Settings.global.exposureCompensation / 2.0
+    // Brightness set on the tap-to-focus slider (EV), in either mode.
+    property real tapEv: 0
+    // The EV wheel is a Pro control; Normal mode meters at 0 EV plus the tap slider.
+    readonly property real selectedEv: (Settings.global.advancedMode ? Settings.global.exposureCompensation / 2.0 : 0)
+                                       + tapEv
     readonly property var hardwareEv: ExposureMath.compensation(selectedEv, capabilities)
     readonly property real effectiveEv: fullyManual ? 0 : partial ? selectedEv : hardwareEv.ev
     readonly property int compensationSteps: isoLock > 0 || timeLock > 0 ? 0 : hardwareEv.steps
     readonly property string scene: isoLock > 0 || timeLock > 0 ? "manual" : Settings.mode.rawCaptureScene
     readonly property bool fresh: lastSampleMs > 0 && clockMs - lastSampleMs < Math.max(1500, appliedTime / 1000000 + 1000)
+    // Auto exposure: ready once it has settled, or a second after the last
+    // change when it keeps adjusting (some cameras, e.g. face-priority AE on
+    // the front camera, rarely report a converged state); the burst plan
+    // works from the current readings anyway. Manual pairs must be applied.
     readonly property bool captureReady: (!partial && !fullyManual &&
-                                         (!capabilities.result_exposure_supported || (fresh && autoReady))) ||
+                                         (!capabilities.result_exposure_supported
+                                          || (fresh && (autoReady || clockMs - lastCommandMs > 1000)))) ||
                                          (fresh && acknowledged && appliedIso > 0 && appliedTime > 0 &&
                                           (!isoLock || appliedIso === isoLock) && (!timeLock || appliedTime === timeLock))
     property int appliedIso: 0

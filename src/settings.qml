@@ -20,6 +20,12 @@ SettingsBase {
     property CameraExtensions camera2Capabilities: CameraExtensions {}
 
     readonly property int aspectRatio: mode.aspectRatio
+    // Photo shape for ProCam's renderer and viewfinder: the sensor's "4:3" or
+    // a centre crop to "16:9" (the per-camera aspect ratio setting).
+    readonly property string photoAspect: aspectRatio === CameraConfigs.AspectRatio_16_9 ? "16:9" : "4:3"
+    // Night mode: offered (moon in the top bar) when the scene is too dark,
+    // switched on by the user; not remembered across restarts.
+    property bool nightMode: false
     readonly property int exposureCompensationDefault: 0
     property var viewfinderGridValues: [ "none", "thirds" ]
 
@@ -39,13 +45,13 @@ SettingsBase {
                                                  "rawCaptureIso": 0,
                                                  "rawCaptureShutterNs": "0",
                                                  "rawCaptureAperture": 0,
-                                                 "rawCaptureNoiseReduction": 0,
+                                                 "rawCaptureNoiseReduction": 1,
                                                  "rawCaptureBracket": "off",
                                                  "rawCaptureJpegQuality": 92,
                                                  "rawCaptureRotation": 90,
                                                  "rawCaptureScene": "manual",
                                                  "rawCaptureProgressiveJpeg": false,
-                                                 "rawRenderEngine": "internal",
+                                                 "rawRenderEngine": "enhanced",
                                                  "rawCaptureRawFormat": "raw16",
                                                  "rawCaptureColorTemperature": 0,
                                                  "rawCaptureColorTint": 0,
@@ -102,7 +108,7 @@ SettingsBase {
     property ConfigurationGroup _global: ConfigurationGroup {
         id: globalSettings
 
-        path: "/apps/rawfish"
+        path: "/apps/procam"
 
         // Note! don't touch this for changing between cameras, see cameraDevice on root
         property string deviceId
@@ -127,14 +133,24 @@ SettingsBase {
         property int videoBitRate: 12000000
 
         property bool saveLocationInfo
+        // RAW files kept next to the JPEG, in Normal and Pro mode alike:
+        // "none", "raw16" (RAW + JSON), "dng" or "both".
         property string rawCaptureSaveFormat: saveRawCaptureFiles ? "raw16" : "none"
-        property bool saveRawCaptureFiles: true
+        property bool saveRawCaptureFiles: false
+        // Every frame of each burst kept as RAW (or YUV) + JSON, for
+        // diagnostics and training data; about 25 MB per frame.
+        property bool keepBurstFrames: false
         property bool estimatedExposureMetering: false
         property bool showExposureStatus: false
         property bool focusPeaking: false
         property bool exposureZebras: false
         property bool simpleHistogramVisible: true
         property bool experimentalExposureLayout: false
+        // Full-screen viewfinder (crops the 4:3 frame) or the whole frame fitted.
+        property bool viewfinderFill: true
+        // HDR: every photo is a merged RAW burst rendered to JPEG, in both
+        // capture formats and both modes.
+        property bool hdrBurst: true
         property bool advancedMode: false
         property string advancedCamera2CaptureFormat: "jpeg"
         property string advancedRawCaptureSize: "4096x3072"
@@ -148,13 +164,13 @@ SettingsBase {
         property string advancedRawCaptureExposure: "1.0"
         property int advancedRawCaptureIso: 0
         property string advancedRawCaptureShutterNs: "0"
-        property int advancedRawCaptureNoiseReduction: 0
+        property int advancedRawCaptureNoiseReduction: 1
         property string advancedRawCaptureBracket: "off"
         property int advancedRawCaptureJpegQuality: 92
         property int advancedRawCaptureRotation: 90
         property string advancedRawCaptureScene: "manual"
         property bool advancedRawCaptureProgressiveJpeg: false
-        property string advancedRawRenderEngine: "internal"
+        property string advancedRawRenderEngine: "enhanced"
         property string advancedRawCaptureRawFormat: "raw16"
         property int advancedRawCaptureColorTemperature: 0
         property int advancedRawCaptureColorTint: 0
@@ -206,13 +222,13 @@ SettingsBase {
             property int rawCaptureIso: 0
             property string rawCaptureShutterNs: "0"
             property int rawCaptureAperture: 0
-            property int rawCaptureNoiseReduction: 0
+            property int rawCaptureNoiseReduction: 1
             property string rawCaptureBracket: "off"
             property int rawCaptureJpegQuality: 92
             property int rawCaptureRotation: 90
             property string rawCaptureScene: "manual"
             property bool rawCaptureProgressiveJpeg: false
-            property string rawRenderEngine: "internal"
+            property string rawRenderEngine: "enhanced"
             property string rawCaptureRawFormat: "raw16"
             property int rawCaptureColorTemperature: 0
             property int rawCaptureColorTint: 0
@@ -228,6 +244,15 @@ SettingsBase {
             }
 
             Component.onCompleted: {
+                // Every Advanced capture setting is saved as soon as it is
+                // edited (JPEG quality has its own handler below), otherwise
+                // the next start restores the previous backup.
+                var saved = ["rawCaptureRotation"]
+                for (var key in SimpleMode.schema) saved.push(SimpleMode.schema[key][0])
+                saved.forEach(function(property) {
+                    if (property === "rawCaptureJpegQuality") return
+                    modeSettings[property + "Changed"].connect(function() { saveAdvancedSetting(property) })
+                })
                 rawCaptureIso = settingsDefaults["rawCaptureIso"]
                 rawCaptureShutterNs = settingsDefaults["rawCaptureShutterNs"]
                 if (rawCaptureScene === "none") {
@@ -243,6 +268,12 @@ SettingsBase {
                 }
             }
         }
+    }
+
+    function saveAdvancedSetting(property) {
+        // Edits only: startup restoration, normalisation and Simple overrides are not.
+        if (globalSettings.advancedMode && _lastAppliedAdvancedMode && !_normalizingCamera2Settings)
+            globalSettings["advanced" + property.charAt(0).toUpperCase() + property.slice(1)] = modeSettings[property]
     }
 
     function applyAdvancedMode() {
@@ -275,6 +306,13 @@ SettingsBase {
         var defaults = {}
         for (var property in settingsDefaults) defaults[property] = settingsDefaults[property]
         defaults.rawCaptureScene = "hdr"
+        // Normal mode renders every photo with ProCam's own pipeline: HDR
+        // merges a burst, HDR off renders one RAW frame. A device profile can
+        // still ask for the HAL's JPEG.
+        if (camera2CaptureFormatModel().indexOf("raw") >= 0) {
+            defaults.camera2CaptureFormat = "raw"
+            defaults.rawCaptureRawFormat = "raw16"
+        }
         // Resolve format before querying format-dependent size and RAW models.
         modeSettings.camera2CaptureFormat = SimpleMode.select("capture_format", overrides,
                     defaults.camera2CaptureFormat, camera2CaptureFormatModel())
@@ -298,7 +336,7 @@ SettingsBase {
             noise_reduction: camera2NoiseReductionModel(),
             bracket: camera2BracketModel(),
             render_engine: modeSettings.rawCaptureRawFormat === "raw10"
-                           ? ["internal"] : rawRenderEngineModel()
+                           ? ["enhanced", "internal"] : rawRenderEngineModel()
         }
         // Unsupported HDR must fall back to the ordinary scene, not another scene effect.
         if (choices.scene.indexOf(defaults.rawCaptureScene) < 0) defaults.rawCaptureScene = "manual"
@@ -367,6 +405,37 @@ SettingsBase {
 
     function camera2WarmCaptureSize() {
         return camera2Capabilities.camera2WarmCaptureSize(deviceId)
+    }
+
+    function camera2WarmJpegCaptureSupported(size) {
+        return camera2Capabilities.camera2WarmJpegCaptureSupported(deviceId, size)
+    }
+
+    function camera2WarmRawCaptureSupported(size) {
+        return camera2Capabilities.camera2WarmRawCaptureSupported(deviceId, size)
+    }
+
+    // JPEG mode renders single shots from a preview RAW16 frame with
+    // ProCam's own pipeline, like HDR and RAW mode (the HAL's JPEG is far
+    // softer); the HAL's JPEG is only the fallback without a RAW16 stream.
+    function camera2JpegFromRaw(cameraId) {
+        return modeSettings.camera2CaptureFormat === "jpeg"
+                && camera2Capabilities.camera2BurstRawSize(cameraId !== undefined ? cameraId : deviceId, "") !== ""
+    }
+
+    // HDR burst input: "raw16", or "yuv" for cameras without RAW output.
+    function camera2BurstFormat(cameraId) {
+        return camera2Capabilities.camera2BurstFormat(cameraId !== undefined ? cameraId : deviceId)
+    }
+
+    // Pass the camera id from bindings so they re-evaluate on camera changes.
+    function camera2BurstSupported(cameraId) {
+        return camera2Capabilities.camera2BurstSupported(cameraId !== undefined ? cameraId : deviceId)
+    }
+
+    function camera2BurstRawSize() {
+        return camera2Capabilities.camera2BurstRawSize(
+                    deviceId, modeSettings.camera2CaptureFormat === "raw" ? modeSettings.rawCaptureSize : "")
     }
 
     function camera2PreferredPreviewSize(cameraId) {
@@ -496,7 +565,10 @@ SettingsBase {
                 modeSettings.rawCaptureScene = "manual"
             }
             if (camera2NoiseReductionModel().indexOf(modeSettings.rawCaptureNoiseReduction) < 0) {
-                modeSettings.rawCaptureNoiseReduction = 0
+                // HAL noise reduction (FAST keeps the preview frame rate) when available.
+                modeSettings.rawCaptureNoiseReduction =
+                        camera2NoiseReductionModel().indexOf(settingsDefaults["rawCaptureNoiseReduction"]) >= 0
+                        ? settingsDefaults["rawCaptureNoiseReduction"] : 0
             }
             if (camera2BracketModel().indexOf(modeSettings.rawCaptureBracket) < 0) {
                 modeSettings.rawCaptureBracket = settingsDefaults["rawCaptureBracket"]
@@ -529,6 +601,27 @@ SettingsBase {
             return lenses
         }
         return model.length > 0 ? model : [ deviceId ]
+    }
+
+    // Camera2 ids by role ({front, main, ultrawide}, "" where missing), with
+    // Qt Multimedia's front camera as the fallback for bridges that do not
+    // report lens facing.
+    function camera2CameraRoles() {
+        var roles = camera2Capabilities.camera2CameraRoles()
+        var ids = camera2Capabilities.camera2LensModel(deviceId)
+        if (!roles.front && ids.indexOf(globalSettings.frontFacingDeviceId) >= 0) {
+            roles.front = globalSettings.frontFacingDeviceId
+        }
+        if (!roles.main) {
+            roles.main = ids.indexOf(globalSettings.previousBackFacingDeviceId) >= 0
+                    && globalSettings.previousBackFacingDeviceId !== roles.front
+                    ? globalSettings.previousBackFacingDeviceId : (ids.length > 0 ? ids[0] : "0")
+        }
+        return roles
+    }
+
+    function camera2LensFacing(cameraId) {
+        return camera2Capabilities.camera2LensFacing(cameraId || deviceId)
     }
 
     function camera2LensLabel(cameraId) {
@@ -745,11 +838,12 @@ SettingsBase {
     }
 
     function rawRenderEngineModel() {
-        return [ "internal", "fastjpeg" ]
+        return [ "enhanced", "internal", "fastjpeg" ]
     }
 
     function rawRenderEngineText(engine) {
         switch (engine) {
+        case "enhanced": return "Enhanced renderer"
         case "fastjpeg": return "Fast JPEG converter"
         default: return "Internal renderer"
         }
@@ -757,6 +851,7 @@ SettingsBase {
 
     function rawRenderEngineLabel(engine) {
         switch (engine) {
+        case "enhanced": return "Enhanced"
         case "fastjpeg": return "Fast JPEG"
         default: return "Internal"
         }

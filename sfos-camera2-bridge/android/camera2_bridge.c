@@ -282,8 +282,23 @@ static void append_lens_capabilities(struct json_writer *writer,
 {
     float focal_length = sfos_camera2_first_float(
         metadata, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, 0.0f);
+    int32_t facing = sfos_camera2_first_u8(metadata, ACAMERA_LENS_FACING, -1);
+    int32_t orientation = -1;
+    float physical_size[2] = { 0.0f, 0.0f };
 
-    json_appendf(writer, "{\"focal_length_mm\":%.9g}", focal_length);
+    sfos_camera2_copy_i32_array(metadata, ACAMERA_SENSOR_ORIENTATION,
+                                &orientation, 1);
+    sfos_camera2_copy_float_array(metadata, ACAMERA_SENSOR_INFO_PHYSICAL_SIZE,
+                                  physical_size, 2);
+    json_appendf(writer, "{\"focal_length_mm\":%.9g,\"facing\":", focal_length);
+    json_string(writer, facing == ACAMERA_LENS_FACING_FRONT ? "front"
+                        : facing == ACAMERA_LENS_FACING_BACK ? "back"
+                        : facing == ACAMERA_LENS_FACING_EXTERNAL ? "external"
+                        : "unknown");
+    json_appendf(writer,
+                 ",\"sensor_orientation\":%d,"
+                 "\"sensor_physical_size_mm\":[%.9g,%.9g]}",
+                 orientation, physical_size[0], physical_size[1]);
 }
 
 static void append_zoom_capabilities(struct json_writer *writer,
@@ -387,17 +402,15 @@ static void append_aperture_capabilities(struct json_writer *writer,
     json_appendf(writer, "]}");
 }
 
-static void append_outputs(struct json_writer *writer,
-                           const ACameraMetadata *metadata,
-                           int32_t wanted_format)
+static void append_outputs_for(struct json_writer *writer,
+                               const ACameraMetadata *metadata,
+                               uint32_t tag, int32_t wanted_format)
 {
     ACameraMetadata_const_entry entry;
     bool first = true;
 
     json_appendf(writer, "[");
-    if (ACameraMetadata_getConstEntry(
-            metadata, ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
-            &entry) == ACAMERA_OK) {
+    if (ACameraMetadata_getConstEntry(metadata, tag, &entry) == ACAMERA_OK) {
         for (uint32_t index = 0; index + 3 < entry.count; index += 4) {
             int32_t format = entry.data.i32[index];
             int32_t width = entry.data.i32[index + 1];
@@ -419,6 +432,64 @@ static void append_outputs(struct json_writer *writer,
         }
     }
     json_appendf(writer, "]");
+}
+
+static void append_outputs(struct json_writer *writer,
+                           const ACameraMetadata *metadata,
+                           int32_t wanted_format)
+{
+    append_outputs_for(writer, metadata,
+                       ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
+                       wanted_format);
+}
+
+static void append_i32_array(struct json_writer *writer,
+                             const ACameraMetadata *metadata, uint32_t tag)
+{
+    ACameraMetadata_const_entry entry;
+    json_appendf(writer, "[");
+    if (ACameraMetadata_getConstEntry(metadata, tag, &entry) == ACAMERA_OK) {
+        for (uint32_t index = 0; index < entry.count; ++index) {
+            json_appendf(writer, "%s%d", index ? "," : "", entry.data.i32[index]);
+        }
+    }
+    json_appendf(writer, "]");
+}
+
+/* Capabilities and the full-resolution mode of quad-Bayer (ultra high
+ * resolution) sensors, whose default outputs are binned (Android 12+;
+ * empty on older HALs). */
+static void append_sensor_modes(struct json_writer *writer,
+                                const ACameraMetadata *metadata)
+{
+    ACameraMetadata_const_entry entry;
+    bool ultra_high_resolution = false;
+    json_appendf(writer, "{\"capabilities\":[");
+    if (ACameraMetadata_getConstEntry(
+            metadata, ACAMERA_REQUEST_AVAILABLE_CAPABILITIES, &entry) == ACAMERA_OK) {
+        for (uint32_t index = 0; index < entry.count; ++index) {
+            json_appendf(writer, "%s%d", index ? "," : "", entry.data.u8[index]);
+            ultra_high_resolution = ultra_high_resolution ||
+                entry.data.u8[index] ==
+                    ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR;
+        }
+    }
+    json_appendf(writer, "],\"ultra_high_resolution_sensor\":%s",
+                 ultra_high_resolution ? "true" : "false");
+    json_appendf(writer, ",\"binning_factor\":");
+    append_i32_array(writer, metadata, ACAMERA_SENSOR_INFO_BINNING_FACTOR);
+    json_appendf(writer, ",\"active_array_maximum_resolution\":");
+    append_i32_array(writer, metadata,
+                     ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+    json_appendf(writer, ",\"raw_outputs_maximum_resolution\":");
+    append_outputs_for(writer, metadata,
+                       ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION,
+                       AIMAGE_FORMAT_RAW16);
+    json_appendf(writer, ",\"jpeg_outputs_maximum_resolution\":");
+    append_outputs_for(writer, metadata,
+                       ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION,
+                       AIMAGE_FORMAT_JPEG);
+    json_appendf(writer, "}");
 }
 
 /**
@@ -526,6 +597,8 @@ int sfos_camera2_probe(char *out, size_t out_size)
         append_outputs(&writer, metadata, AIMAGE_FORMAT_JPEG);
         json_appendf(&writer, ",\"preview_outputs\":");
         append_outputs(&writer, metadata, AIMAGE_FORMAT_YUV_420_888);
+        json_appendf(&writer, ",\"sensor_modes\":");
+        append_sensor_modes(&writer, metadata);
         json_appendf(&writer, "}");
 
         ACameraMetadata_free(metadata);

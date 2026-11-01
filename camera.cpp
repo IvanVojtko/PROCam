@@ -48,15 +48,15 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
     QScopedPointer<QGuiApplication> app(new QGuiApplication(argc, argv));
     QScopedPointer<QQuickView> view(new QQuickView);
 #endif
-    app->setOrganizationName(QStringLiteral("com.rawfish"));
-    app->setApplicationName(QStringLiteral("rawfish"));
+    app->setOrganizationName(QStringLiteral("com.procam"));
+    app->setApplicationName(QStringLiteral("procam"));
 
     QString path(QLatin1String(DEPLOYMENT_PATH));
 
     view->engine()->setBaseUrl(QUrl::fromLocalFile(path));
     view->setSource(path + QLatin1String("camera.qml"));
     CAMERA_STARTUP_MARK("app", startupTimer, "camera.qml loaded status=%d", view->status());
-    view->setTitle(QStringLiteral("RAWfish"));
+    view->setTitle(QStringLiteral("ProCam"));
 
     if (app->arguments().contains("-desktop")) {
         view->resize(480, 854);

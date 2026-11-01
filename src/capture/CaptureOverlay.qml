@@ -13,6 +13,7 @@ import Nemo.Configuration 1.0
 import Nemo.Notifications 1.0
 import org.nemomobile.systemsettings 1.0
 import Sailfish.Silica 1.0
+import Nemo.Ngf 1.0
 import com.vivid.camera 1.0
 
 import "../settings"
@@ -32,6 +33,8 @@ SettingsOverlay {
     onZoomReleased: zoomController.release()
     onZoomCanceled: zoomController.cancel()
     onZoomResetRequested: if (zoomController.allowed) zoomController.setDirect(1)
+    // The 1x / 2x presets work in Normal mode too.
+    onZoomPresetRequested: zoomController.setDirect(value)
 
     function cancelZoom() {
         zoomController.cancel()
@@ -129,7 +132,7 @@ SettingsOverlay {
         for (var i = 0; i < settings.length; ++i)
             metadata.requested_settings[settings[i]] = Settings.mode[settings[i]]
         metadata.requested_settings.whiteBalance = Settings.global.whiteBalance
-        metadata.exposure_compensation_requested = Settings.global.exposureCompensation
+        metadata.exposure_compensation_requested = Settings.global.advancedMode ? Settings.global.exposureCompensation : 0
         if (metadata.save_location && positionSource.active && positionSource.position.coordinate.isValid) {
             var position = positionSource.position
             metadata.gps = { latitude: position.coordinate.latitude,
@@ -295,17 +298,21 @@ SettingsOverlay {
             focusPoint.x = focusPoint.x / focusArea.width
             focusPoint.y = focusPoint.y / focusArea.height
 
-            // Mirror the point if the viewfinder is mirrored.
-            if (captureView._horizontalMirror) {
+            // Mirror the point if the viewfinder is mirrored. Camera2 points
+            // stay in display coordinates; Camera2Preview.mapToSensor() handles it.
+            if (captureView._horizontalMirror && !captureView._camera2ViewfinderActive) {
                 focusPoint.x = 1 - focusPoint.x
             }
-            if (captureView._verticalMirror) {
+            if (captureView._verticalMirror && !captureView._camera2ViewfinderActive) {
                 focusPoint.y = 1 - focusPoint.y
             }
 
             if (focusPoint.x >= 0.0 && focusPoint.x <= 1.0 && focusPoint.y >= 0.0 && focusPoint.y <= 1.0) {
                 captureView.setFocusPoint(focusPoint)
             }
+        } else if (camera.captureMode == Camera.CaptureVideo && !captureView.recording) {
+            tapBrightness.videoPoint = Qt.point(mouse.x, mouse.y)
+            captureView.showVideoBrightness()
         }
     }
 
@@ -320,8 +327,12 @@ SettingsOverlay {
         anchors.centerIn: parent
         background.visible: icon.opacity < 1.0
         enabled: !captureView._captureOnFocus
+        // A short press-in, like Android shutters.
+        scale: pressed && containsMouse ? 0.88 : 1.0
+        Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutQuad } }
 
         onPressed: {
+            shutterHaptic.play()
             if (!captureView._camera2ViewfinderActive) {
                 camera.lockAutoFocus()
             }
@@ -388,12 +399,79 @@ SettingsOverlay {
         z: 10
     }
 
+    // Recording time in a pill with a red dot, where the floating top bar
+    // sits (it hides while recording).
+    Rectangle {
+        anchors {
+            verticalCenter: timerLabel.verticalCenter
+            left: timerLabel.left
+            right: timerLabel.right
+            leftMargin: -Theme.paddingMedium - recordingDot.width - Theme.paddingSmall
+            rightMargin: -Theme.paddingMedium
+        }
+        height: timerLabel.height + Theme.paddingSmall
+        radius: height / 2
+        color: Theme.rgba("black", 0.45)
+        opacity: timerLabel.opacity
+
+        Rectangle {
+            id: recordingDot
+
+            anchors {
+                left: parent.left
+                leftMargin: Theme.paddingMedium
+                verticalCenter: parent.verticalCenter
+            }
+            width: Theme.paddingMedium
+            height: width
+            radius: width / 2
+            color: "#ff3b30"
+            SequentialAnimation on opacity {
+                running: captureView.recording
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.3; duration: 600 }
+                NumberAnimation { to: 1.0; duration: 600 }
+            }
+        }
+    }
+
+    // Night mode exposes for a second or two: ask for a steady hand.
+    Rectangle {
+        anchors.centerIn: parent
+        width: holdStillRow.width + 2 * Theme.paddingLarge
+        height: holdStillRow.height + 2 * Theme.paddingMedium
+        radius: height / 2
+        color: Theme.rgba("black", 0.55)
+        opacity: captureView.nightCaptureRunning ? 1.0 : 0.0
+        visible: opacity > 0.0
+        Behavior on opacity { FadeAnimator {} }
+
+        Row {
+            id: holdStillRow
+
+            anchors.centerIn: parent
+            spacing: Theme.paddingMedium
+
+            MoonIcon {
+                anchors.verticalCenter: parent.verticalCenter
+                lit: true
+            }
+
+            Label {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Hold still"
+                font.pixelSize: Theme.fontSizeMedium
+                color: Theme.lightPrimaryColor
+            }
+        }
+    }
+
     Label {
         id: timerLabel
 
-        y: Theme.paddingMedium
-           + (isPortrait ? Screen.topCutout.height : 0)
+        y: settingsOverlay._safeTopMargin + Theme.paddingMedium
         anchors.horizontalCenter: parent.horizontalCenter
+        anchors.horizontalCenterOffset: Theme.paddingSmall
         opacity: captureView.recording ? 1.0 : 0.0
         Behavior on opacity { FadeAnimator {} }
 
@@ -457,12 +535,30 @@ SettingsOverlay {
     Item {
         id: grid
 
-        property real gridWidth: captureView.viewfinderOrientation % 180 == 0 ? focusArea.width : focusArea.height
-        property real gridHeight: captureView.viewfinderOrientation % 180 == 0 ? focusArea.height : focusArea.width
+        // Camera2: the part of the drawn frame that is on screen (all of it
+        // when fitted, the screen when cropped to fill).
+        readonly property var camera2Visible: {
+            var viewfinder = captureView._camera2ViewfinderActive ? captureView.camera2Viewfinder : null
+            if (!viewfinder || !parent) return null
+            var content = viewfinder.contentRect
+            var mapped = parent.mapFromItem(viewfinder, content.x, content.y, content.width, content.height)
+            var left = Math.max(0, mapped.x), top = Math.max(0, mapped.y)
+            var right = Math.min(parent.width, mapped.x + mapped.width)
+            var bottom = Math.min(parent.height, mapped.y + mapped.height)
+            return right > left && bottom > top ? Qt.rect(left, top, right - left, bottom - top) : null
+        }
+        property real gridWidth: camera2Visible ? camera2Visible.width
+                                 : captureView.viewfinderOrientation % 180 == 0 ? focusArea.width : focusArea.height
+        property real gridHeight: camera2Visible ? camera2Visible.height
+                                  : captureView.viewfinderOrientation % 180 == 0 ? focusArea.height : focusArea.width
 
         anchors.centerIn: parent
-        anchors.verticalCenterOffset: isPortrait ? captureView.viewfinderOffset : 0
-        anchors.horizontalCenterOffset: isPortrait ? 0 : captureView.viewfinderOffset
+        anchors.verticalCenterOffset: camera2Visible
+                                      ? camera2Visible.y + camera2Visible.height / 2 - parent.height / 2
+                                      : isPortrait ? captureView.viewfinderOffset : 0
+        anchors.horizontalCenterOffset: camera2Visible
+                                        ? camera2Visible.x + camera2Visible.width / 2 - parent.width / 2
+                                        : isPortrait ? 0 : captureView.viewfinderOffset
 
         visible: Settings.global.viewfinderGrid != "none"
                  && (camera.cameraStatus == Camera.ActiveStatus
@@ -506,11 +602,121 @@ SettingsOverlay {
         }
     }
 
+    // Pixel-style brightness after tap-to-focus: drag the sun along the bar
+    // beside the focus ring (+-2 EV).
+    Item {
+        id: tapBrightness
+
+        readonly property bool video: Settings.global.captureMode === "video"
+        // Where the video viewfinder was tapped (overlay coordinates).
+        property point videoPoint
+        readonly property bool shown: settingsOverlay.settingsOpacity < 0.5 && !!focusArea
+                                      && (video ? captureView.videoBrightnessActive && !captureView.recording
+                                                : captureView._camera2ViewfinderActive && captureView.tapFocusActive)
+        readonly property real ringHalf: focusArea && !video ? focusArea.width * 0.075 : Theme.paddingLarge
+        readonly property point ring: video
+                                      ? videoPoint
+                                      : focusArea
+                                        ? focusArea.mapToItem(settingsOverlay,
+                                                              captureView._camera2FocusPoint.x * focusArea.width,
+                                                              captureView._camera2FocusPoint.y * focusArea.height)
+                                        : Qt.point(0, 0)
+        readonly property real fraction: (2 - captureView.tapExposureEv) / 4 // 0 = +2 EV at the top
+
+        width: Theme.itemSizeExtraSmall
+        height: Theme.itemSizeLarge * 1.6
+        x: ring.x + ringHalf + Theme.paddingMedium + width <= settingsOverlay.width
+           ? ring.x + ringHalf + Theme.paddingMedium
+           : ring.x - ringHalf - Theme.paddingMedium - width
+        y: Math.max(0, Math.min(settingsOverlay.height - height, ring.y - height / 2))
+        z: 3
+        visible: shown
+        opacity: shown ? 1.0 : 0.0
+        Behavior on opacity { FadeAnimation {} }
+
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.max(2, Math.round(Theme.pixelRatio * 2))
+            height: parent.height
+            radius: width / 2
+            color: Theme.rgba("white", 0.7)
+        }
+
+        // The sun: a filled disc with short rays.
+        Item {
+            id: sun
+
+            width: Theme.iconSizeSmall
+            height: width
+            anchors.horizontalCenter: parent.horizontalCenter
+            y: tapBrightness.fraction * (tapBrightness.height - height)
+
+            Repeater {
+                model: 8
+                Rectangle {
+                    width: Math.max(2, Math.round(Theme.pixelRatio * 2))
+                    height: sun.height * 0.22
+                    radius: width / 2
+                    color: "#ffd54a"
+                    x: sun.width / 2 - width / 2
+                    y: 0
+                    // Pivot at the disc centre.
+                    transform: Rotation {
+                        origin.x: width / 2
+                        origin.y: sun.height / 2
+                        angle: index * 45
+                    }
+                }
+            }
+            Rectangle {
+                anchors.centerIn: parent
+                width: parent.width * 0.5
+                height: width
+                radius: width / 2
+                color: "#ffd54a"
+            }
+        }
+
+        Label {
+            anchors {
+                right: parent.left
+                rightMargin: Theme.paddingSmall
+                verticalCenter: sun.verticalCenter
+            }
+            visible: brightnessDrag.pressed
+            text: (captureView.tapExposureEv > 0 ? "+" : "") + captureView.tapExposureEv.toFixed(1)
+            font.pixelSize: Theme.fontSizeExtraSmall
+            color: "#ffd54a"
+        }
+
+        MouseArea {
+            id: brightnessDrag
+
+            anchors.fill: parent
+            anchors.margins: -Theme.paddingMedium
+            preventStealing: true
+            function apply(mouseY) {
+                // The area reaches past the bar by -anchors.margins on each side.
+                var f = Math.max(0, Math.min(1, (mouseY + anchors.margins - sun.height / 2)
+                                             / (tapBrightness.height - sun.height)))
+                captureView.setTapExposure(Math.round((2 - 4 * f) * 10) / 10)
+            }
+            onPressed: apply(mouse.y)
+            onPositionChanged: apply(mouse.y)
+        }
+    }
+
+    NonGraphicalFeedback {
+        id: shutterHaptic
+        event: "feedback_press"
+    }
+
     ZoomIndicator {
         id: zoomIndicator
 
         anchors {
             top: timerLabel.bottom
+            topMargin: settingsOverlay.floatingTopBarBottom
             horizontalCenter: parent.horizontalCenter
         }
 
@@ -537,6 +743,6 @@ SettingsOverlay {
 
     ConfigurationValue {
         id: previousStoragePathStatus
-        key: "/apps/rawfish/previousStoragePathStatus"
+        key: "/apps/procam/previousStoragePathStatus"
     }
 }

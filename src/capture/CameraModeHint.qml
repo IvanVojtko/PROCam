@@ -50,6 +50,6 @@ Loader {
         id: counter
 
         limit: 2
-        key: "/apps/rawfish/cameraModeHintCount"
+        key: "/apps/procam/cameraModeHintCount"
     }
 }

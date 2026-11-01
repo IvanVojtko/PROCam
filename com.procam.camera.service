@@ -4,5 +4,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 [D-BUS Service]
-Name=com.rawfish.camera
-Exec=/usr/bin/rawfish
+Name=com.procam.camera
+Exec=/usr/bin/procam

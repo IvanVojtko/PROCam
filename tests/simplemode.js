@@ -20,7 +20,7 @@ const choices = {
     camera2FocusDistanceModel: ['0', '0.25', '1'], rawCaptureFocusTimeoutModel: [1, 3, 5],
     rawCaptureExposureModel: ['0.5', '1.0', '2.0'], camera2IsoModel: [0, 100, 200],
     camera2ShutterModel: ['0', '10000000'], camera2NoiseReductionModel: [0, 1],
-    camera2BracketModel: ['off', 'ev1'], rawRenderEngineModel: ['internal', 'fastjpeg'],
+    camera2BracketModel: ['off', 'ev1'], rawRenderEngineModel: ['enhanced', 'internal', 'fastjpeg'],
     rawCaptureRotationModel: [0, 90, 180, 270]
 };
 const context = {
@@ -36,6 +36,8 @@ for (const key in simple.schema) {
     context.globalSettings['advanced' + property[0].toUpperCase() + property.slice(1)] = defaults[property];
 }
 context.globalSettings.advancedRawCaptureRotation = 90;
+const savedProperties = ['rawCaptureRotation'].concat(Object.values(simple.schema).map(rule => rule[0]));
+assert(source.includes('modeSettings[property + "Changed"].connect(function() { saveAdvancedSetting(property) })'));
 const qualityHandler = source.match(/            onRawCaptureJpegQualityChanged: \{([\s\S]*?)\n            \}/);
 assert(qualityHandler);
 // Emulate the QML change handlers, including synchronous re-entry.
@@ -46,9 +48,12 @@ context.modeSettings = new Proxy({...defaults}, {set(target, key, value) {
         context.normalizeCamera2Settings();
     if (changed && key === 'rawCaptureJpegQuality')
         vm.runInContext(qualityHandler[1], context);
+    else if (changed && savedProperties.includes(key))
+        context.saveAdvancedSetting(key);
     return true;
 }});
 vm.createContext(context);
+vm.runInContext(source.match(/    function saveAdvancedSetting\(property\) \{[\s\S]*?\n    \}/)[0], context);
 for (const name of ['applyAdvancedMode', 'applySimpleModeSettings', 'normalizeCamera2Settings', 'camera2ManualFocusDistanceModel']) {
     const match = source.match(new RegExp('    function ' + name + '\\(\\) \\{[\\s\\S]*?\\n    \\}'));
     assert(match, name);
@@ -83,12 +88,12 @@ choices.camera2SceneModel = ['manual'];
 context.normalizeCamera2Settings();
 assert.strictEqual(context.modeSettings.rawCaptureScene, 'manual');
 assert.strictEqual(context.modeSettings.rawCaptureSize, '3264x2448');
-// RAW10 rejects the incompatible renderer; format changes exercise the recursion guard.
+// RAW10 rejects the incompatible renderer (falls back to the RAW10-capable default); format changes exercise the recursion guard.
 overrides = {capture_format: 'raw', raw_format: 'raw10', render_engine: 'fastjpeg'};
 context.normalizeCamera2Settings();
 assert.strictEqual(context.modeSettings.camera2CaptureFormat, 'raw');
 assert.strictEqual(context.modeSettings.rawCaptureRawFormat, 'raw10');
-assert.strictEqual(context.modeSettings.rawRenderEngine, 'internal');
+assert.strictEqual(context.modeSettings.rawRenderEngine, 'enhanced');
 assert.strictEqual(context._normalizingCamera2Settings, false);
 // Advanced settings survive Simple overrides and repeated Simple startup application.
 context.globalSettings.advancedMode = true;
@@ -115,6 +120,14 @@ context.modeSettings.rawCaptureJpegQuality = 92;
 assert.strictEqual(context.globalSettings.advancedRawCaptureJpegQuality, 96);
 context.applyAdvancedMode();
 assert.strictEqual(context.modeSettings.rawCaptureJpegQuality, 96);
+// Any Advanced edit (not only quality) survives a restart without a mode switch.
+context.modeSettings.camera2CaptureFormat = 'raw';
+context.modeSettings.rawCaptureAperture = 22;
+assert.strictEqual(context.globalSettings.advancedCamera2CaptureFormat, 'raw');
+context._lastAppliedAdvancedMode = false; // Fresh startup before restoration.
+context.applyAdvancedMode();
+assert.strictEqual(context.modeSettings.camera2CaptureFormat, 'raw');
+assert.strictEqual(context.modeSettings.rawCaptureAperture, 22);
 // Simple HAL overrides must not replace the saved Advanced quality.
 overrides = {jpeg_quality: 75};
 context.globalSettings.advancedMode = false;

@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 ProCam Contributors
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Host tests: no Sailfish SDK or device needed. Called by ci.yml and
+# release.yml.
+name: Tests
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit, branch or tag to test (default the triggering ref).
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: Host tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QMAKE: /usr/lib/qt5/bin/qmake
+      QMLLINT: /usr/lib/qt5/bin/qmllint
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Install Qt 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qtbase5-dev qt5-qmake qtdeclarative5-dev-tools pkg-config
+
+      - name: Settings and capture-flow checks
+        run: |
+          set -euo pipefail
+          for test in tests/*.js; do
+            echo "::group::${test}"
+            node "${test}"
+            echo "::endgroup::"
+          done
+
+      - name: QML syntax
+        run: |
+          set -euo pipefail
+          git ls-files -z '*.qml' | xargs -0 -n 20 "${QMLLINT}"
+
+      - name: Camera2 bridge command parser
+        run: |
+          set -euo pipefail
+          gcc -std=c11 -Wall -Wextra -Werror -Isfos-camera2-bridge/android \
+            sfos-camera2-bridge/tests/preview_commands.c -o "${RUNNER_TEMP}/preview_commands"
+          "${RUNNER_TEMP}/preview_commands"
+
+      # The RAW pipeline (merge, super-resolution, tone mapping, night mode,
+      # YUV bursts) and RAW bracketing are plain C++ and run on the host.
+      - name: RAW pipeline and helper unit tests
+        run: |
+          set -euo pipefail
+          for project in rawpipeline rawbracket previewaids previewsize previewanalysis; do
+            echo "::group::${project}"
+            mkdir -p "build/host-${project}"
+            (
+              cd "build/host-${project}"
+              "${QMAKE}" "../../tests/${project}.pro"
+              make -j"$(nproc)"
+              ./tst_"${project}"
+            )
+            echo "::endgroup::"
+          done

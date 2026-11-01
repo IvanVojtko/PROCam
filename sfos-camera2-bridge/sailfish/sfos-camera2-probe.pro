@@ -13,5 +13,5 @@ SOURCES += main.c
 
 LIBS += -ldl
 
-target.path = /usr/libexec/rawfish
+target.path = /usr/libexec/procam
 INSTALLS += target

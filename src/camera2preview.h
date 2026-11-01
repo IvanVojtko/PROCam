@@ -1,6 +1,9 @@
 #ifndef CAMERA2PREVIEW_H
 #define CAMERA2PREVIEW_H
 
+#include "previewanalysis.h"
+
+#include <QElapsedTimer>
 #include <QImage>
 #include <QJsonObject>
 #include <QMap>
@@ -20,6 +23,12 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(QString cameraId READ cameraId WRITE setCameraId NOTIFY cameraIdChanged)
     Q_PROPERTY(QSize previewSize READ previewSize WRITE setPreviewSize NOTIFY previewSizeChanged)
     Q_PROPERTY(QString captureSize READ captureSize WRITE setCaptureSize NOTIFY captureSizeChanged)
+    // RAW16 stream size when it differs from captureSize (HDR in JPEG mode).
+    Q_PROPERTY(QString rawCaptureSize READ rawCaptureSize WRITE setRawCaptureSize NOTIFY rawCaptureSizeChanged)
+    // "raw16", or "yuv" for cameras without RAW output (I420 burst frames).
+    Q_PROPERTY(QString rawCaptureFormat READ rawCaptureFormat WRITE setRawCaptureFormat NOTIFY rawCaptureFormatChanged)
+    // The helper's last RAW/YUV stream report ("raw=0 raw_error=session:-10003 ..."), for diagnostics.
+    Q_PROPERTY(QString rawStreamStatus READ rawStreamStatus NOTIFY rawCaptureReadyChanged)
     Q_PROPERTY(int captureTimeout READ captureTimeout WRITE setCaptureTimeout NOTIFY captureTimeoutChanged)
     Q_PROPERTY(bool jpegCaptureEnabled READ jpegCaptureEnabled WRITE setJpegCaptureEnabled NOTIFY jpegCaptureEnabledChanged)
     Q_PROPERTY(bool rawCaptureEnabled READ rawCaptureEnabled WRITE setRawCaptureEnabled NOTIFY rawCaptureEnabledChanged)
@@ -29,6 +38,9 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(int orientation READ orientation WRITE setOrientation NOTIFY orientationChanged)
     Q_PROPERTY(bool mirror READ mirror WRITE setMirror NOTIFY mirrorChanged)
     Q_PROPERTY(bool fill READ fill WRITE setFill NOTIFY fillChanged)
+    // Photo shape ("4:3" sensor frame or "16:9" crop): the drawn frame and
+    // the instant thumbnail show only what the photo will contain.
+    Q_PROPERTY(QString photoAspect READ photoAspect WRITE setPhotoAspect NOTIFY photoAspectChanged)
     Q_PROPERTY(qreal zoom READ zoom WRITE setZoom NOTIFY zoomChanged)
     Q_PROPERTY(QString focusMode READ focusMode WRITE setFocusMode NOTIFY focusModeChanged)
     Q_PROPERTY(qreal focusDistance READ focusDistance WRITE setFocusDistance NOTIFY focusDistanceChanged)
@@ -47,6 +59,15 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(int liveSensorSensitivity READ liveSensorSensitivity NOTIFY liveSensorSensitivityChanged)
     Q_PROPERTY(QString liveExposureTime READ liveExposureTime NOTIFY liveExposureTimeChanged)
     Q_PROPERTY(QVariantList histogram READ histogram NOTIFY histogramChanged)
+    // Faces the camera detects, as [left, top, right, bottom] normalised on
+    // the full sensor frame (the burst renderer's coordinates).
+    Q_PROPERTY(QVariantList faces READ faces NOTIFY sceneChanged)
+    // Front camera: a dark centre against bright light counts as the face
+    // when the camera detects none (backlit selfie).
+    Q_PROPERTY(bool selfieCamera MEMBER m_selfieCamera NOTIFY sceneChanged)
+    // Where the frame is drawn, in item coordinates (larger than the item when
+    // fill crops it).
+    Q_PROPERTY(QRectF contentRect READ contentRect NOTIFY contentRectChanged)
     Q_PROPERTY(QString errorString READ errorString NOTIFY errorStringChanged)
 
 public:
@@ -68,6 +89,18 @@ public:
 
     QString captureSize() const;
     void setCaptureSize(const QString &captureSize);
+    QString rawCaptureSize() const;
+    void setRawCaptureSize(const QString &rawCaptureSize);
+    QString rawCaptureFormat() const;
+    QString rawStreamStatus() const;
+    // Small JPEG of the current frame as the photo will look (unmirrored,
+    // zoom crop, rotated by captureRotation), for an instant gallery
+    // thumbnail while the photo is processed. Returns a file URL or "".
+    Q_INVOKABLE QString saveThumbnail(int captureRotation);
+    // For the burst plan: motion (frame widths per second, -1 unknown),
+    // subjectMotion (0..1), faceLuma (0..1, -1 without a face), faceClipped.
+    Q_INVOKABLE QVariantMap sceneInfo() const;
+    void setRawCaptureFormat(const QString &rawCaptureFormat);
 
     int captureTimeout() const;
     void setCaptureTimeout(int captureTimeout);
@@ -93,7 +126,10 @@ public:
     void setMirror(bool mirror);
 
     bool fill() const;
+    QRectF contentRect() const;
     void setFill(bool fill);
+    QString photoAspect() const;
+    void setPhotoAspect(const QString &aspect);
 
     qreal zoom() const;
     void setZoom(qreal zoom);
@@ -138,6 +174,7 @@ public:
     qreal focalLength() const;
     int liveSensorSensitivity() const;
     QString liveExposureTime() const;
+    QVariantList faces() const;
     QVariantList histogram() const;
 
     QString errorString() const;
@@ -186,6 +223,25 @@ public:
                                        const QVariantList &metadataPaths,
                                        int sensorSensitivity,
                                        const QVariantList &exposureTimes);
+    // Equal-exposure RAW burst for merging (2 to 8 frames); completes with
+    // rawBracketReady like a bracket.
+    // Item point to normalised sensor (active array) coordinates for focus and
+    // metering regions: undoes the draw scale/crop, mirroring and rotation.
+    // Returns (-1, -1) outside the drawn frame.
+    Q_INVOKABLE QPointF mapToSensor(qreal x, qreal y) const;
+    Q_INVOKABLE bool captureRawBurst(const QVariantList &rawPaths,
+                                     const QVariantList &metadataPaths,
+                                     int sensorSensitivity,
+                                     const QString &exposureTime);
+
+protected:
+    void geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+
+private:
+    bool frameGeometry(const QSizeF &imageSize, QRectF *drawRect, QRectF *sourceRect) const;
+    bool startRawFrameSet(const QByteArray &command, const QVariantList &rawPaths,
+                          const QVariantList &metadataPaths);
+    void finishJpegCapture(const QString &path);
 
 signals:
     void activeChanged();
@@ -195,6 +251,8 @@ signals:
     void cameraIdChanged();
     void previewSizeChanged();
     void captureSizeChanged();
+    void rawCaptureSizeChanged();
+    void rawCaptureFormatChanged();
     void captureTimeoutChanged();
     void jpegCaptureEnabledChanged();
     void rawCaptureEnabledChanged();
@@ -204,6 +262,7 @@ signals:
     void orientationChanged();
     void mirrorChanged();
     void fillChanged();
+    void photoAspectChanged();
     void zoomChanged();
     void focusModeChanged();
     void focusDistanceChanged();
@@ -222,6 +281,10 @@ signals:
     void liveSensorSensitivityChanged();
     void liveExposureTimeChanged();
     void histogramChanged();
+    void sceneChanged();
+    void contentRectChanged();
+    // A warm JPEG was captured; the final file follows with imageCaptured.
+    void captureExposed();
     void exposureSample(const QVariantMap &sample);
     void errorStringChanged();
     void imageCaptured(const QString &path, const QString &mimeType);
@@ -251,6 +314,16 @@ private:
     void parseMetadata(const QByteArray &payload);
     void parseCaptureResult(const QMap<QString, QString> &fields);
     void updateHistogram(const QImage &frame);
+    void updateHistogramYuv();
+    bool hasFrame() const;
+    QSize frameSize() const;
+    // The frame as RGB888 in sensor orientation (converted from YUV on demand).
+    QImage rgbFrame() const;
+    // The frame as shown: rotated by m_orientation, mirrored if m_mirror.
+    QSize displaySize() const;
+    QImage displayFrame() const;
+    int frameRotation() const;
+    bool frameMirror() const;
     void sendSettings();
     void sendSettings(bool captureExposure);
     void sendExposureSettings(bool captureExposure);
@@ -264,15 +337,21 @@ private:
     QString m_cameraId = QStringLiteral("0");
     QSize m_previewSize;
     QString m_captureSize = QStringLiteral("4096x3072");
+    QString m_rawCaptureSize;
+    QString m_rawCaptureFormat = QStringLiteral("raw16");
+    QString m_rawStreamStatus;
     int m_captureTimeout = 30;
     bool m_jpegCaptureEnabled = false;
     bool m_rawCaptureEnabled = false;
+    // The running bridge confirmed it has a RAW stream (streams packet).
+    bool m_rawStreamActive = false;
     int m_jpegQuality = 92;
     int m_jpegOrientation = 90;
     QVariant m_source;
     int m_orientation = 90;
     bool m_mirror = false;
     bool m_fill = false;
+    QString m_photoAspect = QStringLiteral("4:3");
     qreal m_zoom = 1.0;
     qreal m_focusX = -1.0;
     qreal m_focusY = -1.0;
@@ -294,7 +373,34 @@ private:
     QString m_liveExposureTime = QStringLiteral("0");
     QVariantList m_histogram;
     QString m_errorString;
+    // Newest preview frame as the bridge sent it (sensor orientation, not
+    // mirrored) when it came as RGB; the scene graph rotates and mirrors it.
     QImage m_frame;
+    // Or the newest frame as I420 (Y, then U and V at half resolution);
+    // then m_frame is null. Shared with the render thread, never modified.
+    QByteArray m_yuvFrame;
+    QSize m_yuvSize;
+    // m_frame is the blurred last frame of the previous camera, already as
+    // shown (no rotation or mirror to apply).
+    bool m_frameDisplayOriented = false;
+    quint64 m_frameSerial = 0;
+    quint64 m_drawnSerial = 0;
+    QElapsedTimer m_histogramTimer;
+    PreviewAnalysis::MotionMeter m_motionMeter;
+    QElapsedTimer m_motionClock;
+    std::vector<std::array<float, 4>> m_faces;
+    // The last detected faces, kept for 1.5 s after detection drops out
+    // (a face turning or lit from behind at the moment of the shot), and the
+    // backlit-selfie fallback.
+    std::vector<std::array<float, 4>> m_lastFaces, m_subjectFaces;
+    QElapsedTimer m_faceSeen;
+    bool m_selfieCamera = false;
+    std::vector<std::array<float, 4>> effectiveFaces(QString *source = nullptr) const;
+    PreviewAnalysis::FaceExposure m_faceExposure;
+    // Preview rate diagnostics, logged every 15 s.
+    QElapsedTimer m_statsTimer;
+    int m_statsFrames = 0;
+    qint64 m_statsParseNs = 0;
     QByteArray m_buffer;
     QMap<QString, QString> m_lastCaptureResultFields;
     bool m_previewCaptureRunning = false;

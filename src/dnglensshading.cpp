@@ -8,7 +8,6 @@
 
 #include <QDataStream>
 #include <QFile>
-#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -153,20 +152,20 @@ void writeGainMapOpcode(QDataStream &stream, quint32 top, quint32 left,
 
 namespace DngLensShading {
 
-QByteArray buildOpcodeList2(const QString &calibrationDir, const QString &deviceModel,
-                            const QString &cameraId, const QString &cfaPattern,
-                            int width, int height, QString *warning)
+bool loadGainGrid(const QString &calibrationDir, const QString &deviceModel,
+                  const QString &cameraId, const QString &cfaPattern,
+                  int width, int height, GainGrid *grid, QString *warning)
 {
     const QString path = calibrationDir + QLatin1Char('/')
             + calibrationFileName(deviceModel, cameraId, width, height);
     QFile file(path);
     if (!file.exists()) {
         // No calibration for this camera: not an error, just nothing to add.
-        return QByteArray();
+        return false;
     }
     if (!file.open(QIODevice::ReadOnly)) {
         *warning = QStringLiteral("Cannot read lens shading calibration: %1").arg(path);
-        return QByteArray();
+        return false;
     }
 
     QJsonParseError parseError;
@@ -174,54 +173,70 @@ QByteArray buildOpcodeList2(const QString &calibrationDir, const QString &device
             QJsonDocument::fromJson(file.readAll(), &parseError).object();
     if (parseError.error != QJsonParseError::NoError) {
         *warning = QStringLiteral("Lens shading calibration is not valid JSON: %1").arg(path);
-        return QByteArray();
+        return false;
     }
 
     if (calibration.value(QStringLiteral("version")).toInt() != 1) {
         *warning = QStringLiteral("Unsupported lens shading calibration version: %1").arg(path);
-        return QByteArray();
+        return false;
     }
     if (calibration.value(QStringLiteral("cfa_pattern")).toString() != cfaPattern) {
         *warning = QStringLiteral("Lens shading calibration CFA pattern does not match capture: %1").arg(path);
-        return QByteArray();
+        return false;
     }
     if (calibration.value(QStringLiteral("image_width")).toInt() != width
             || calibration.value(QStringLiteral("image_height")).toInt() != height) {
         // Most likely a calibration captured at a different resolution/binning
         // mode than the current capture: applying it would misalign the grid.
         *warning = QStringLiteral("Lens shading calibration resolution does not match capture: %1").arg(path);
-        return QByteArray();
+        return false;
     }
 
     const int gridRows = calibration.value(QStringLiteral("grid_rows")).toInt();
     const int gridCols = calibration.value(QStringLiteral("grid_cols")).toInt();
     if (gridRows < 2 || gridCols < 2) {
         *warning = QStringLiteral("Lens shading calibration grid is too small: %1").arg(path);
-        return QByteArray();
+        return false;
     }
 
     const QStringList phaseNames = cfaPhaseNames(cfaPattern);
     if (phaseNames.size() != 4) {
         *warning = QStringLiteral("Unsupported CFA pattern for lens shading: %1").arg(cfaPattern);
-        return QByteArray();
+        return false;
     }
 
     const QJsonObject planes = calibration.value(QStringLiteral("planes")).toObject();
-    QHash<QString, QVector<float>> planeGains;
-    for (const QString &name : phaseNames) {
+    for (int phase = 0; phase < 4; ++phase) {
+        const QString &name = phaseNames.at(phase);
         const QJsonArray values = planes.value(name).toArray();
         if (values.size() != gridRows * gridCols) {
             *warning = QStringLiteral("Lens shading calibration plane \"%1\" has the wrong size: %2")
                     .arg(name, path);
-            return QByteArray();
+            return false;
         }
         QVector<float> gains;
         gains.reserve(values.size());
         for (const QJsonValue &value : values) {
             gains.append(float(value.toDouble(1.0)));
         }
-        planeGains.insert(name, gains);
+        grid->phase[phase] = gains;
     }
+    grid->rows = gridRows;
+    grid->cols = gridCols;
+    return true;
+}
+
+QByteArray buildOpcodeList2(const QString &calibrationDir, const QString &deviceModel,
+                            const QString &cameraId, const QString &cfaPattern,
+                            int width, int height, QString *warning)
+{
+    GainGrid grid;
+    if (!loadGainGrid(calibrationDir, deviceModel, cameraId, cfaPattern, width, height,
+                      &grid, warning)) {
+        return QByteArray();
+    }
+    const int gridRows = grid.rows;
+    const int gridCols = grid.cols;
 
     QByteArray buffer;
     QDataStream stream(&buffer, QIODevice::WriteOnly);
@@ -252,7 +267,7 @@ QByteArray buildOpcodeList2(const QString &calibrationDir, const QString &device
                            quint32(height), quint32(width),
                            quint32(gridRows), quint32(gridCols),
                            spacingV, spacingH,
-                           planeGains.value(phaseNames.at(phase)));
+                           grid.phase[phase]);
     }
 
     return buffer;

@@ -1,6 +1,6 @@
 /**
  * @file camera2_bridge.h
- * @brief Public ABI for the Android Camera2 bridge used by RAWfish.
+ * @brief Public ABI for the Android Camera2 bridge used by ProCam.
  *
  * The declarations in this header are loaded from the Sailfish helper through
  * libhybris. Keep exported symbols and option structs ABI-stable.
@@ -105,6 +105,13 @@ enum sfos_camera2_raw_format {
     SFOS_CAMERA2_RAW_FORMAT_RAW16 = 0,
     SFOS_CAMERA2_RAW_FORMAT_RAW10 = 1,
 };
+
+/**
+ * @brief OR'd into the preview's raw_format argument: stream preview frames
+ * as SF2Y packets (I420, as the camera delivers them) instead of SF2P RGB888.
+ * Half the bytes and no per-pixel conversion; the app converts on the GPU.
+ */
+#define SFOS_CAMERA2_PREVIEW_YUV_FRAMES 0x100
 
 /**
  * @brief Options for RAW capture.
@@ -219,6 +226,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     int jpeg_orientation_degrees,
     int raw_width,
     int raw_height,
+    int raw_format,
     float zoom_ratio,
     float focus_x,
     float focus_y,

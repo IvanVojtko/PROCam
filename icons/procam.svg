@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500">
+  <!-- ProCam app icon: HDR-sunset disc, lens ring, six-blade aperture. -->
+  <defs>
+    <linearGradient id="sky" x1="0.15" y1="0.05" x2="0.85" y2="0.95">
+      <stop offset="0" stop-color="#ffb347"/>
+      <stop offset="0.38" stop-color="#ff5e62"/>
+      <stop offset="0.72" stop-color="#8a2be2"/>
+      <stop offset="1" stop-color="#2b1a7a"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="0.42" cy="0.38" r="0.7">
+      <stop offset="0" stop-color="#e8fbff"/>
+      <stop offset="0.45" stop-color="#5ee7ff"/>
+      <stop offset="1" stop-color="#3a5bff"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="0.3" cy="0.2" r="0.8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="250" cy="250" r="240" fill="url(#sky)"/>
+  <circle cx="250" cy="250" r="240" fill="url(#shine)"/>
+  <circle cx="250" cy="250" r="168" fill="#0d1033" fill-opacity="0.35"/>
+  <circle cx="250" cy="250" r="150" fill="#0b0f2e"/>
+  <circle cx="250" cy="250" r="150" fill="none" stroke="#ffffff" stroke-width="16"/>
+  <path d="M293.30,225.00 L389.68,280.64 A143.0,143.0 0 0 1 293.30,386.29 L293.30,275.00 Z" fill="#141a4a"/><path d="M293.30,275.00 L293.30,386.29 A143.0,143.0 0 0 1 153.62,355.64 L250.00,300.00 Z" fill="#1d2563"/><path d="M250.00,300.00 L153.62,355.64 A143.0,143.0 0 0 1 110.32,219.36 L206.70,275.00 Z" fill="#141a4a"/><path d="M206.70,275.00 L110.32,219.36 A143.0,143.0 0 0 1 206.70,113.71 L206.70,225.00 Z" fill="#1d2563"/><path d="M206.70,225.00 L206.70,113.71 A143.0,143.0 0 0 1 346.38,144.36 L250.00,200.00 Z" fill="#141a4a"/><path d="M250.00,200.00 L346.38,144.36 A143.0,143.0 0 0 1 389.68,280.64 L293.30,225.00 Z" fill="#1d2563"/>
+  <g stroke="#ffffff" stroke-opacity="0.55" stroke-width="3" stroke-linecap="round"><line x1="293.30" y1="225.00" x2="389.68" y2="280.64"/><line x1="293.30" y1="275.00" x2="293.30" y2="386.29"/><line x1="250.00" y1="300.00" x2="153.62" y2="355.64"/><line x1="206.70" y1="275.00" x2="110.32" y2="219.36"/><line x1="206.70" y1="225.00" x2="206.70" y2="113.71"/><line x1="250.00" y1="200.00" x2="346.38" y2="144.36"/></g>
+  <polygon points="250.00,200.00 293.30,225.00 293.30,275.00 250.00,300.00 206.70,275.00 206.70,225.00" fill="url(#glass)"/>
+  <polygon points="250.00,200.00 293.30,225.00 293.30,275.00 250.00,300.00 206.70,275.00 206.70,225.00" fill="none" stroke="#ffffff" stroke-opacity="0.8" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="232" cy="231" r="11" fill="#ffffff" fill-opacity="0.9"/>
+  <ellipse cx="322" cy="168" rx="22" ry="11" transform="rotate(-40 322 168)" fill="#ffffff" fill-opacity="0.85"/>
+</svg>

@@ -2,8 +2,8 @@
  * @file preview.c
  * @brief Long-running Camera2 preview helper.
  *
- * Streams RGB preview frames to stdout using RAWfish's SF2P framing protocol
- * and accepts control commands on stdin for focus, capture, and request
+ * Streams preview frames to stdout using ProCam's framing protocol (SF2P
+ * RGB888, or SF2Y I420 with --preview-format yuv) and accepts control commands on stdin for focus, capture, and request
  * settings. It also supports warm JPEG and RAW capture from the active session.
  */
 
@@ -73,9 +73,17 @@ struct preview_result_raw_metadata {
     float color_gains[4];
     struct preview_rational neutral_color_point[3];
     struct preview_rational color_transform[9];
+    double noise_profile[8];
+    float dynamic_black_level[4];
     uint32_t color_gains_count;
     uint32_t neutral_count;
     uint32_t color_transform_count;
+    uint32_t noise_profile_count;
+    uint32_t dynamic_black_level_count;
+    int32_t af_mode;
+    int32_t af_state;
+    int32_t lens_state;
+    float lens_focus_distance;
 };
 
 struct preview_raw_image_metadata {
@@ -123,6 +131,18 @@ struct preview_context {
     int jpeg_data_length;
     int raw_width;
     int raw_height;
+    // The "raw" stream delivers YUV_420_888 instead of RAW16 (cameras
+    // without RAW output); frames are written as packed I420.
+    int raw_yuv;
+    // Preview frames go out as SF2Y (I420) instead of SF2P (RGB888).
+    int preview_yuv;
+    // Face detection on preview requests (0 when the camera has none), and
+    // the last faces sent, so unchanged results are not repeated.
+    uint8_t face_detect_mode;
+    char last_faces[320];
+    // Fallback when the HAL refuses a second YUV stream: the same processed
+    // frames as maximum-quality JPEG (the combination warm JPEG uses).
+    int raw_jpeg;
     pthread_mutex_t output_lock;
     float zoom_ratio;
     float focal_length;
@@ -601,6 +621,69 @@ static void preview_configure_request(ACaptureRequest *request,
                                      context->jpeg_orientation);
     }
     sfos_camera2_set_zoom_ratio(metadata, request, context->zoom_ratio);
+    // Faces for the app's exposure (preview only; captures need none).
+    if (!still && context->face_detect_mode)
+        sfos_camera2_set_request_u8(request, ACAMERA_STATISTICS_FACE_DETECT_MODE,
+                                    context->face_detect_mode);
+}
+
+// Locks focus before a warm capture in continuous AF (Android's AF
+// trigger): a passive scan could otherwise move the lens during a burst,
+// whose darker exposure changes the contrast continuous AF watches. Returns
+// true when a lock was requested; preview_unlock_focus() resumes scanning.
+static bool preview_lock_focus(struct preview_context *context,
+                               ACameraCaptureSession *session,
+                               ACaptureRequest *preview_request,
+                               const ACameraMetadata *metadata,
+                               ACameraCaptureSession_captureCallbacks *callbacks)
+{
+    if (context->focus_hold_active ||
+            context->focus_mode != SFOS_CAMERA2_FOCUS_CONTINUOUS ||
+            context->focus_x >= 0.0f || // tap focus: the AUTO scan already holds
+            !sfos_camera2_metadata_has_u8(metadata, ACAMERA_CONTROL_AF_AVAILABLE_MODES,
+                                          ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
+        return false;
+    }
+    const int64_t started = sfos_camera2_now_ms();
+    atomic_store_explicit(&context->live_af_state, -1, memory_order_release);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AF_TRIGGER,
+                                ACAMERA_CONTROL_AF_TRIGGER_START);
+    ACaptureRequest *requests[] = { preview_request };
+    camera_status_t status = ACameraCaptureSession_capture(session, callbacks, 1,
+                                                           requests, NULL);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AF_TRIGGER,
+                                ACAMERA_CONTROL_AF_TRIGGER_IDLE);
+    if (status != ACAMERA_OK) {
+        fprintf(stderr, "capture-focus lock not submitted (status %d)\n", status);
+        return false;
+    }
+    int state = -1;
+    while (sfos_camera2_now_ms() - started < 1000) {
+        state = atomic_load_explicit(&context->live_af_state, memory_order_acquire);
+        if (state == ACAMERA_CONTROL_AF_STATE_FOCUSED_LOCKED ||
+                state == ACAMERA_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
+            break;
+        }
+        sfos_camera2_sleep_10_ms();
+    }
+    fprintf(stderr, "capture-focus lock af_state=%d waited_ms=%lld distance=%.4f\n",
+            state, (long long)(sfos_camera2_now_ms() - started),
+            atomic_load_explicit(&context->live_focus_distance_micros,
+                                 memory_order_acquire) / 1000000.0);
+    return true;
+}
+
+// Queued after the capture requests, so the lock lasts for all their frames.
+static void preview_unlock_focus(ACameraCaptureSession *session,
+                                 ACaptureRequest *preview_request,
+                                 ACameraCaptureSession_captureCallbacks *callbacks)
+{
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AF_TRIGGER,
+                                ACAMERA_CONTROL_AF_TRIGGER_CANCEL);
+    ACaptureRequest *requests[] = { preview_request };
+    ACameraCaptureSession_capture(session, callbacks, 1, requests, NULL);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AF_TRIGGER,
+                                ACAMERA_CONTROL_AF_TRIGGER_IDLE);
 }
 
 static void preview_configure_raw_bracket_request(
@@ -615,7 +698,24 @@ static void preview_configure_raw_bracket_request(
     frame_context.exposure_compensation = 0;
     frame_context.sensor_sensitivity = sensor_sensitivity;
     frame_context.exposure_time_ns = exposure_time_ns;
+    // YUV bursts are merged and denoised by ProCam: the ISP's noise
+    // reduction and sharpening would only smear detail first.
+    // Full field of view too: ProCam crops YUV bursts for zoom itself (as
+    // for RAW, which the HAL never crops), so a HAL that also applies the
+    // zoom ratio to processed streams cannot zoom twice.
+    if (context->raw_yuv) {
+        frame_context.noise_reduction = 0;
+        frame_context.zoom_ratio = 1.0f;
+    }
+    if (context->raw_jpeg) {
+        frame_context.jpeg_quality = 100;
+    }
     preview_configure_request(request, &frame_context, metadata, 1);
+    if (context->raw_yuv &&
+            sfos_camera2_metadata_has_u8(metadata, ACAMERA_EDGE_AVAILABLE_EDGE_MODES,
+                                         ACAMERA_EDGE_MODE_OFF)) {
+        sfos_camera2_set_request_u8(request, ACAMERA_EDGE_MODE, ACAMERA_EDGE_MODE_OFF);
+    }
 }
 
 static bool preview_parse_command_line(const char *line,
@@ -900,6 +1000,77 @@ static void meter_emit(struct preview_context *context, struct meter_sample *sam
     sample->have_image = sample->have_result = 0;
 }
 
+// Copies one plane into a tightly packed buffer, honouring the row and pixel
+// strides (semi-planar chroma has a pixel stride of 2).
+static int preview_pack_plane(unsigned char *target, int width, int height,
+                              const uint8_t *plane, int length,
+                              int row_stride, int pixel_stride)
+{
+    if (!plane || row_stride <= 0 || pixel_stride <= 0) {
+        return -1;
+    }
+    for (int y = 0; y < height; ++y) {
+        const long first = (long)y * row_stride;
+        const long last = first + (long)(width - 1) * pixel_stride;
+        if (first < 0 || last >= length) {
+            return -1;
+        }
+        unsigned char *row = target + (size_t)y * (size_t)width;
+        if (pixel_stride == 1) {
+            memcpy(row, plane + first, (size_t)width);
+        } else {
+            const uint8_t *source = plane + first;
+            for (int x = 0; x < width; ++x) {
+                row[x] = source[(size_t)x * (size_t)pixel_stride];
+            }
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief Writes one preview image as an SF2Y packet: a 16-byte header
+ * ('SF2Y', width, height, payload bytes) followed by I420 (Y, then U and V
+ * at half resolution, each tightly packed). Mostly row copies.
+ */
+static int preview_write_i420_frame(struct preview_context *context,
+                                    int width, int height,
+                                    const uint8_t *plane_y, int len_y, int row_y, int pixel_y,
+                                    const uint8_t *plane_u, int len_u, int row_u, int pixel_u,
+                                    const uint8_t *plane_v, int len_v, int row_v, int pixel_v)
+{
+    const int chroma_width = (width + 1) / 2;
+    const int chroma_height = (height + 1) / 2;
+    const size_t luma_size = (size_t)width * (size_t)height;
+    const size_t chroma_size = (size_t)chroma_width * (size_t)chroma_height;
+    const size_t frame_size = luma_size + 2 * chroma_size;
+    unsigned char *frame = malloc(frame_size);
+    if (!frame) {
+        return -1;
+    }
+    int result = 0;
+    if (preview_pack_plane(frame, width, height, plane_y, len_y, row_y, pixel_y) != 0 ||
+            preview_pack_plane(frame + luma_size, chroma_width, chroma_height,
+                               plane_u, len_u, row_u, pixel_u) != 0 ||
+            preview_pack_plane(frame + luma_size + chroma_size, chroma_width, chroma_height,
+                               plane_v, len_v, row_v, pixel_v) != 0) {
+        result = -1;
+    } else {
+        unsigned char header[16] = { 'S', 'F', '2', 'Y' };
+        preview_write_le32(header + 4, (uint32_t)width);
+        preview_write_le32(header + 8, (uint32_t)height);
+        preview_write_le32(header + 12, (uint32_t)frame_size);
+        pthread_mutex_lock(&context->output_lock);
+        if (sfos_camera2_write_all(context->output_fd, header, sizeof(header)) != 0 ||
+                sfos_camera2_write_all(context->output_fd, frame, frame_size) != 0) {
+            result = -1;
+        }
+        pthread_mutex_unlock(&context->output_lock);
+    }
+    free(frame);
+    return result;
+}
+
 static int preview_write_rgb_frame(struct preview_context *context,
                                    AImage *image)
 {
@@ -977,6 +1148,15 @@ static int preview_write_rgb_frame(struct preview_context *context,
         pthread_mutex_unlock(&context->output_lock);
     }
 
+    const int chroma_width = (width + 1) / 2;
+    const int chroma_height = (height + 1) / 2;
+    if (context->preview_yuv) {
+        return preview_write_i420_frame(context, width, height,
+                                        plane_y, len_y, row_y, pixel_y,
+                                        plane_u, len_u, row_u, pixel_u,
+                                        plane_v, len_v, row_v, pixel_v);
+    }
+
     const size_t frame_size = (size_t)width * (size_t)height * 3;
     unsigned char *frame = malloc(frame_size);
     if (!frame) {
@@ -984,8 +1164,6 @@ static int preview_write_rgb_frame(struct preview_context *context,
     }
 
     int result = 0;
-    const int chroma_width = (width + 1) / 2;
-    const int chroma_height = (height + 1) / 2;
     for (int y = 0; y < height; ++y) {
         unsigned char *row = frame + (size_t)y * (size_t)width * 3;
         for (int x = 0; x < width; ++x) {
@@ -1027,6 +1205,33 @@ static int preview_write_rgb_frame(struct preview_context *context,
 done:
     free(frame);
     return result;
+}
+
+// Tells the app which capture streams the session really has, so it never
+// sends warm captures to a stream the HAL dropped.
+// raw_error says why a requested RAW/YUV capture stream is missing
+// ("reader:<status>", "session:<status>", "none" when it is up).
+static void preview_write_stream_status(struct preview_context *context,
+                                        bool raw, bool jpeg,
+                                        const char *raw_error,
+                                        int raw_width, int raw_height)
+{
+    char payload[192];
+    int payload_size = snprintf(payload, sizeof(payload),
+                                "streams=1 raw=%d jpeg=%d raw_error=%s raw_size=%dx%d raw_format=%s\n",
+                                raw ? 1 : 0, jpeg ? 1 : 0,
+                                raw_error && *raw_error ? raw_error : "none",
+                                raw_width, raw_height,
+                                context->raw_jpeg ? "jpeg" : context->raw_yuv ? "yuv" : "raw16");
+    if (payload_size <= 0 || payload_size >= (int)sizeof(payload)) {
+        return;
+    }
+    unsigned char header[8] = { 'S', 'F', '2', 'M' };
+    preview_write_le32(header + 4, (uint32_t)payload_size);
+    pthread_mutex_lock(&context->output_lock);
+    sfos_camera2_write_all(context->output_fd, header, sizeof(header));
+    sfos_camera2_write_all(context->output_fd, payload, (size_t)payload_size);
+    pthread_mutex_unlock(&context->output_lock);
 }
 
 static void preview_write_metadata(struct preview_context *context,
@@ -1185,6 +1390,57 @@ static void preview_image_available(void *opaque, AImageReader *reader)
     AImage_delete(image);
 }
 
+// Sends the detected faces as "faces=N rects=l,t,r,b,score;...": up to five,
+// normalised to the full (unzoomed) field of view, as burst frames are.
+static void preview_write_faces(struct preview_context *context, const ACameraMetadata *result)
+{
+    if (!context->face_detect_mode || context->output_fd < 0) {
+        return;
+    }
+    ACameraMetadata_const_entry rects = { 0 };
+    ACameraMetadata_const_entry scores = { 0 };
+    const int has_rects = ACameraMetadata_getConstEntry(result, ACAMERA_STATISTICS_FACE_RECTANGLES,
+                                                        &rects) == ACAMERA_OK;
+    ACameraMetadata_getConstEntry(result, ACAMERA_STATISTICS_FACE_SCORES, &scores);
+    const float left = (float)context->active_array[0], top = (float)context->active_array[1];
+    // ACTIVE_ARRAY_SIZE is (left, top, width, height).
+    const float width = (float)context->active_array[2];
+    const float height = (float)context->active_array[3];
+    const float zoom = context->zoom_ratio < 1.0f ? 1.0f : context->zoom_ratio;
+    char payload[320];
+    int count = 0;
+    int used = 0;
+    char list[256] = "";
+    if (has_rects && width > 0 && height > 0) {
+        for (uint32_t i = 0; i + 3 < rects.count && count < 5; i += 4) {
+            const int score = scores.count > i / 4 ? scores.data.u8[i / 4] : 100;
+            if (score < 30) continue; // Camera2: below 50 is often a false hit
+            float box[4];
+            for (int k = 0; k < 4; ++k) {
+                const float v = (float)rects.data.i32[i + k];
+                const float n = k % 2 == 0 ? (v - left) / width : (v - top) / height;
+                box[k] = 0.5f + (n - 0.5f) / zoom;
+            }
+            const int written = snprintf(list + used, sizeof(list) - (size_t)used, "%s%.3f,%.3f,%.3f,%.3f,%d",
+                                         count ? ";" : "", box[0], box[1], box[2], box[3], score);
+            if (written <= 0 || used + written >= (int)sizeof(list)) break;
+            used += written;
+            ++count;
+        }
+    }
+    const int size = snprintf(payload, sizeof(payload), "faces=%d rects=%s\n", count, count ? list : "-");
+    if (size <= 0 || size >= (int)sizeof(payload) || !strcmp(payload, context->last_faces)) {
+        return;
+    }
+    memcpy(context->last_faces, payload, (size_t)size + 1);
+    unsigned char header[8] = { 'S', 'F', '2', 'M' };
+    preview_write_le32(header + 4, (uint32_t)size);
+    pthread_mutex_lock(&context->output_lock);
+    sfos_camera2_write_all(context->output_fd, header, sizeof(header));
+    sfos_camera2_write_all(context->output_fd, payload, (size_t)size);
+    pthread_mutex_unlock(&context->output_lock);
+}
+
 static void preview_capture_completed(void *opaque,
                                       ACameraCaptureSession *session,
                                       ACaptureRequest *request,
@@ -1225,6 +1481,7 @@ static void preview_capture_completed(void *opaque,
         preview_write_metadata(context, sensitivity, exposure_time,
                                af_state, focus_distance);
     }
+    preview_write_faces(context, result);
 }
 
 static void preview_jpeg_capture_completed(void *opaque,
@@ -1363,6 +1620,16 @@ static void preview_print_float_array(FILE *file, const float *values,
     fputc(']', file);
 }
 
+static void preview_print_double_array(FILE *file, const double *values,
+                                       uint32_t count)
+{
+    fputc('[', file);
+    for (uint32_t index = 0; index < count; ++index) {
+        fprintf(file, "%s%.17g", index ? "," : "", values[index]);
+    }
+    fputc(']', file);
+}
+
 static void preview_print_rational_array(
     FILE *file, const struct preview_rational *values, uint32_t count)
 {
@@ -1393,7 +1660,7 @@ static bool preview_write_raw_metadata(const char *camera_id,
     fputs(",\n  \"raw_path\":", file);
     preview_print_json_string(file, context->raw_path);
     fprintf(file,
-            ",\n  \"format\":\"RAW16\",\n  \"format_value\":%d,"
+            ",\n  \"format\":\"%s\",\n  \"format_value\":%d,"
             "\n  \"width\":%d,\n  \"height\":%d,"
             "\n  \"planes\":%d,\n  \"pixel_stride\":%d,"
             "\n  \"row_stride\":%d,\n  \"data_length\":%d,"
@@ -1430,6 +1697,7 @@ static bool preview_write_raw_metadata(const char *camera_id,
             "\n  \"timing_ms\":{\"capture_submit\":%lld,"
             "\"image_available\":%lld,\"raw_file_written\":%lld,"
             "\"metadata_written\":%lld,\"total\":%lld}",
+            context->raw_jpeg ? "JPEG" : context->raw_yuv ? "I420" : "RAW16",
             image->format, image->width, image->height, image->planes,
             image->pixel_stride, image->row_stride, image->data_length,
             (long long)image->timestamp_ns,
@@ -1485,6 +1753,19 @@ static bool preview_write_raw_metadata(const char *camera_id,
     fputs(",\n  \"color_transform1\":", file);
     preview_print_rational_array(file, static_data->color1,
                                  static_data->color1_count);
+    fputs(",\n  \"noise_profile\":", file);
+    preview_print_double_array(file, result->noise_profile,
+                               result->noise_profile_count);
+    fputs(",\n  \"dynamic_black_level\":", file);
+    preview_print_float_array(file, result->dynamic_black_level,
+                              result->dynamic_black_level_count);
+    fprintf(file, ",\n  \"zoom_ratio\":%.4f", context->zoom_ratio);
+    // Focus as the HAL reports it for this frame (2 passive focused, 4
+    // locked; lens_state 1 = moving).
+    fprintf(file, ",\n  \"af_mode\":%d,\n  \"af_state\":%d,\n  \"lens_state\":%d,"
+                  "\n  \"lens_focus_distance\":%.6f",
+            result->af_mode, result->af_state, result->lens_state,
+            result->lens_focus_distance);
     fputs("\n}\n", file);
 
     bool success = ferror(file) == 0 && fflush(file) == 0;
@@ -1495,6 +1776,94 @@ static bool preview_write_raw_metadata(const char *camera_id,
         unlink(context->raw_metadata_path);
     }
     return success;
+}
+
+static const char *preview_raw_format_name(const struct preview_context *context)
+{
+    return context->raw_jpeg ? "JPEG" : context->raw_yuv ? "YUV" : "RAW16";
+}
+
+static void preview_raw_image_available(void *opaque, AImageReader *reader);
+
+// Creates the capture ("raw") stream reader in the context's format.
+static media_status_t preview_create_raw_reader(struct preview_context *context,
+                                                AImageReader **reader,
+                                                ANativeWindow **window)
+{
+    *reader = NULL;
+    *window = NULL;
+    const int32_t format = context->raw_jpeg ? AIMAGE_FORMAT_JPEG
+                         : context->raw_yuv ? AIMAGE_FORMAT_YUV_420_888
+                                            : AIMAGE_FORMAT_RAW16;
+    media_status_t status = AImageReader_new(context->raw_width, context->raw_height,
+                                             format, 2, reader);
+    if (status == AMEDIA_OK && *reader) {
+        AImageReader_ImageListener listener = {
+            .context = context,
+            .onImageAvailable = preview_raw_image_available,
+        };
+        status = AImageReader_setImageListener(*reader, &listener);
+        if (status == AMEDIA_OK) {
+            status = AImageReader_getWindow(*reader, window);
+        }
+    }
+    if (status != AMEDIA_OK || !*window) {
+        if (*reader) {
+            AImageReader_delete(*reader);
+        }
+        *reader = NULL;
+        *window = NULL;
+        if (status == AMEDIA_OK) {
+            status = AMEDIA_ERROR_UNKNOWN;
+        }
+    }
+    return status;
+}
+
+// Packs a YUV_420_888 image (any row/pixel strides) as I420: the Y plane,
+// then U, then V, each without padding. Returns the malloc'd buffer.
+static uint8_t *preview_pack_i420(AImage *image, int32_t width, int32_t height,
+                                  int *length)
+{
+    const int32_t chroma_width = (width + 1) / 2, chroma_height = (height + 1) / 2;
+    const size_t luma_size = (size_t)width * (size_t)height;
+    const size_t chroma_size = (size_t)chroma_width * (size_t)chroma_height;
+    uint8_t *packed = malloc(luma_size + 2 * chroma_size);
+    if (!packed) {
+        return NULL;
+    }
+    for (int plane = 0; plane < 3; ++plane) {
+        uint8_t *data = NULL;
+        int data_length = 0;
+        int32_t row_stride = 0, pixel_stride = 0;
+        if (AImage_getPlaneData(image, plane, &data, &data_length) != AMEDIA_OK ||
+                AImage_getPlaneRowStride(image, plane, &row_stride) != AMEDIA_OK ||
+                AImage_getPlanePixelStride(image, plane, &pixel_stride) != AMEDIA_OK ||
+                !data || data_length <= 0 || row_stride <= 0 || pixel_stride <= 0) {
+            free(packed);
+            return NULL;
+        }
+        const int32_t plane_width = plane == 0 ? width : chroma_width;
+        const int32_t plane_height = plane == 0 ? height : chroma_height;
+        uint8_t *out = packed + (plane == 0 ? 0 : luma_size + (size_t)(plane - 1) * chroma_size);
+        for (int32_t y = 0; y < plane_height; ++y) {
+            const size_t row = (size_t)y * (size_t)row_stride;
+            const size_t last = row + (size_t)(plane_width - 1) * (size_t)pixel_stride;
+            if (last >= (size_t)data_length) {
+                free(packed);
+                return NULL;
+            }
+            if (pixel_stride == 1) {
+                memcpy(out + (size_t)y * plane_width, data + row, (size_t)plane_width);
+            } else {
+                for (int32_t x = 0; x < plane_width; ++x) {
+                    out[(size_t)y * plane_width + x] = data[row + (size_t)x * (size_t)pixel_stride];
+                }
+            }
+        }
+    }
+    *length = (int)(luma_size + 2 * chroma_size);
+    return packed;
 }
 
 static void preview_raw_image_available(void *opaque, AImageReader *reader)
@@ -1559,6 +1928,7 @@ static void preview_raw_image_available(void *opaque, AImageReader *reader)
     }
 
     uint8_t *data = NULL;
+    uint8_t *packed = NULL;
     int data_length = 0;
     int raw_status = 1;
     struct preview_raw_image_metadata *image_metadata =
@@ -1576,7 +1946,44 @@ static void preview_raw_image_available(void *opaque, AImageReader *reader)
         ? context->raw_bracket_metadata_paths[bracket_index]
         : context->raw_metadata_path;
     context->raw_available_ms = sfos_camera2_now_ms();
-    if (AImage_getWidth(image, &image_metadata->width) != AMEDIA_OK ||
+    if (context->raw_jpeg) {
+        if (AImage_getWidth(image, &image_metadata->width) != AMEDIA_OK ||
+                AImage_getHeight(image, &image_metadata->height) != AMEDIA_OK ||
+                AImage_getFormat(image, &image_metadata->format) != AMEDIA_OK ||
+                AImage_getNumberOfPlanes(image, &image_metadata->planes) != AMEDIA_OK ||
+                AImage_getTimestamp(image, &image_metadata->timestamp_ns) != AMEDIA_OK ||
+                image_metadata->format != AIMAGE_FORMAT_JPEG ||
+                AImage_getPlaneData(image, 0, &data, &data_length) != AMEDIA_OK ||
+                !data || data_length <= 4) {
+            raw_status = -2;
+        } else {
+            // The blob buffer is larger than the JPEG: stop after EOI.
+            for (int i = data_length - 2; i >= 2; --i) {
+                if (data[i] == 0xFF && data[i + 1] == 0xD9) {
+                    data_length = i + 2;
+                    break;
+                }
+            }
+            image_metadata->pixel_stride = 0;
+            image_metadata->row_stride = 0;
+        }
+    } else if (context->raw_yuv) {
+        if (AImage_getWidth(image, &image_metadata->width) != AMEDIA_OK ||
+                AImage_getHeight(image, &image_metadata->height) != AMEDIA_OK ||
+                AImage_getFormat(image, &image_metadata->format) != AMEDIA_OK ||
+                AImage_getNumberOfPlanes(image, &image_metadata->planes) != AMEDIA_OK ||
+                AImage_getTimestamp(image, &image_metadata->timestamp_ns) != AMEDIA_OK ||
+                image_metadata->format != AIMAGE_FORMAT_YUV_420_888 ||
+                image_metadata->planes != 3 ||
+                !(packed = preview_pack_i420(image, image_metadata->width,
+                                             image_metadata->height, &data_length))) {
+            raw_status = -2;
+        } else {
+            data = packed;
+            image_metadata->pixel_stride = 1;
+            image_metadata->row_stride = image_metadata->width;
+        }
+    } else if (AImage_getWidth(image, &image_metadata->width) != AMEDIA_OK ||
             AImage_getHeight(image, &image_metadata->height) != AMEDIA_OK ||
             AImage_getFormat(image, &image_metadata->format) != AMEDIA_OK ||
             AImage_getNumberOfPlanes(image, &image_metadata->planes) !=
@@ -1603,6 +2010,7 @@ static void preview_raw_image_available(void *opaque, AImageReader *reader)
     } else {
         unlink(raw_path);
     }
+    free(packed);
     AImage_delete(image);
 
     int64_t metadata_deadline = sfos_camera2_now_ms() + 500;
@@ -1667,9 +2075,13 @@ static void preview_raw_capture_completed(void *opaque,
     if (ACaptureRequest_getConstEntry(request, ACAMERA_SENSOR_EXPOSURE_TIME, &shutter) == ACAMERA_OK &&
             shutter.count == 1 &&
             ACaptureRequest_getConstEntry(request, ACAMERA_SENSOR_SENSITIVITY, &iso) == ACAMERA_OK && iso.count == 1) {
+        // Burst frames share one exposure: take the first matching slot that
+        // has no result yet (results arrive in request order).
         for (int index = 0; index < context->raw_bracket_count; ++index) {
             if (context->raw_bracket_exposure_time_ns[index] == shutter.data.i64[0] &&
-                    context->raw_bracket_sensor_sensitivity[index] == iso.data.i32[0]) {
+                    context->raw_bracket_sensor_sensitivity[index] == iso.data.i32[0] &&
+                    atomic_load_explicit(&context->raw_bracket_result_status[index],
+                                         memory_order_acquire) == 0) {
                 bracket_index = index;
                 break;
             }
@@ -1696,6 +2108,11 @@ static void preview_raw_capture_completed(void *opaque,
         result, ACAMERA_CONTROL_MODE, -1);
     destination->scene_mode = sfos_camera2_first_u8(
         result, ACAMERA_CONTROL_SCENE_MODE, -1);
+    destination->af_mode = sfos_camera2_first_u8(result, ACAMERA_CONTROL_AF_MODE, -1);
+    destination->af_state = sfos_camera2_first_u8(result, ACAMERA_CONTROL_AF_STATE, -1);
+    destination->lens_state = sfos_camera2_first_u8(result, ACAMERA_LENS_STATE, -1);
+    destination->lens_focus_distance = sfos_camera2_first_float(
+        result, ACAMERA_LENS_FOCUS_DISTANCE, -1.0f);
     fprintf(stderr,
             "capture-exposure warm-raw requested_iso=%d "
             "requested_shutter=%lld actual_iso=%d actual_shutter=%lld "
@@ -1714,6 +2131,11 @@ static void preview_raw_capture_completed(void *opaque,
     destination->color_transform_count = preview_copy_rational(
         result, ACAMERA_COLOR_CORRECTION_TRANSFORM,
         destination->color_transform, 9);
+    destination->noise_profile_count = sfos_camera2_copy_double_array(
+        result, ACAMERA_SENSOR_NOISE_PROFILE, destination->noise_profile, 8);
+    destination->dynamic_black_level_count = sfos_camera2_copy_float_array(
+        result, ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL,
+        destination->dynamic_black_level, 4);
     if (bracket_index >= 0) {
         atomic_store_explicit(
             &context->raw_bracket_result_status[bracket_index], 1,
@@ -1817,7 +2239,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     const char *camera_id, int width, int height, int frame_count,
     int timeout_ms, int output_fd, int control_fd, int jpeg_width,
     int jpeg_height, int jpeg_quality, int jpeg_orientation_degrees,
-    int raw_width, int raw_height,
+    int raw_width, int raw_height, int raw_format,
     float zoom_ratio, float focus_x, float focus_y,
     char *out, size_t out_size)
 {
@@ -1845,6 +2267,9 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     ACaptureSessionOutputContainer *container = NULL;
     ACameraCaptureSession *session = NULL;
     bool output_lock_ready = false;
+    char raw_error[48] = "";
+    bool raw_fallback_tried = false;
+    int requested_raw_width = raw_width, requested_raw_height = raw_height;
 
     struct preview_context context;
     memset(&context, 0, sizeof(context));
@@ -1873,6 +2298,8 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     context.jpeg_orientation = jpeg_orientation_degrees;
     context.raw_width = raw_width;
     context.raw_height = raw_height;
+    context.raw_yuv = (raw_format & 0xff) == 1;
+    context.preview_yuv = (raw_format & SFOS_CAMERA2_PREVIEW_YUV_FRAMES) != 0;
     snprintf(context.camera_id, sizeof(context.camera_id), "%s",
              camera_id ? camera_id : "");
     context.zoom_ratio = zoom_ratio < 1.0f ? 1.0f : zoom_ratio;
@@ -1942,10 +2369,16 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         context.jpeg_width = 0;
         context.jpeg_height = 0;
     }
+    // Validate against the stream's own format: a YUV burst stream on a
+    // camera without RAW output has no RAW16 sizes at all.
     if (raw_width > 0 && raw_height > 0 &&
             !sfos_camera2_has_output_size(
-                characteristics, AIMAGE_FORMAT_RAW16, raw_width,
-                raw_height)) {
+                characteristics,
+                context.raw_yuv ? AIMAGE_FORMAT_YUV_420_888 : AIMAGE_FORMAT_RAW16,
+                raw_width, raw_height)) {
+        fprintf(stderr, "preview %s size %dx%d is not a supported output size\n",
+                preview_raw_format_name(&context), raw_width, raw_height);
+        snprintf(raw_error, sizeof(raw_error), "unsupported_size");
         context.raw_width = 0;
         context.raw_height = 0;
     }
@@ -1962,6 +2395,13 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     context.awb_off_supported = sfos_camera2_metadata_has_u8(
         characteristics, ACAMERA_CONTROL_AWB_AVAILABLE_MODES,
         ACAMERA_CONTROL_AWB_MODE_OFF);
+    context.face_detect_mode =
+        sfos_camera2_metadata_has_u8(characteristics, ACAMERA_STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES,
+                                     ACAMERA_STATISTICS_FACE_DETECT_MODE_SIMPLE)
+            ? ACAMERA_STATISTICS_FACE_DETECT_MODE_SIMPLE
+            : sfos_camera2_metadata_has_u8(characteristics, ACAMERA_STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES,
+                                           ACAMERA_STATISTICS_FACE_DETECT_MODE_FULL)
+            ? ACAMERA_STATISTICS_FACE_DETECT_MODE_FULL : 0;
     context.hdr_scene_supported = sfos_camera2_metadata_has_u8(
         characteristics, ACAMERA_CONTROL_AVAILABLE_SCENE_MODES,
         ACAMERA_CONTROL_SCENE_MODE_HDR);
@@ -2023,25 +2463,21 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     }
 
     if (context.raw_width > 0 && context.raw_height > 0) {
-        media_status = AImageReader_new(
-            context.raw_width, context.raw_height, AIMAGE_FORMAT_RAW16, 2,
-            &raw_reader);
-        atomic_store_explicit(&context.status.last_media_status,
-                              media_status, memory_order_release);
-        if (media_status == AMEDIA_OK && raw_reader) {
-            AImageReader_ImageListener raw_listener = {
-                .context = &context,
-                .onImageAvailable = preview_raw_image_available,
-            };
-            media_status = AImageReader_setImageListener(raw_reader,
-                                                         &raw_listener);
-            if (media_status == AMEDIA_OK) {
-                media_status = AImageReader_getWindow(raw_reader, &raw_window);
-            }
+        media_status = preview_create_raw_reader(&context, &raw_reader, &raw_window);
+        if (media_status != AMEDIA_OK && context.raw_yuv) {
+            fprintf(stderr, "preview YUV reader %dx%d failed (media status %d); trying JPEG\n",
+                    context.raw_width, context.raw_height, media_status);
+            snprintf(raw_error, sizeof(raw_error), "yuv_reader:%d", media_status);
+            context.raw_jpeg = 1;
+            media_status = preview_create_raw_reader(&context, &raw_reader, &raw_window);
         }
         atomic_store_explicit(&context.status.last_media_status,
                               media_status, memory_order_release);
-        if (media_status != AMEDIA_OK || !raw_window) {
+        if (media_status != AMEDIA_OK) {
+            fprintf(stderr, "preview %s reader %dx%d failed (media status %d)\n",
+                    preview_raw_format_name(&context), context.raw_width,
+                    context.raw_height, media_status);
+            snprintf(raw_error, sizeof(raw_error), "reader:%d", media_status);
             context.raw_width = 0;
             context.raw_height = 0;
         } else {
@@ -2139,6 +2575,72 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     };
     camera_status = ACameraDevice_createCaptureSession(
         device, container, &session_callbacks, &session);
+    if ((camera_status != ACAMERA_OK || !session) && raw_output &&
+            context.raw_yuv && !context.raw_jpeg) {
+        // A second YUV stream refused: the same frames as JPEG, the stream
+        // combination warm JPEG capture already uses.
+        fprintf(stderr, "preview session with YUV %dx%d failed (status %d); trying JPEG\n",
+                context.raw_width, context.raw_height, camera_status);
+        snprintf(raw_error, sizeof(raw_error), "yuv_session:%d", camera_status);
+        raw_fallback_tried = true;
+        ACaptureSessionOutputContainer_remove(container, raw_output);
+        ACaptureSessionOutput_free(raw_output);
+        raw_output = NULL;
+        ACameraOutputTarget_free(raw_target);
+        raw_target = NULL;
+        ACaptureRequest_free(raw_request);
+        raw_request = NULL;
+        AImageReader_delete(raw_reader);
+        raw_reader = NULL;
+        raw_window = NULL;
+        session = NULL;
+        context.raw_jpeg = 1;
+        if (preview_create_raw_reader(&context, &raw_reader, &raw_window) == AMEDIA_OK &&
+                ACameraOutputTarget_create(raw_window, &raw_target) == ACAMERA_OK &&
+                ACaptureSessionOutput_create(raw_window, &raw_output) == ACAMERA_OK &&
+                ACaptureSessionOutputContainer_add(container, raw_output) == ACAMERA_OK &&
+                ACameraDevice_createCaptureRequest(device, TEMPLATE_STILL_CAPTURE,
+                                                   &raw_request) == ACAMERA_OK &&
+                ACaptureRequest_addTarget(raw_request, raw_target) == ACAMERA_OK) {
+            preview_configure_request(raw_request, &context, characteristics, 1);
+            camera_status = ACameraDevice_createCaptureSession(
+                device, container, &session_callbacks, &session);
+        } else {
+            camera_status = ACAMERA_ERROR_UNKNOWN;
+        }
+    }
+    if ((camera_status != ACAMERA_OK || !session) && (raw_output || raw_fallback_tried)) {
+        // Not every HAL streams RAW next to the preview at every size: keep
+        // the viewfinder and let RAW captures use the cold path instead.
+        fprintf(stderr, "preview session with %s %dx%d failed (status %d); retrying without it\n",
+                preview_raw_format_name(&context), context.raw_width, context.raw_height,
+                camera_status);
+        if (raw_fallback_tried) {
+            // Keep the first (YUV) reason, add the JPEG one.
+            size_t used = strlen(raw_error);
+            snprintf(raw_error + used, sizeof(raw_error) - used, ",jpeg:%d", camera_status);
+        } else {
+            snprintf(raw_error, sizeof(raw_error), "session:%d", camera_status);
+        }
+        if (raw_output) {
+            ACaptureSessionOutputContainer_remove(container, raw_output);
+            ACaptureSessionOutput_free(raw_output);
+        }
+        raw_output = NULL;
+        if (raw_target) {
+            ACameraOutputTarget_free(raw_target);
+        }
+        raw_target = NULL;
+        if (raw_request) {
+            ACaptureRequest_free(raw_request);
+        }
+        raw_request = NULL;
+        context.raw_width = 0;
+        context.raw_height = 0;
+        session = NULL;
+        camera_status = ACameraDevice_createCaptureSession(
+            device, container, &session_callbacks, &session);
+    }
     atomic_store_explicit(&context.status.last_camera_status, camera_status,
                           memory_order_release);
     if (camera_status != ACAMERA_OK || !session) {
@@ -2146,6 +2648,10 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         stage = "session_create";
         goto cleanup;
     }
+
+    preview_write_stream_status(&context, raw_target && raw_request,
+                                jpeg_target && jpeg_request, raw_error,
+                                requested_raw_width, requested_raw_height);
 
     ACaptureRequest *requests[] = { request };
     camera_status = ACameraCaptureSession_setRepeatingRequest(
@@ -2421,8 +2927,13 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                     .onCaptureSequenceAborted = NULL,
                     .onCaptureBufferLost = NULL,
                 };
+                const bool focus_locked = preview_lock_focus(
+                    &context, session, request, characteristics, &preview_callbacks);
                 camera_status_t raw_status = ACameraCaptureSession_capture(
                     session, &raw_callbacks, 1, raw_requests, NULL);
+                if (focus_locked) {
+                    preview_unlock_focus(session, request, &preview_callbacks);
+                }
                 atomic_store_explicit(&context.status.last_camera_status,
                                       raw_status, memory_order_release);
                 if (raw_status == ACAMERA_OK) {
@@ -2435,7 +2946,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                                                  raw_status);
                 }
             } else if (command.type == PREVIEW_COMMAND_CAPTURE_RAW_BRACKET &&
-                    raw_target && command.bracket_count == 2 &&
+                    raw_target && command.bracket_count >= 2 &&
                     command.bracket_count <= PREVIEW_MAX_RAW_BRACKET) {
                 for (int index = 0; index < PREVIEW_MAX_RAW_BRACKET; ++index) {
                     if (context.raw_bracket_requests[index]) {
@@ -2533,17 +3044,20 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                         .onCaptureSequenceAborted = preview_bracket_sequence_abort,
                         .onCaptureBufferLost = NULL,
                     };
-                    ACaptureRequest *requests[PREVIEW_MAX_RAW_BRACKET] = {
-                        NULL, NULL, NULL
-                    };
+                    ACaptureRequest *requests[PREVIEW_MAX_RAW_BRACKET] = { NULL };
                     for (int index = 0; index < command.bracket_count;
                             ++index) {
                         requests[index] = context.raw_bracket_requests[index];
                     }
+                    const bool focus_locked = preview_lock_focus(
+                        &context, session, request, characteristics, &preview_callbacks);
                     camera_status_t raw_status =
                         ACameraCaptureSession_capture(
                             session, &raw_callbacks, command.bracket_count,
                             requests, NULL);
+                    if (focus_locked) {
+                        preview_unlock_focus(session, request, &preview_callbacks);
+                    }
                     atomic_store_explicit(
                         &context.status.last_camera_status, raw_status,
                         memory_order_release);

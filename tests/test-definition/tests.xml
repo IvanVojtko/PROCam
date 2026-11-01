@@ -8,12 +8,12 @@ SPDX-License-Identifier: BSD-3-Clause
 -->
 
 <testdefinition version="1.0">
-   <suite name="rawfish-tests" domain="ui">
-       <description>RAWfish application automatic tests</description>
-       <set name="unit-tests" feature="RAWfish">
+   <suite name="procam-tests" domain="ui">
+       <description>ProCam application automatic tests</description>
+       <set name="unit-tests" feature="ProCam">
            <description>QML component unit tests</description>
            <case manual="false" name="unittests">
-               <step>cd /opt/tests/rawfish/auto/ &amp;&amp; ./run-tests.sh</step>
+               <step>cd /opt/tests/procam/auto/ &amp;&amp; ./run-tests.sh</step>
            </case>
        </set>
    </suite>

@@ -51,8 +51,8 @@ CameraPage {
     }
 
     DBusAdaptor {
-        iface: "com.rawfish.camera.ui"
-        service: "com.rawfish.camera"
+        iface: "com.procam.camera.ui"
+        service: "com.procam.camera"
         path: "/"
         signal showViewfinder(variant args)
         onShowViewfinder: {

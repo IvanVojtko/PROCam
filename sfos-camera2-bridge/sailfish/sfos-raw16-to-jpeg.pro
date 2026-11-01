@@ -16,5 +16,5 @@ SOURCES += raw16-to-jpeg.c
 
 LIBS += -lm
 
-target.path = /usr/libexec/rawfish
+target.path = /usr/libexec/procam
 INSTALLS += target

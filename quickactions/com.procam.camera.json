@@ -1,20 +1,20 @@
 {
-    "translation_catalog": "rawfish",
+    "translation_catalog": "procam",
     "entries": [
         {
-            "path": "system_settings/look_and_feel/topmenu/actions/rawfish_take_a_selfie",
+            "path": "system_settings/look_and_feel/topmenu/actions/procam_take_a_selfie",
             "title": "Take a selfie",
             "translation_id": "settings_quickaction-la-take_a_selfie",
             "title_short": "Selfie",
             "translation_id_short": "settings_quickaction-la-take_a_selfie_short",
             "type": "action",
-            "icon": "image://theme/rawfish-sfos",
+            "icon": "image://theme/procam-sfos",
             "order": 55,
             "params": {
                 "type": "grid",
-                "remote-service": "com.rawfish.camera",
+                "remote-service": "com.procam.camera",
                 "remote-path": "/",
-                "remote-interface": "com.rawfish.camera",
+                "remote-interface": "com.procam.camera",
                 "remote-method": "showFrontViewfinder",
                 "remote-arguments": [true]
             }

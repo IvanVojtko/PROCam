@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 TEMPLATE = app
-TARGET = rawfish
+TARGET = procam
 TARGETPATH = /usr/bin
 
 QT += qml quick
@@ -19,30 +19,30 @@ OTHER_FILES += \
         pages \
         pages/*.qml \
         pages/gallery/*.qml \
-        icons/rawfish-sfos.png \
-        dconf/00-rawfish.txt
+        icons/procam-sfos.png \
+        dconf/00-procam.txt
 
 target.path = $$TARGETPATH
 
 desktop.path = /usr/share/applications
 desktop.files = \
-            rawfish.desktop
+            procam.desktop
 
 icons.path = /usr/share/icons/hicolor/500x500/apps
-icons.files = icons/rawfish-sfos.png
+icons.files = icons/procam-sfos.png
 
 DEPLOYMENT_PATH = /usr/share/$$TARGET
 DEFINES *= DEPLOYMENT_PATH=\"\\\"\"$${DEPLOYMENT_PATH}/\"\\\"\"
 qml.path = $$DEPLOYMENT_PATH
 qml.files = *.qml cover pages
 
-service.files = com.rawfish.camera.service
+service.files = com.procam.camera.service
 service.path  = /usr/share/dbus-1/services
 
 oneshot.files = camera-enable-hints
 oneshot.path  = /usr/lib/oneshot.d
 
-schema.files = dconf/00-rawfish.txt
+schema.files = dconf/00-procam.txt
 schema.path  = /etc/dconf/db/vendor.d/
 
 INSTALLS += target desktop icons qml service schema

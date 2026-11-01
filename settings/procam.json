@@ -1,0 +1,13 @@
+{
+    "entries": [
+        {
+            "path": "applications/procam.desktop",
+            "title": "ProCam",
+            "type": "application",
+            "icon": "image://theme/procam-sfos",
+            "params": {
+                "source": "/usr/share/jolla-settings/pages/procam/SettingsPage.qml"
+            }
+        }
+    ]
+}

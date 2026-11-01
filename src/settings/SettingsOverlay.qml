@@ -8,6 +8,7 @@ import QtMultimedia 5.6
 import Sailfish.Silica 1.0
 import com.vivid.camera 1.0
 import Nemo.Configuration 1.0
+import "../capture"
 
 PinchArea {
     id: overlay
@@ -28,12 +29,47 @@ PinchArea {
     readonly property var exposureControl: captureView ? captureView.exposureControl : null
     onDeviceRotationChanged: syncDeviceRotation()
 
+    // Bottom edge of the floating photo-mode bar (0 when hidden).
+    readonly property real floatingTopBarBottom: floatingTopBar.visible
+                                                 ? floatingTopBar.y + floatingTopBar.height : 0
+
     property real currentZoom: 1
     property real maximumZoom: 1
     signal zoomPressed(int direction)
     signal zoomReleased()
     signal zoomCanceled()
     signal zoomResetRequested()
+    signal zoomPresetRequested(real value)
+
+    // Viewfinder swipes: up/down flips front and rear (photo mode), left/right
+    // switches photo and video.
+    function flipCamera() {
+        if (!camera2BottomDeck.active || !captureView || captureView.captureBusy || captureView.recording) return
+        if (camera2BottomDeck.video) {
+            // Qt Multimedia ids for video.
+            if (!camera.hasCameraOnBothSides) return
+            Settings.deviceId = Settings.global.position === Camera.BackFace
+                    ? Settings.global.frontFacingDeviceId
+                    : Settings.global.previousBackFacingDeviceId
+            captureView.resetZoom()
+            return
+        }
+        var roles = Settings.camera2CameraRoles()
+        if (!roles.front) return
+        var back = Settings.global.previousBackFacingDeviceId
+        var target = Settings.deviceId === roles.front
+                ? (back && back !== roles.front ? back : roles.main)
+                : roles.front
+        if (target && target !== Settings.deviceId) {
+            Settings.deviceId = target
+            captureView.resetZoom()
+        }
+    }
+
+    function selectCaptureMode(mode) {
+        if (!captureView || captureView.captureBusy || captureView.recording) return
+        if (Settings.global.captureMode !== mode) Settings.global.captureMode = mode
+    }
 
     function evChoices() {
         if (!exposureControl) return [0]
@@ -203,10 +239,16 @@ PinchArea {
     Item {
         id: camera2BottomDeck
 
-        readonly property bool active: Settings.global.captureMode === "image"
-        readonly property real controlHeight: Math.round(parent.height * 0.40)
-        readonly property real controlWidth: Math.round(parent.width * 0.40)
-        readonly property real headerHeight: Settings.global.advancedMode
+        // Photo and video share the floating layout; video always uses the
+        // simple deck (the Pro dials are Camera2 photo controls).
+        readonly property bool video: Settings.global.captureMode === "video"
+        readonly property bool active: Settings.global.captureMode === "image" || video
+        readonly property bool pro: Settings.global.advancedMode && !video
+        // Floats over the full-screen viewfinder; Simple needs less room.
+        readonly property real controlFraction: pro ? 0.40 : 0.19
+        readonly property real controlHeight: Math.round(parent.height * controlFraction)
+        readonly property real controlWidth: Math.round(parent.width * controlFraction)
+        readonly property real headerHeight: pro
                                              ? Theme.fontSizeTiny + Theme.paddingSmall
                                              : 0
 
@@ -219,10 +261,25 @@ PinchArea {
         height: active ? (overlay.isPortrait ? controlHeight : parent.height) : 0
         visible: active
 
+        // Taps between the controls must not refocus the viewfinder underneath.
+        MouseArea {
+            anchors.fill: parent
+        }
+
+        // Scrim that keeps the floating controls readable over live video.
         Rectangle {
             anchors.fill: parent
-            color: "black"
-            opacity: 1.0
+            visible: overlay.isPortrait
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "transparent" }
+                GradientStop { position: 0.3; color: Theme.rgba("black", 0.3) }
+                GradientStop { position: 1.0; color: Theme.rgba("black", 0.6) }
+            }
+        }
+        Rectangle {
+            anchors.fill: parent
+            visible: !overlay.isPortrait
+            color: Theme.rgba("black", 0.45)
         }
 
         Row {
@@ -239,7 +296,7 @@ PinchArea {
             height: Theme.fontSizeTiny
             spacing: camera2ControlGrid.columnGap
             z: 3
-            visible: Settings.global.advancedMode
+            visible: camera2BottomDeck.pro
 
             Label {
                 width: camera2ControlGrid.leftWidth
@@ -311,7 +368,7 @@ PinchArea {
             readonly property real isoWidth: usableWidth - leftWidth
                                              - centerWidth - speedWidth
             readonly property var camera2Viewfinder: captureView ? captureView.camera2Viewfinder : null
-            visible: Settings.global.advancedMode
+            visible: camera2BottomDeck.pro
             enabled: visible
 
             function focalLengthText() {
@@ -388,14 +445,12 @@ PinchArea {
                             ? parent.height / 3
                             : parent.height
 
-                    CameraLensSelector {
-                        anchors {
-                            left: parent.left
-                            right: parent.right
-                            verticalCenter: parent.verticalCenter
-                        }
-                        height: Theme.itemSizeMedium
+                    CameraSwitchButtons {
+                        anchors.centerIn: parent
+                        availableWidth: parent.width
+                        availableHeight: parent.height
                         captureBusy: captureView.captureBusy || !overlay.deviceToggleEnabled
+                        onSwitched: captureView.resetZoom()
                     }
                 }
 
@@ -446,6 +501,12 @@ PinchArea {
                 Item {
                     width: camera2ControlGrid.experimentalLayout ? camera2ControlGrid.exposureWidth : parent.width
                     height: parent.height * 0.34
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Theme.paddingSmall
+                        color: Theme.rgba("black", 0.35)
+                    }
 
                     Canvas {
                         id: exposureHistogram
@@ -673,13 +734,8 @@ PinchArea {
         Item {
             id: simpleCamera2Deck
 
-            readonly property bool histogramCollapsed: !Settings.global.simpleHistogramVisible
-            readonly property real histogramStripHeight: Theme.itemSizeSmall
-            readonly property real histogramOpenHeight: Math.round(height * 0.34)
-            readonly property real histogramHeight: histogramCollapsed
-                                                   ? histogramStripHeight
-                                                   : histogramOpenHeight
-
+            // Normal mode: no histogram, exposure readouts or EV, just the
+            // last photo, the shutter and the lens.
             anchors {
                 fill: parent
                 leftMargin: camera2ControlGrid.sideMargin
@@ -687,185 +743,59 @@ PinchArea {
                 topMargin: Theme.paddingSmall
                 bottomMargin: Theme.paddingSmall
             }
-            visible: !Settings.global.advancedMode
+            visible: !camera2BottomDeck.pro
             enabled: visible
 
-            Item {
-                id: simpleHistogramPanel
-
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: parent.top
-                }
-                height: simpleCamera2Deck.histogramHeight
-                clip: true
-
-                Behavior on height {
-                    NumberAnimation { duration: 180; easing.type: Easing.InOutQuad }
-                }
-
-                Canvas {
-                    id: simpleExposureHistogram
-
-                    anchors.fill: parent
-                    visible: !simpleCamera2Deck.histogramCollapsed
-                    opacity: 0.95
-
-                    onPaint: {
-                        camera2ControlGrid.drawHistogram(
-                                    getContext("2d"), width, height,
-                                    camera2ControlGrid.camera2Viewfinder
-                                    ? camera2ControlGrid.camera2Viewfinder.histogram : [])
-                    }
-
-                    Connections {
-                        target: camera2ControlGrid.camera2Viewfinder
-                        onHistogramChanged: simpleExposureHistogram.requestPaint()
-                    }
-                }
-
-                IconButton {
-                    anchors {
-                        right: parent.right
-                        verticalCenter: parent.verticalCenter
-                    }
-                    icon.source: simpleCamera2Deck.histogramCollapsed
-                                 ? "image://theme/icon-m-down"
-                                 : "image://theme/icon-m-up"
-                    onClicked: {
-                        Settings.global.simpleHistogramVisible = !Settings.global.simpleHistogramVisible
-                    }
-                }
-            }
-
-            ValueCarousel {
-                id: simpleEv
-                anchors { left: parent.left; right: parent.right; top: simpleHistogramPanel.bottom }
-                height: Theme.itemSizeExtraSmall
-                enabled: overlay.exposureControl && !captureView.captureBusy
-                         && overlay.exposureControl.capabilities.compensation_step_ev > 0
-                settings: Settings.global
-                writeThrough: false
-                onValueSelected: Settings.global.exposureCompensation = value
-                settingProperty: "exposureCompensation"
-                displayValue: overlay.exposureControl ? overlay.exposureControl.effectiveEv * 2 : currentValue
-                model: overlay.evChoices()
-                valueLabel: function(value) { return overlay.evLabel(value) }
-            }
+            // Pixel-style row: last capture, shutter, lens.
             Row {
-                anchors {
-                    left: parent.left
-                    right: parent.right
-                    top: simpleEv.bottom
-                    bottom: parent.bottom
-                    topMargin: Theme.paddingSmall
-                }
-                spacing: camera2ControlGrid.columnGap
+                anchors.fill: parent
+                readonly property real sideWidth: (width - camera2ControlGrid.centerWidth) / 2
 
-                Column {
-                    width: camera2ControlGrid.leftWidth
+                Item {
+                    width: parent.sideWidth
                     height: parent.height
 
-                    Label {
-                        width: parent.width
-                        height: Theme.fontSizeTiny + Theme.paddingSmall
-                        horizontalAlignment: Text.AlignHCenter
-                        color: _highlightColor
-                        opacity: Theme.opacityHigh
-                        font.pixelSize: Theme.fontSizeTiny
-                        font.bold: true
-                        text: "CAM"
-                    }
-
-                    CameraLensSelector {
-                        width: parent.width
-                        height: parent.height - y
-                        captureBusy: captureView.captureBusy || !overlay.deviceToggleEnabled
+                    GalleryThumbnail {
+                        anchors.centerIn: parent
+                        width: Math.min(Theme.itemSizeMedium, parent.width - Theme.paddingLarge,
+                                        parent.height - Theme.paddingLarge)
+                        height: width
+                        captureModel: captureView ? captureView.captureModel : null
+                        busy: !!captureView && captureView.processing
+                        pendingSource: captureView ? captureView.pendingThumbnail : ""
+                        // Hidden while recording, like the camera switch.
+                        visible: !captureView || !captureView.recording
+                        onClicked: captureView.galleryRequested()
                     }
                 }
 
-                Column {
+                Item {
                     width: camera2ControlGrid.centerWidth
                     height: parent.height
 
                     Item {
-                        width: parent.width
-                        height: Theme.fontSizeTiny + Theme.paddingSmall
-                    }
-
-                    Item {
                         id: simpleBottomShutterAnchor
 
-                        width: parent.width
-                        height: parent.height - y
-                    }
-
-                }
-
-                Column {
-                    width: camera2ControlGrid.speedWidth
-                    height: parent.height
-
-                    Label {
-                        width: parent.width
-                        height: Theme.fontSizeTiny + Theme.paddingSmall
-                        horizontalAlignment: Text.AlignHCenter
-                        color: _highlightColor
-                        opacity: Theme.opacityHigh
-                        font.pixelSize: Theme.fontSizeTiny
-                        font.bold: true
-                        text: "SPEED"
-                    }
-
-                    ValueCarousel {
-                        width: parent.width
-                        height: parent.height - y
-                        enabled: false
-                        orientation: ListView.Vertical
-                        caption: ""
-                        settings: Settings.mode
-                        settingProperty: "rawCaptureShutterNs"
-                        currentValue: Settings.mode.rawCaptureShutterNs
-                        displayValue: camera2ControlGrid.liveShutterValue()
-                        model: Settings.camera2ShutterModel()
-                        valueLabel: function(value) { return value === "—" ? value : Settings.rawCaptureShutterLabel(value) }
-                        selectedFontSize: Theme.fontSizeLarge
-                        tapered: true
-                        wrap: true
+                        // Same size as the Advanced shutter.
+                        width: Math.min(parent.width, parent.height, Theme.itemSizeExtraLarge * 1.18)
+                        height: width
+                        anchors.centerIn: parent
                     }
                 }
 
-                Column {
-                    width: camera2ControlGrid.isoWidth
+                Item {
+                    width: parent.sideWidth
                     height: parent.height
 
-                    Label {
-                        width: parent.width
-                        height: Theme.fontSizeTiny + Theme.paddingSmall
-                        horizontalAlignment: Text.AlignHCenter
-                        color: _highlightColor
-                        opacity: Theme.opacityHigh
-                        font.pixelSize: Theme.fontSizeTiny
-                        font.bold: true
-                        text: "ISO"
-                    }
-
-                    ValueCarousel {
-                        width: parent.width
-                        height: parent.height - y
-                        enabled: false
-                        orientation: ListView.Vertical
-                        caption: ""
-                        settings: Settings.mode
-                        settingProperty: "rawCaptureIso"
-                        currentValue: Settings.mode.rawCaptureIso
-                        displayValue: camera2ControlGrid.liveIsoValue()
-                        model: Settings.camera2IsoModel()
-                        valueLabel: function(value) { return value === "—" ? value : value > 0 ? value : "Auto" }
-                        selectedFontSize: Theme.fontSizeLarge
-                        tapered: true
-                        wrap: true
+                    CameraSwitchButtons {
+                        anchors.centerIn: parent
+                        availableWidth: parent.width
+                        availableHeight: parent.height
+                        captureBusy: captureView.captureBusy || !overlay.deviceToggleEnabled
+                        // Video records through Qt Multimedia, with its own camera ids.
+                        qtCamera: camera2BottomDeck.video
+                        visible: !captureView.recording
+                        onSwitched: captureView.resetZoom()
                     }
                 }
             }
@@ -873,12 +803,151 @@ PinchArea {
 
     }
 
+    // 1x / 2x presets just above the shutter deck (left of it in landscape).
+    // Positioned with x/y: anchors toggled per orientation can briefly
+    // combine right and horizontalCenter, which QML rejects, stranding the
+    // pill off screen after a few rotations.
+    ZoomSwitch {
+        x: overlay.isPortrait ? camera2BottomDeck.x + (camera2BottomDeck.width - width) / 2
+                              : camera2BottomDeck.x - width - Theme.paddingMedium
+        y: overlay.isPortrait ? captureModeTabs.y - height - Theme.paddingSmall
+                              : camera2BottomDeck.y + (camera2BottomDeck.height - height) / 2
+        width: implicitWidth
+        height: implicitHeight
+        z: 2
+        visible: camera2BottomDeck.active && !!captureView
+                 && (captureView._camera2ViewfinderActive || camera2BottomDeck.video)
+                 && overlay.maximumZoom >= 2 && overlay.settingsOpacity < 0.5
+        enabled: !!captureView && !captureView.captureBusy
+        zoom: overlay.currentZoom
+        onSelected: overlay.zoomPresetRequested(value)
+    }
+
+    // PHOTO | VIDEO: above the shutter deck in photo mode (inside its top in
+    // landscape), near the bottom edge in video mode.
+    CaptureModeTabs {
+        id: captureModeTabs
+
+        x: camera2BottomDeck.active
+           ? camera2BottomDeck.x + (camera2BottomDeck.width - width) / 2
+           : (overlay.width - width) / 2
+        y: camera2BottomDeck.active
+           ? (overlay.isPortrait ? camera2BottomDeck.y - height - Theme.paddingSmall
+                                 : camera2BottomDeck.y + Theme.paddingLarge)
+           : overlay.height - height - Theme.itemSizeExtraLarge * 1.5
+        z: 2
+        visible: opacity > 0.0 && !!captureView && !captureView.recording && !overlay.inButtonLayout
+        opacity: overlay.settingsOpacity < 0.5 ? 1.0 : 0.0
+        Behavior on opacity { FadeAnimation {} }
+        enabled: !!captureView && !captureView.captureBusy
+        mode: Settings.global.captureMode
+        onSelected: overlay.selectCaptureMode(mode)
+    }
+
+    // Photo-mode controls floating along the top edge of the viewfinder.
+    Item {
+        id: floatingTopBar
+
+        // Burst support depends on the selected camera's RAW capabilities.
+        property bool burstAvailable
+        function updateBurstAvailable() {
+            burstAvailable = Settings.camera2BurstSupported()
+        }
+        Component.onCompleted: updateBurstAvailable()
+
+        Connections {
+            target: Settings
+            onDeviceIdChanged: floatingTopBar.updateBurstAvailable()
+        }
+
+        z: 3
+        anchors {
+            left: parent.left
+            right: parent.right
+            top: parent.top
+            topMargin: overlay._safeTopMargin + Theme.paddingMedium
+            leftMargin: Theme.horizontalPageMargin
+            // Landscape: only over the viewfinder, never over the deck column
+            // on the right, whose top holds the PHOTO | VIDEO tabs.
+            rightMargin: Theme.horizontalPageMargin
+                         + (overlay.isPortrait || !camera2BottomDeck.active ? 0 : camera2BottomDeck.width)
+        }
+        height: Theme.itemSizeExtraSmall
+        opacity: overlay._exposed ? 0.0 : _commonControlOpacity
+        // Recording shows its timer up here instead.
+        visible: camera2BottomDeck.active && opacity > 0.0 && !(captureView && captureView.recording)
+        Behavior on opacity { FadeAnimation {} }
+
+        Row {
+            anchors.left: parent.left
+            height: parent.height
+            spacing: Theme.paddingMedium
+
+            // Opens the settings panel (formerly a tap on the strip above the viewfinder).
+            FloatingChip {
+                height: parent.height
+                enabled: !overlay.inButtonLayout
+                onClicked: overlay.topMenuOpen = true
+            }
+
+            // Normal hides the histogram and exposure readouts; Pro shows them all.
+            ModeSwitch {
+                height: parent.height
+                visible: !camera2BottomDeck.video
+                enabled: !captureView.captureBusy
+                pro: Settings.global.advancedMode
+                onSelected: Settings.global.advancedMode = pro
+            }
+        }
+
+        Row {
+            anchors.right: parent.right
+            height: parent.height
+            spacing: Theme.paddingMedium
+
+            // Night mode: offered when the scene is too dark, on by a tap.
+            FloatingChip {
+                id: nightChip
+
+                height: parent.height
+                visible: floatingTopBar.burstAvailable && !camera2BottomDeck.video
+                         && (captureView.sceneDark || Settings.nightMode)
+                enabled: !captureView.captureBusy
+                checked: Settings.nightMode
+                menuDots: false
+                onClicked: Settings.nightMode = !Settings.nightMode
+
+                MoonIcon {
+                    anchors.centerIn: parent
+                    lit: Settings.nightMode
+                }
+            }
+
+            FloatingChip {
+                height: parent.height
+                visible: floatingTopBar.burstAvailable && !camera2BottomDeck.video
+                enabled: !captureView.captureBusy
+                text: "HDR"
+                checked: Settings.global.hdrBurst
+                onClicked: Settings.global.hdrBurst = !Settings.global.hdrBurst
+            }
+
+            FloatingChip {
+                height: parent.height
+                // Fit shows exactly the photo's frame.
+                text: Settings.global.viewfinderFill ? "Full" : Settings.photoAspect
+                onClicked: Settings.global.viewfinderFill = !Settings.global.viewfinderFill
+            }
+
+        }
+    }
+
     Item {
         id: shutterContainer
 
         parent: camera2BottomDeck.active
-                ? (Settings.global.advancedMode ? bottomShutterAnchor
-                                                 : simpleBottomShutterAnchor)
+                ? (camera2BottomDeck.pro ? bottomShutterAnchor
+                                         : simpleBottomShutterAnchor)
                                          : overlay._buttonAnchors[overlay._captureButtonLocation]
         anchors.fill: parent
     }
@@ -939,7 +1008,8 @@ PinchArea {
         anchors.centerIn: parent
         icon: "image://theme/icon-camera-switch"
         opacity: _commonControlOpacity
-        visible: opacity > 0.0 && camera.hasCameraOnBothSides
+        // Photo mode switches cameras with the lens selector in the deck.
+        visible: opacity > 0.0 && camera.hasCameraOnBothSides && !camera2BottomDeck.active
         enabled: overlay.deviceToggleEnabled
 
         onClicked: {
@@ -1070,6 +1140,7 @@ PinchArea {
 
             property real pressX
             property real pressY
+            property bool swiped
 
             function outOfBounds(mouseX, mouseY) {
                 if (captureView && captureView._camera2ViewfinderActive) {
@@ -1086,9 +1157,26 @@ PinchArea {
             onPressed: {
                 pressX = mouseX
                 pressY = mouseY
+                swiped = false
+            }
+
+            onReleased: {
+                if (overlay.topMenuOpen || overlay.inButtonLayout || outOfBounds(pressX, pressY)) return
+                var dx = mouseX - pressX, dy = mouseY - pressY
+                if (Math.max(Math.abs(dx), Math.abs(dy)) < Theme.itemSizeSmall) return
+                if (Math.abs(dy) > 1.5 * Math.abs(dx)) {
+                    swiped = true
+                    overlay.flipCamera()
+                } else if (Math.abs(dx) > 1.5 * Math.abs(dy)) {
+                    swiped = true
+                    // Like Android: swiping left moves on to video.
+                    overlay.selectCaptureMode(dx < 0 ? "video" : "image")
+                }
             }
 
             onClicked: {
+                // A swipe is not a tap (no focus point at its end).
+                if (swiped) return
                 if (overlay.topMenuOpen) {
                     overlay.topMenuOpen = false
                 }
@@ -1242,8 +1330,15 @@ PinchArea {
             }
 
             function simpleCamera2ItemKeys() {
-                return [ "timer", "advanced", "grid" ]
+                var keys = [ "timer", "ratio" ]
+                if (rawFilesAvailable) keys.push("rawSave")
+                keys.push("advanced")
+                keys.push("grid")
+                return keys
             }
+
+            // Cameras without RAW (YUV bursts) have no RAW files to keep.
+            readonly property bool rawFilesAvailable: Settings.camera2BurstFormat(Settings.deviceId) !== "yuv"
 
             function legacyItemKeys() {
                 var keys = [ "timer" ]
@@ -1266,7 +1361,9 @@ PinchArea {
             }
 
             function rawItemKeys() {
-                var keys = [ "timer", "advanced", "speed", "size", "quality", "timeout" ]
+                var keys = [ "timer", "ratio" ]
+                if (rawFilesAvailable) keys.push("rawSave")
+                keys = keys.concat([ "advanced", "speed", "size", "quality", "timeout" ])
                 if (camera2FocusSupported) {
                     keys.push("focus")
                 }
@@ -1290,7 +1387,7 @@ PinchArea {
             }
 
             function camera2JpegItemKeys() {
-                var keys = [ "timer", "advanced", "speed", "size", "quality" ]
+                var keys = [ "timer", "ratio", "advanced", "speed", "size", "quality" ]
                 if (camera2FocusSupported) {
                     keys.push("focus")
                 }
@@ -1313,6 +1410,8 @@ PinchArea {
                 case "iso": return isoSettingComponent
                 case "filter": return filterSettingComponent
                 case "advanced": return advancedModeSettingComponent
+                case "ratio": return aspectSettingComponent
+                case "rawSave": return rawSaveSettingComponent
                 case "speed": return speedSettingComponent
                 case "size": return sizeSettingComponent
                 case "quality": return qualitySettingComponent
@@ -1575,6 +1674,41 @@ PinchArea {
                         value: modelData
                         icon: Settings.colorFiltersIcon(modelData)
                     }
+                }
+            }
+
+            Component {
+                id: aspectSettingComponent
+                TextSettingMenu {
+                    width: grid.menuWidth
+                    title: "Photo aspect ratio"
+                    header: upperHeader
+                    settings: Settings.mode
+                    property: "aspectRatio"
+                    caption: "Ratio"
+                    valueLabel: function(value) { return value === CameraConfigs.AspectRatio_16_9 ? "16:9" : "4:3" }
+                    model: [ CameraConfigs.AspectRatio_4_3, CameraConfigs.AspectRatio_16_9 ]
+                }
+            }
+
+            Component {
+                id: rawSaveSettingComponent
+                TextSettingMenu {
+                    width: grid.menuWidth
+                    title: "RAW files next to the JPEG"
+                    header: upperHeader
+                    settings: Settings.global
+                    property: "rawCaptureSaveFormat"
+                    caption: "RAW"
+                    valueLabel: function(value) {
+                        switch (value) {
+                        case "raw16": return "RAW"
+                        case "dng": return "DNG"
+                        case "both": return "Both"
+                        default: return "Off"
+                        }
+                    }
+                    model: [ "none", "dng", "raw16", "both" ]
                 }
             }
 
@@ -1861,7 +1995,8 @@ PinchArea {
         anchors.horizontalCenter: parent.horizontalCenter
         spacing: grid.spacing
         opacity: overlay._exposed ? 0.0 : _commonControlOpacity
-        visible: opacity > 0.0
+        // The floating top bar replaces these indicators (photo and video).
+        visible: opacity > 0.0 && !camera2BottomDeck.active
 
         function dragY(yValue) {
             return yValue != undefined ? Math.max(topRow._topRowMargin, grid.y + yValue)
@@ -1981,7 +2116,8 @@ PinchArea {
             alignment: _overlayPosition.exposure
             enabled: !overlay.topMenuOpen && !overlay.inButtonLayout && !whiteBalanceMenu.open
             opacity: (1.0 - settingsOpacity) * (1.0 - whiteBalanceMenu.openProgress)
-            visible: !grid.camera2Still || !Settings.global.advancedMode
+            // Photo and video use the tap brightness slider instead.
+            visible: !grid.camera2Still && !camera2BottomDeck.active
             height: Theme.itemSizeSmall * 5
         }
     }
@@ -2115,7 +2251,7 @@ PinchArea {
     ConfigurationValue {
         id: experimentalModes
 
-        key: "/apps/rawfish/enable_experimental_modes"
+        key: "/apps/procam/enable_experimental_modes"
         defaultValue: false
     }
 }

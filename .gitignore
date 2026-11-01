@@ -1,25 +1,98 @@
 # SPDX-FileCopyrightText: 2013 - 2024 Jolla Ltd.
 # SPDX-FileCopyrightText: 2025 Jolla Mobile Ltd
+# SPDX-FileCopyrightText: 2026 ProCam Contributors
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+# --- Build output ---------------------------------------------------------
+# Shadow builds (sfdk, host tests, tools) and packages.
+build/
+build-*/
+RPMS/
+RPM/
+*.rpm
+# Android Camera2 bridge (built by sfos-camera2-bridge/scripts/build-android.sh).
+sfos-camera2-bridge/build/
+
+# In-tree qmake/make output (the SDK builds in the source tree).
+Makefile
+Makefile.*
+*.Makefile
+.qmake.stash
 *.o
 *.so
+*.so.*
+*.a
 moc_*
+qrc_*
+ui_*.h
 *.moc
-*.pro.user
-Makefile
-*.ts
 *.qm
+*.ts
+# Binaries an in-tree build leaves next to their sources.
+/procam
+/sfos-camera2-probe
+/sfos-camera2-bridge/sailfish/sfos-camera2-probe
+/sfos-camera2-bridge/sailfish/sfos-raw16-to-jpeg
+/sfos-camera2-bridge/sailfish/sfos-raw16-to-ppm
+/lockscreen/procam-lockscreen
+/tests/tst_rawpipeline
+/tests/rawbracket
+/tests/rawbracketpixels
+/tests/exifmetadata
+/tests/previewaids
+/tests/previewsize
+/tests/tst_previewanalysis
+/tools/raisr/raisr-train
+/sfos-camera2-bridge/tests/preview_commands
+target_wrapper.*
+
+# --- Sailfish SDK / IDEs --------------------------------------------------
+.sfdk/
+.sfdk
+*.pro.user
+*.pro.user.*
+*.autosave
+.qtc_clangd/
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+*.swp
+*~
+.DS_Store
+
+# --- Device data -----------------------------------------------------------
+# Photos, RAW frames and their sidecars copied from the phone, and Camera2
+# probe dumps: personal data, never part of the source.
+/RAW/
+*.raw16
+*.raw10
+*.dng
+ProCam_*.jpg
+ProCam_*.json
+procam-capture.log
+/probe.json
+/generated-hal.json
+
+# Downloaded third-party apps and archives used for research.
+*.apk
+*.apkm
+*.xapk
+*.zip
+*.tar.*
+
+# --- Python / tools ---------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+
+# --- Local tooling -----------------------------------------------------------
+.graptos/
 .graptos-backups/
 .graptos-save-*.tmp
 .graptos-latex-build/
-build/
+.graptos-task.ini
 .zig-cache/
 git_check.sh
-.graptos/
-.graptos-task.ini
-.sfdk
 logs_jp2/
-RPM/
-*.rpm

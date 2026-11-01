@@ -54,8 +54,8 @@ public:
 
         AppTranslator *engineeringEnglish = new AppTranslator(engine);
         AppTranslator *translator = new AppTranslator(engine);
-        engineeringEnglish->load("rawfish_eng_en", "/usr/share/translations");
-        translator->load(QLocale(), "rawfish", "-", "/usr/share/translations");
+        engineeringEnglish->load("procam_eng_en", "/usr/share/translations");
+        translator->load(QLocale(), "procam", "-", "/usr/share/translations");
     }
 
     virtual void registerTypes(const char *uri)

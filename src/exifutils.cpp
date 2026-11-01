@@ -127,7 +127,7 @@ Fields fieldsFor(const QJsonObject &m, bool dng)
     const auto image = EXIF_IFD_0;
     text(fields, image, 0x010f, m.value(QStringLiteral("make")).toString());
     text(fields, image, 0x0110, m.value(QStringLiteral("model")).toString());
-    text(fields, image, 0x0131, QStringLiteral("RAWfish 1.3.1-5"));
+    text(fields, image, 0x0131, QStringLiteral("ProCam 1.3.1-5"));
     number(fields, image, 0x0112, EXIF_FORMAT_SHORT, ExifUtils::orientation(m, dng));
     for (const auto &dimension : {qMakePair(QStringLiteral("width"), 0xa002),
                                  qMakePair(QStringLiteral("height"), 0xa003)}) {
@@ -358,7 +358,7 @@ QJsonObject captureContext(const QVariantMap &values)
     QString captured = now.toOffsetFromUtc(now.offsetFromUtc()).toString(Qt::ISODate);
     captured.insert(19, QLatin1Char('.') + now.toString(QStringLiteral("zzz")));
     context.insert(QStringLiteral("captured_at"), captured);
-    context.insert(QStringLiteral("software"), QStringLiteral("RAWfish 1.3.1-5"));
+    context.insert(QStringLiteral("software"), QStringLiteral("ProCam 1.3.1-5"));
     QFile hardware(QStringLiteral("/etc/hw-release"));
     if (hardware.open(QIODevice::ReadOnly)) {
         while (!hardware.atEnd()) {

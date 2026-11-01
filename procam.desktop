@@ -5,13 +5,13 @@
 
 [Desktop Entry]
 Type=Application
-Name=RAWfish
-Icon=rawfish-sfos
-Exec=/usr/bin/rawfish
-Comment=RAWfish
+Name=ProCam
+Icon=procam-sfos
+Exec=/usr/bin/procam
+Comment=ProCam
 
 [X-Sailjail]
-ApplicationName=rawfish
-OrganizationName=com.rawfish
-DataDirectory=rawfish
+ApplicationName=procam
+OrganizationName=com.procam
+DataDirectory=procam
 Permissions=Camera;Audio;Microphone;Pictures;Videos;MediaIndexing;Location;Privileged;Ambience;RemovableMedia

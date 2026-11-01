@@ -1,107 +1,241 @@
-# RAWfish Camera App for JP2
+<p align="center">
+  <img src="icons/procam.svg" width="128" alt="ProCam icon">
+</p>
 
-This is a fork of Jolla Camera, intended to serve as a working experiment until we finally get Camera2 support in droidmedia. Please note that this app should only be tested on the Jolla Phone 2.
+<h1 align="center">ProCam</h1>
 
-For the bridge and related probes, please look under [sfos-camera2-bridge](sfos-camera2-bridge)
+<p align="center">
+  Computational photography for the Jolla Phone 2 on Sailfish OS.<br>
+  Every photo is rendered on the phone from merged RAW bursts.
+</p>
 
-Please note that the project still retains unused code from Jolla Camera.
+<p align="center">
+  <a href="https://github.com/IvanVojtko/PROCam/actions/workflows/ci.yml"><img src="https://github.com/IvanVojtko/PROCam/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/IvanVojtko/PROCam/releases/latest"><img src="https://img.shields.io/github/v/release/IvanVojtko/PROCam?include_prereleases&label=release" alt="Latest release"></a>
+  <a href="LICENSES/BSD-3-Clause.txt"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue" alt="License"></a>
+</p>
 
-At this point, RAWfish will not be released on OpenRepos due to outstanding issues and the work required to support more devices. Currently, RAWfish is built around behavior observed on the Jolla Phone 2. Other devices may require porting work for the following reasons:
+---
 
-* Camera2 support depends on the Android HAL exposing compatible Camera2 APIs through libhybris.
-* RAW capture depends on the camera HAL exposing usable `RAW_SENSOR` RAW16 output.
-* DNG quality depends on complete and correct sensor metadata from the HAL.
-* Camera IDs may differ between devices, so front or back camera selection may be incorrect.
-* Preview orientation, mirroring, cropping, and focus coordinates may need per-device adjustments.
-* Lens, ISO, shutter speed, aperture, and focus metadata may be missing or incorrect on some HALs.
-* Fast warm JPEG RAW capture depends on the preview helper staying alive and receiving frames.
-* Vendor library namespace issues may block Camera2 on some devices.
-* Performance varies considerably depending on sensor size, HAL behavior, storage speed, and CPU.
+ProCam brings phone-style computational photography to Sailfish OS. Instead
+of saving the camera hardware's own processed JPEG, it captures RAW sensor
+frames and renders them with its own pipeline, modelled on the published
+HDR+ research: bursts are aligned and merged, noise is removed, highlights
+are kept, and fine detail is rebuilt from the small shifts of your hand
+between frames.
 
-## How does RAWfish differ from Jolla Camera?
+## Features
 
-* Added a Camera2 bridge for direct Android Camera2 still capture.
-* Added warm Camera2 preview capture paths for faster JPEG and RAW capture.
-* Added RAW16 capture with JSON metadata sidecars.
-* Added DNG output using `libtiff`.
-* Added EXIF and metadata handling for RAW, DNG, and JPEG-from-RAW outputs.
-* Updated the gallery model to recognize RAWfish filenames.
-* Added live histogram support from Camera2 preview frames, with clipping colors applied to the first and last histogram bars.
-* Added Camera2 support for tap-to-focus and tap-to-meter.
-* Added Camera2 controls for speed, size, focus, scene, noise reduction, white balance, tint, exposure, rotation, timeout, and JPEG quality.
-* Added live displays of ISO, shutter speed, and lens information from Camera2 metadata, alongside the live histogram.
+- **RAW rendering for every photo.** JPEG or RAW, HDR on or off: each shot is
+  built from RAW16 sensor data with a noise model, highlight reconstruction,
+  local tone mapping, lens shading correction and noise-aware sharpening.
+- **HDR bursts.** Up to 8 frames, aligned and merged, so skies keep their
+  detail and indoor shots stay clean. Frames are kept short (1/60 s where the
+  light allows) to avoid hand-shake blur.
+- **Night mode.** A moon appears in the top bar when the scene is too dark.
+  Tap it and hold still for a second or two: 8 long frames (up to 1/5 s)
+  are merged and brightened to a natural, evening-like look.
+- **Super-resolution and sharp 2x zoom.** Burst frames fill in real detail
+  between the sensor pixels. The 2x zoom is rendered from the burst on a finer
+  grid, sharpened with learned RAISR filters.
+- **Front and ultra-wide cameras too.** They have no RAW output, so ProCam
+  merges bursts of full-resolution YUV frames instead, with the camera's own
+  smoothing switched off.
+- **4:3 or 16:9 photos**, and optional RAW (RAW16 + JSON) and DNG files next
+  to each JPEG.
+- **A modern viewfinder.** Fullscreen preview, Photo/Video tabs (or swipe),
+  tap to focus with a brightness slider, an instant thumbnail, and a capture
+  queue so you can keep shooting while earlier photos are processed.
+- **Normal and Pro modes.** Pro adds the live histogram, manual ISO, shutter
+  and focus, white balance, RAW bracketing and more.
 
-## What Currently Works
+## Where ProCam comes from
 
-* The main camera (ID 0) on the JP2 (Sony IMX766, 50 MP, C-PHY MIPI).
-* RAW16, DNG, and JPEG capture, including RAW-to-JPEG conversion and native JPEG capture.
-* Controls for speed, size, focus, scene, noise reduction, white balance, tint, exposure, rotation, timeout, and JPEG quality.
+ProCam is a fork of **[RAWfish](https://github.com/Logic-gate/RAWfish)** by
+Logic-gate and contributors. RAWfish is itself a fork of Jolla Camera that
+did the hard groundwork: an Android Camera2 bridge running through libhybris,
+RAW16 and DNG capture, metadata handling and manual controls. ProCam would not
+exist without it.
 
-## Contributions and Credit Where It’s Due
-[ric9k](https://forum.sailfishos.org/u/ric9k/summary) has been instrumental in smoothing out the rough edges and providing valuable feedback.
-Tadi for Bracketing([licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt).) and general support. 
+### Why a new name
 
-## AI Policy and Usage
+ProCam started as a set of improvements meant for RAWfish. Over time the
+changes grew well beyond what fits in a pull request:
 
-The development of RAWfish has relied on, and will continue to rely on, AI assistance in various forms, including research, debugging, and code generation.
-I understand that many community members may object to this approach. 
+- a new RAW rendering pipeline that every photo goes through,
+- burst capture with HDR, night mode, super-resolution and zoom,
+- a redesigned camera interface,
+- and a shift in focus from a RAW capture tool to a point-and-shoot camera
+  that does the processing for you.
 
-AI-assisted contributions are welcome and are subject to the [AI Usage Policy](AI_USAGE_POLICY.md).
+Rather than push a different direction onto the original project, it is
+released as its own app with its own name, app ID (`com.procam`) and settings
+(`/apps/procam`). RAWfish remains the place for its own goals; ProCam is the
+computational photography branch of that family.
 
-## Versioning
-RAWfish retains Jolla Camera’s version numbering as it stood at the time of the fork, with divergence beginning at version 1.3.0-1. If the project gains traction, I will detach it from the fork network to keep it separate from forks intended to contribute pull requests to Jolla Camera.
+## Device support
 
-## Licensing 
-RAWfish retains Jolla Camera’s BSD-3-Clause license.
+| | |
+|---|---|
+| Phone | Jolla Phone 2 (2026) |
+| System | Sailfish OS 5.1, aarch64 |
+| Main camera | RAW16 bursts: HDR, night mode, super-resolution, 2x zoom |
+| Front and ultra-wide | YUV bursts: HDR and night mode |
 
-## Photo metadata
+ProCam talks to the camera through Android's Camera2 API, so it depends on
+what the phone's camera HAL exposes. Other Sailfish devices may need porting:
+camera IDs, RAW support, preview orientation and metadata quality all vary by
+device.
 
-RAWfish shares one capture-metadata model across Simple and Advanced modes, using libexif for JPEG EXIF and libtiff for DNG. Available standard tags include orientation; additional capture details are stored as JSON in EXIF UserComment. GPS follows Save location. Full JSON sidecars are retained, including for bare RAW16/RAW10 files; oversized comments identify fields retained only in the sidecar. Building requires libexif-devel and libtiff-devel.
+## Installation
 
-## Exposure controls
+1. Download the latest `procam-*.aarch64.rpm` from
+   [Releases](https://github.com/IvanVojtko/PROCam/releases).
+2. Uninstall RAWfish first if you have it: both apps ship the same camera
+   bridge and QML module, so they cannot be installed side by side.
+3. Install the package, either by opening it in the file manager or from a
+   terminal:
 
-Simple mode uses automatic exposure with EV compensation. Advanced uses the ISO and shutter carousels’ Auto entries, with no separate mode buttons. Optional estimated metering is disabled by default under Settings → Apps → RAWfish; The manual meter is hidden when disabled.
+   ```sh
+   devel-su pkcon install-local procam-*.aarch64.rpm
+   ```
 
-Settings → Apps → RAWfish also offers **Experimental exposure layout** (off by default). In Advanced photo mode it widens histogram/EV and places Speed and ISO at shutter-centre height, with scrollable values below. The Speed and ISO wheels are straight. Touching either shows plain floating text matching its selected value above the finger (beside it near the top edge), without a background or border. It follows the gesture, stays through inertial scrolling and fades after 250 ms at rest. Auto is labelled explicitly with the actual value underneath. Turning it off restores the standard layout without changing exposure.
+Settings live in the app's menu and under **Settings → Apps → ProCam**.
 
+## Using ProCam
 
-### RAW bracketing
+| Control | What it does |
+|---|---|
+| **Photo / Video** | Tabs above the shutter; swiping the viewfinder switches too |
+| **Normal / Pro** | Simple shooting, or full manual controls with a histogram |
+| **HDR** | Merged burst for every photo (on by default) |
+| **Moon** | Shown in dark scenes; turns night mode on for the next shots |
+| **1x / 2x** | Zoom presets; 2x is a super-resolved crop, not a blurry upscale |
+| **⋯ menu** | Timer, aspect ratio (4:3 / 16:9), RAW files, grid, advanced options |
+| **Tap** | Focus and brightness at that point; drag the sun to adjust |
 
-With RAW selected, **2-stop pair**, **4-stop pair** and **6-stop pair** capture
-the current exposure followed by a shorter exposure at the same ISO
-(shutter time divided by 4, 16 or 64).
-The camera's limits can reduce that separation. JPEG mode has no bracketing;
-cameras must support RAW, manual sensor controls and exposure-result metadata.
-Existing `ev1`/`ev2` preferences select the 2/4-stop pair respectively; `ev3`
-selects the 6-stop pair. Larger gaps can increase noise in recovered highlights.
+## How the photo pipeline works
 
-The background CPU renderer adapts Tadi's RawBracket algorithm: normalize
-using actual shutter/ISO, keep unclipped long-frame pixels, and recover clipped
-highlights using the short frame only when its normalized luminance is higher.
-It includes the reference's WB-neutral highlight ceiling, conservative gain
-refinement and highlight compression. The normal viewfinder and focus controls
-are unchanged. There is no alignment or deghosting; moving edges can leave
-artifacts, especially with the sequential cold-capture fallback.
+1. **Plan.** From the preview's exposure and how much of it is clipped,
+   ProCam picks the number of frames, their exposure time and their gain.
+   Frames are slightly underexposed so that highlights survive.
+2. **Capture.** The frames are captured as RAW16 (or full-size YUV) with focus
+   held still, while the preview keeps running.
+3. **Align.** The sharpest early frame becomes the reference. The others are
+   aligned to it with a coarse-to-fine tile search, sub-pixel refinement and
+   a robust fit of the hand shake.
+4. **Merge.** A frequency-domain Wiener merge on 16x16 tiles averages away
+   noise and rejects moving objects, so they don't leave ghosts.
+5. **Super-resolve.** Every green sample is placed at its true sub-pixel
+   position, which recovers detail beyond the demosaic. The same step renders
+   the 2x zoom.
+6. **Finish.** Highlight reconstruction, lens shading, demosaic, colour,
+   exposure fusion and sharpening produce the final JPEG. Night mode lifts the
+   shadows further.
 
-One merged JPEG is saved with EXIF/orientation and a JSON sidecar describing both
-exposures, actual separation, frame gap, gain refinement and merge time. Existing
-RAW/DNG saving preferences retain individual sensor frames, not a synthetic DNG.
-Missing or mismatched exposure/colour metadata causes a capture error rather than
-an incorrectly normalized merge. MIT attribution is in
-[licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt).
+Rendering runs in the background at low priority, up to three photos queued.
+Methods follow Hasinoff et al. 2016 (HDR+), Wronski et al. 2019
+(super-resolution), Mertens et al. 2007 (exposure fusion) and Romano et al.
+2016 (RAISR). No code or models from other camera apps are used.
 
-Non-build capture-control checks: `node tests/bracket.js`. The native numerical
-and RAW10/RAW16 integration tests are in `tests/rawbracket.pro`; compile/run them
-when building. Device validation should cover range-limited pairs, motion,
-colour/highlight recovery, portrait/landscape orientation, cancellation, and
-preview restoration after both warm bursts and cold captures.
+The core is plain C++ in
+[`src/rawpipelinemath.cpp`](src/rawpipelinemath.cpp), with file handling in
+[`src/rawpipeline.cpp`](src/rawpipeline.cpp), and it runs on a desktop too:
+see [Tests](#tests).
 
-For CPU/shader parity, build the small adapter in `tests/rawbracketpixels.pro`,
-then run `python3 tests/bracket_reference.py /path/to/rawbracket_pixels` with
-`numpy`, `moderngl` and EGL available. It compares 24 synthetic Bayer/WB/gain
-cases against the sibling RawBracket checkout's production shader.
+## Building
 
-The capture-command parser has standalone C regression tests in
-`sfos-camera2-bridge/tests/preview_commands.c` (build instructions in that file).
-Diagnostics log `capture-command received` and `capture-command submitted`;
-RAW bracket timeouts include the number of frames received out of two.
+You need the [Sailfish SDK](https://docs.sailfishos.org/Tools/Sailfish_SDK/)
+with the `SailfishOS-5.1.0.11-aarch64` target, and Android NDK r27 for the
+Camera2 bridge.
+
+```sh
+# 1. The Android Camera2 bridge (libsfoscamera2.so)
+ANDROID_NDK_HOME=~/Android/Sdk/ndk/27.2.12479018 sh sfos-camera2-bridge/scripts/build-android.sh
+
+# 2. The RPM, as a shadow build so the source tree stays clean
+mkdir -p build/sfos && cd build/sfos
+ln -sfn ../../LICENSES LICENSES && ln -sfn ../../licenses licenses
+sfdk -c target=SailfishOS-5.1.0.11-aarch64 build ../..
+```
+
+The package lands in `build/sfos/RPMS/`. The version comes from git: a
+commit tagged `v1.4.0` builds `procam-1.4.0`, and any other commit gets the
+latest tag plus branch, date and hash.
+
+### Tests
+
+The host tests need only Qt 5 (`qtbase5-dev`, `qtdeclarative5-dev-tools`) and
+Node.js:
+
+```sh
+for t in tests/*.js; do node "$t"; done          # settings and capture flow
+mkdir -p build/host-rawpipeline && cd build/host-rawpipeline
+qmake ../../tests/rawpipeline.pro && make -j"$(nproc)"
+QT_QPA_PLATFORM=offscreen ./tst_rawpipeline       # RAW pipeline on synthetic bursts
+```
+
+`tests/rawbracket.pro`, `tests/previewaids.pro` and `tests/previewsize.pro`
+build the same way. The pipeline tests take a few environment variables:
+
+| Variable | Effect |
+|---|---|
+| `RAWPIPELINE_DUMP_DIR=<dir>` | Saves the test images |
+| `RAWPIPELINE_RENDER=<sidecar.json>` | Renders a capture from the phone on the desktop |
+| `RAWPIPELINE_BENCH=<frames>` | Times a full-size burst |
+
+## Continuous integration and releases
+
+| Workflow | When | What |
+|---|---|---|
+| [CI](.github/workflows/ci.yml) | Every push and pull request | Host tests, then a test RPM attached to the run |
+| [Release](.github/workflows/release.yml) | Manually, or on a `v*` tag | Tests, tag, RPM build and a GitHub release with checksums |
+
+To publish a release, open **Actions → Release → Run workflow** and enter a
+version such as `1.4.0`. The workflow tests the selected branch, creates the
+tag `v1.4.0` only if the tests pass, builds the RPM and publishes the release
+with generated notes. Pushing a tag yourself works too:
+
+```sh
+git tag -a v1.4.0 -m "ProCam 1.4.0" && git push origin v1.4.0
+```
+
+Versions with a suffix, such as `1.4.0-beta.1`, are published as
+pre-releases.
+
+## Project layout
+
+| Path | Contents |
+|---|---|
+| `src/` | QML plugin: camera UI, settings, capture logic and the RAW pipeline |
+| `src/capture/`, `src/settings/` | Viewfinder, controls and menus (QML) |
+| `src/calibration/` | Lens shading profiles and the RAISR zoom filters |
+| `sfos-camera2-bridge/` | Android Camera2 bridge (libhybris) and the Sailfish helper tools |
+| `settings/` | Page under Settings → Apps → ProCam |
+| `tests/` | Host tests (C++ and Node.js) |
+| `tools/` | Lens shading calibration, RAISR training, icon generator |
+| `rpm/procam.spec` | Package definition |
+
+## Credits
+
+- [RAWfish](https://github.com/Logic-gate/RAWfish) and its contributors, for
+  the Camera2 bridge, RAW/DNG capture and everything ProCam builds on.
+- [ric9k](https://forum.sailfishos.org/u/ric9k/summary), for smoothing out
+  RAWfish's rough edges, valuable feedback and the lens shading calibration.
+- Tadi, for RAW bracketing
+  ([licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt)).
+- Jolla, for Jolla Camera.
+
+## AI usage
+
+Like RAWfish, ProCam is developed with substantial AI assistance (research,
+debugging, code generation and review). Changes are checked with the host
+tests and on the phone before release. Contributions, AI-assisted or not, are
+welcome under the [AI Usage Policy](AI_USAGE_POLICY.md).
+
+## License
+
+BSD-3-Clause, inherited from Jolla Camera and RAWfish; the original copyright
+notices are kept in every file. RAW bracketing is MIT-licensed
+([licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt)). Full texts are
+in [LICENSES/](LICENSES) and [licenses/](licenses).

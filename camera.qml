@@ -14,7 +14,7 @@ import "pages"
 ApplicationWindow {
     id: window
 
-    // Check once per launch, in RAWfish's application identity (not system Settings).
+    // Check once per launch, in ProCam's application identity (not system Settings).
     Component.onCompleted: Settings.camera2Capabilities.ensureCamera2GeneratedHalConfig(Settings.deviceId)
 
     property var captureModel: null
@@ -23,7 +23,8 @@ ApplicationWindow {
     property int galleryIndex
     property bool camera2CaptureBusy
     readonly property bool _applicationActive: Qt.application.state === Qt.ApplicationActive
-    readonly property real camera2TopStripHeight: Theme.itemSizeMedium
+    // The viewfinder fills the window; controls float on top of it.
+    readonly property real camera2TopStripHeight: 0
 
     on_ApplicationActiveChanged: {
         if (_applicationActive) {
@@ -58,14 +59,13 @@ ApplicationWindow {
         id: videoOutput
 
         z: -1
-        width: camera2Preview.active
-               ? camera2Preview.width
-               : window.width
-        height: camera2Preview.active
-                ? camera2Preview.height
-                : window.width < window.height
-                ? window.height - Math.round(window.height * 0.34)
-                : window.height
+        // Full screen like the photo viewfinder (video has no tap-to-focus,
+        // so no focus mapping depends on the old layout). "Full" crops to
+        // fill, "4:3" fits the whole frame.
+        width: window.width
+        height: window.height
+        fillMode: Settings.global.viewfinderFill ? VideoOutput.PreserveAspectCrop
+                                                 : VideoOutput.PreserveAspectFit
         visible: pageStack.depth < 2 && !galleryActive && !camera2Preview.active
 
         Behavior on y {
@@ -81,12 +81,8 @@ ApplicationWindow {
 
         z: -1
         y: camera2TopStripHeight
-        width: window.width < window.height
-               ? window.width
-               : window.width - Math.round(window.width * 0.40)
-        height: Math.max(1, window.width < window.height
-                         ? window.height - Math.round(window.height * 0.40) - camera2TopStripHeight
-                         : window.height - camera2TopStripHeight)
+        width: window.width
+        height: Math.max(1, window.height - camera2TopStripHeight)
         active: Settings.global.captureMode === "image"
                 && !window.camera2CaptureBusy
                 && window._applicationActive
@@ -96,21 +92,36 @@ ApplicationWindow {
                  && (active || window.camera2CaptureBusy)
         cameraId: Settings.deviceId || (Settings.global.position === Camera.FrontFace ? "1" : "0")
         previewSize: Settings.camera2PreferredPreviewSize(cameraId)
+        // HDR merges RAW16 bursts whatever the capture format; JPEG mode then
+        // streams RAW instead of JPEG.
+        readonly property bool hdrCapture: Settings.global.hdrBurst || Settings.nightMode
+                                           && Settings.camera2BurstSupported(cameraId)
         captureSize: Settings.mode.rawCaptureSize
+        rawCaptureSize: Settings.camera2BurstRawSize()
+        rawCaptureFormat: Settings.camera2BurstFormat(cameraId) === "yuv" ? "yuv" : "raw16"
         captureTimeout: Settings.mode.rawCaptureTimeout
-        jpegCaptureEnabled: Settings.mode.camera2CaptureFormat === "jpeg"
-                            && Settings.mode.rawCaptureSize === Settings.camera2WarmCaptureSize()
+        readonly property bool jpegFromRaw: Settings.camera2JpegFromRaw(cameraId)
+        jpegCaptureEnabled: Settings.mode.camera2CaptureFormat === "jpeg" && !hdrCapture && !jpegFromRaw
+                            && Settings.camera2WarmJpegCaptureSupported(Settings.mode.rawCaptureSize)
                             && Settings.mode.rawCaptureSpeedMode !== "quality"
-        rawCaptureEnabled: Settings.mode.camera2CaptureFormat === "raw"
-                           && Settings.mode.rawCaptureSize === Settings.camera2WarmCaptureSize()
-                           && Settings.mode.rawCaptureSpeedMode !== "quality"
+        rawCaptureEnabled: Settings.mode.rawCaptureSpeedMode !== "quality"
+                           && (hdrCapture || jpegFromRaw
+                               || (Settings.mode.camera2CaptureFormat === "raw"
+                                   && Settings.mode.rawCaptureRawFormat === "raw16"
+                                   && Settings.camera2WarmRawCaptureSupported(Settings.mode.rawCaptureSize)))
         jpegQuality: Settings.mode.rawCaptureJpegQuality
-        readonly property bool frontFacing: Settings.global.frontFacingDeviceId !== ""
-                                            && cameraId === Settings.global.frontFacingDeviceId
+        // Camera2 reports lens facing; Qt Multimedia's ids are the fallback.
+        readonly property string lensFacing: Settings.camera2LensFacing(cameraId)
+        readonly property bool frontFacing: lensFacing !== "unknown"
+                                            ? lensFacing === "front"
+                                            : Settings.global.frontFacingDeviceId !== ""
+                                              && cameraId === Settings.global.frontFacingDeviceId
         orientation: Settings.camera2PreviewOrientation(
                          cameraId, frontFacing ? 270 : 90)
         mirror: Settings.camera2PreviewMirror(cameraId, frontFacing)
-        fill: true
+        selfieCamera: frontFacing
+        fill: Settings.global.viewfinderFill
+        photoAspect: Settings.photoAspect
 
         Behavior on y {
             enabled: !galleryVisible

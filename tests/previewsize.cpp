@@ -27,4 +27,11 @@ int main()
     // Re-evaluating for another camera must not retain the previous choice.
     assert(select({"640x480"}) == QSize(640, 480));
     assert(select({"1280x720"}) == QSize(1280, 720));
+    // The YUV preview transport asks for 1440x1080 (within Camera2's
+    // guaranteed PREVIEW size next to a RAW stream).
+    const QSize larger(1440, 1080);
+    const QStringList jp2 = {"1920x1440", "1600x1200", "1440x1080", "1280x960", "1280x720"};
+    assert(preferredPreviewSize(jp2, jp2, larger) == larger);
+    assert(preferredPreviewSize(existing, existing, larger) == larger);
+    assert(preferredPreviewSize({"1280x960", "640x480"}, {"1280x960", "640x480"}, larger) == QSize(1280, 960));
 }

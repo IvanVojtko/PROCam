@@ -13,6 +13,11 @@
 #include <QElapsedTimer>
 #include <QFutureWatcher>
 #include <QScopedPointer>
+#include <QSharedPointer>
+#include <QTemporaryDir>
+#include <QList>
+#include <QThreadPool>
+#include "rawpipeline.h"
 #include <QStringList>
 #include <QVariantList>
 #include <QJsonObject>
@@ -20,10 +25,17 @@
 
 class QTemporaryDir;
 
+namespace RawPipeline { struct RenderSettings; }
+
 class DeclarativeCameraExtensions : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool rawImageCaptureAvailable READ rawImageCaptureAvailable CONSTANT)
+    // Bursts captured but still being merged (queued renders).
+    Q_PROPERTY(int pendingRenders READ pendingRenders NOTIFY pendingRendersChanged)
+    // Keep every frame of a burst (RAW16 or YUV + JSON sidecar), not just
+    // the first: for diagnostics and training data.
+    Q_PROPERTY(bool keepBurstFrames MEMBER m_keepBurstFrames NOTIFY keepBurstFramesChanged)
 
 public:
     DeclarativeCameraExtensions(QObject *parent = nullptr);
@@ -44,11 +56,35 @@ public:
     Q_INVOKABLE QStringList camera2CaptureFormatModel(const QString &cameraId);
     Q_INVOKABLE QStringList camera2LensModel(const QString &cameraId);
     Q_INVOKABLE QString camera2LensLabel(const QString &cameraId);
+    // "front", "back", "external" or "unknown" (older bridge / HAL).
+    Q_INVOKABLE QString camera2LensFacing(const QString &cameraId);
+    // Camera2 ids by role: {front, main, ultrawide}; "" where there is none.
+    Q_INVOKABLE QVariantMap camera2CameraRoles();
+    // Burst input for HDR: "raw16", "yuv" (cameras without RAW) or "".
+    Q_INVOKABLE QString camera2BurstFormat(const QString &cameraId);
     Q_INVOKABLE QStringList camera2FocusModeModel(const QString &cameraId);
     Q_INVOKABLE QStringList camera2SceneModel(const QString &cameraId);
     Q_INVOKABLE QVariantList camera2NoiseReductionModel(const QString &cameraId);
     Q_INVOKABLE QVariantList camera2IsoModel(const QString &cameraId);
     Q_INVOKABLE QStringList camera2BracketModel(const QString &cameraId);
+    // Burst exposure plan for the metered exposure; keys frames, shutterNs,
+    // iso, targetGain, underexposureEv (empty map when unsupported).
+    // HDR burst needs manual exposure, exposure results and RAW16.
+    Q_INVOKABLE bool camera2BurstSupported(const QString &cameraId);
+    // RAW16 size for the burst stream: `preferred` if it can stream next to
+    // the preview, else the largest such size (empty if none).
+    Q_INVOKABLE QString camera2BurstRawSize(const QString &cameraId, const QString &preferred);
+    // Adds a line to Pictures/ProCam/procam-capture.log (capture diagnostics
+    // from QML: refused or stalled shutter presses).
+    Q_INVOKABLE void logCaptureEvent(const QString &message);
+    // night: night mode (long frames held still, see RawPipeline::planBurst).
+    // scene: Camera2Preview::sceneInfo() (motion, faces) or empty.
+    Q_INVOKABLE QVariantMap camera2BurstPlan(const QString &cameraId,
+                                             const QString &meteredShutterNs,
+                                             int meteredIso,
+                                             const QVariantList &histogram,
+                                             bool night = false,
+                                             const QVariantMap &scene = QVariantMap());
     Q_INVOKABLE QString camera2MaxShutterNs(const QString &cameraId);
     Q_INVOKABLE QVariantMap camera2ExposureCapabilities(const QString &cameraId);
     Q_INVOKABLE void setCaptureCompensation(int steps) { m_captureCompensation = steps; }
@@ -65,6 +101,13 @@ public:
     Q_INVOKABLE QString camera2PreferredCaptureSize(const QString &cameraId,
                                                     const QString &format);
     Q_INVOKABLE QString camera2WarmCaptureSize(const QString &cameraId);
+    // Whether RAW16 at `size` may stream next to the preview (warm RAW and
+    // bursts). Independent of the JPEG warm size.
+    Q_INVOKABLE bool camera2WarmRawCaptureSupported(const QString &cameraId,
+                                                    const QString &size);
+    // Whether JPEG at `size` can be captured inside the running preview.
+    Q_INVOKABLE bool camera2WarmJpegCaptureSupported(const QString &cameraId,
+                                                     const QString &size);
     Q_INVOKABLE QString preferredCamera2CameraId(const QString &cameraId);
     Q_INVOKABLE QString camera2CompatibilityLevel(const QString &cameraId);
     Q_INVOKABLE QString camera2CompatibilitySummary(const QString &cameraId);
@@ -73,7 +116,8 @@ public:
     Q_INVOKABLE void setCaptureMetadata(const QVariantMap &metadata);
     Q_INVOKABLE void setNextCaptureBracketMetadata(int index, int count,
                                                    qreal ev,
-                                                   const QString &baseShutterNs);
+                                                   const QString &baseShutterNs,
+                                                   bool burst = false);
     Q_INVOKABLE bool captureRawImage(const QString &targetPath, const QString &cameraId,
                                      const QString &rawSize, int timeoutSeconds,
                                      const QString &focusMode, const QString &focusDistance,
@@ -116,21 +160,53 @@ public:
     Q_INVOKABLE bool combineRawBracket(const QString &targetPath,
                                           const QVariantList &sourcePaths,
                                           int jpegQuality);
+    // Aligns and merges an equal-exposure burst (RawPipeline) into one JPEG.
+    Q_INVOKABLE bool combineRawBurst(const QString &targetPath,
+                                     const QVariantList &sourcePaths,
+                                     int jpegQuality, qreal targetGain);
 signals:
     void rawBracketFrameReady(const QString &path);
+    // The sensor capture of a cold single RAW finished; rendering follows.
+    void rawImageExposed();
     void rawImageCaptured(const QString &path, const QString &mimeType);
     void rawImageCaptureFailed(const QString &error);
+    // Queued burst merges finish after their capture has completed.
+    void burstRendered(const QString &path);
+    void burstRenderFailed(const QString &error);
+    void pendingRendersChanged();
+    void keepBurstFramesChanged();
+
+public:
+    int pendingRenders() const;
 
 private:
+    // A captured burst waiting for (or in) its merge; owns the staged frames.
+    struct BurstJob {
+        QString target;
+        QStringList sources;
+        int quality = 92;
+        RawPipeline::RenderSettings settings;
+        QSharedPointer<QTemporaryDir> directory;
+    };
+    QList<BurstJob> m_burstJobs; // the first one is rendering while m_burstWatcher is set
+    QScopedPointer<QFutureWatcher<QString> > m_burstWatcher;
+    // One background thread for merges, at a lower priority than the UI.
+    QThreadPool m_burstPool;
+    void startNextBurstRender();
+    void finishBurstRender();
+
     int m_captureCompensation = 0;
     void finishRawImageCapture(int exitCode, QProcess::ExitStatus exitStatus);
     void finishRawImageRender();
+    void finishJpegRewrite();
     void finishBracketCombine();
     bool startRawImageProcess(const QString &program, const QStringList &arguments,
                               const QString &errorContext,
                               const QString &standardOutputPath = QString());
     bool renderRawImage();
     bool renderRawImageWithFastJpegConverter();
+    bool renderRawImageEnhanced(const RawPipeline::RenderSettings &settings);
+    bool startRawImageRender();
     bool saveJsonSidecar(const QString &targetPath, const QByteArray &json);
     bool copyJsonSidecar(const QString &sourcePath, const QString &targetPath);
     bool writeDngSidecar(const QString &metadataPath, const QString &targetPath);
@@ -168,6 +244,8 @@ private:
     int m_rawCaptureColorTint = 0;
     int m_bracketIndex = -1;
     int m_bracketCount = 0;
+    bool m_bracketBurst = false;
+    bool m_keepBurstFrames = false;
     qreal m_bracketEv = 0.0;
     QString m_bracketBaseShutterNs;
     QString m_bracketCombineTargetPath;

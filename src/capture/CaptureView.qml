@@ -27,6 +27,7 @@ FocusScope {
         preview: captureView.camera2Viewfinder
         active: captureView.effectiveActive && captureView._camera2ViewfinderActive
         busy: captureView.captureBusy
+        tapEv: captureView.tapExposureEv
     }
 
     property bool active
@@ -67,13 +68,21 @@ FocusScope {
 
     // not bound to focusTimer.running, restarting timer shouldn't exit tap focus mode temporarily and lose focus state
     property bool tapFocusActive
+    // Brightness from the slider beside the focus ring (EV); kept until the
+    // next tap or camera change, like the focus lock it belongs to.
+    property real tapExposureEv: 0
+    // Video has no tap-to-focus; a tap only brings up the brightness slider.
+    property bool videoBrightnessActive
+    // Tap position, normalised to focusArea (draws the focus ring).
     property var _camera2FocusPoint: Qt.point(0.5, 0.5)
+    // The same point in normalised sensor coordinates (sent to the HAL).
+    property var _camera2SensorFocusPoint: Qt.point(0.5, 0.5)
     property bool _captureOnFocus
     property real _captureCountdown
 
     property bool reallyWideScreen: (Screen.height / Screen.width) >= 2.0
     // wide screen can move 4:3 viewfinder a little lower and avoid overlap with top&bottom buttons
-    readonly property real viewfinderOffset: Math.min(0,
+    readonly property real viewfinderOffset: _camera2ViewfinderActive ? 0 : Math.min(0,
                                                       isPortrait ? (focusArea.width - height) / 2
                                                                  : (focusArea.width - width) / 2)
                                              + ((reallyWideScreen && (focusArea.width / focusArea.height <= 1.4))
@@ -91,6 +100,8 @@ FocusScope {
                        ? extensions.rawImageCaptureAvailable
                          && !captureView._camera2CapturePending
                          && !captureView._camera2CaptureRunning
+                         // Bursts merge in the background; a few may queue.
+                         && extensions.pendingRenders < 3
                        : camera.imageCapture.ready
             case Camera.CaptureVideo:
                 return camera.videoRecorder.recorderStatus >= CameraRecorder.LoadedStatus 
@@ -123,6 +134,16 @@ FocusScope {
     property var _camera2WarmRawBracketRawPaths: []
     property var _camera2WarmRawBracketMetadataPaths: []
     property int _camera2WarmRawBracketRenderIndex: 0
+    // Exposure plan of the running equal-exposure burst (null for pairs).
+    property var _camera2BurstPlan: null
+    // Shutter feedback is given when the sensor frames are captured, not when
+    // the (slow) RAW render finishes, so the phone can be lowered right away.
+    property bool _camera2FeedbackGiven
+    // A captured photo is still being rendered.
+    // Instant gallery thumbnail of the newest shot while it is processed.
+    property url pendingThumbnail
+    readonly property bool processing: _camera2FeedbackGiven || _camera2BracketMerging
+                                       || extensions.pendingRenders > 0
     onCaptureBusyChanged: {
         if (!captureBusy && _captureQueued) {
             _captureQueued = false
@@ -151,13 +172,9 @@ FocusScope {
                                                  ? camera.viewfinder.resolution.width
                                                    / camera.viewfinder.resolution.height
                                                  : 4 / 3
-    readonly property real _camera2PreviewWidth: Math.max(1, isPortrait
-                                                          ? width
-                                                          : width - Math.round(width * 0.40))
-    readonly property real _camera2PreviewHeight: Math.max(1, isPortrait
-                                                           ? height - Math.round(height * 0.40)
-                                                             - camera2TopInset
-                                                           : height - camera2TopInset)
+    // The Camera2 viewfinder covers the whole view; controls float over it.
+    readonly property real _camera2PreviewWidth: Math.max(1, width)
+    readonly property real _camera2PreviewHeight: Math.max(1, height - camera2TopInset)
 
     readonly property bool _applicationActive: Qt.application.state == Qt.ApplicationActive
     readonly property bool _camera2ViewfinderActive: Settings.global.captureMode === "image"
@@ -165,20 +182,40 @@ FocusScope {
                                                      && Settings.mode.camera2Viewfinder
                                                      && extensions.rawImageCaptureAvailable
     readonly property bool camera2CaptureAvailable: extensions.rawImageCaptureAvailable
-    readonly property bool _camera2NativeCaptureSize: Settings.mode.rawCaptureSize === "4096x3072"
+    // HDR is a global switch: every photo is a merged RAW16 burst, in both
+    // formats. Night mode is a burst too, of long frames.
+    readonly property bool _camera2HdrCapture: _camera2ViewfinderActive
+                                               && (Settings.global.hdrBurst || Settings.nightMode)
+                                               && Settings.camera2BurstSupported(Settings.deviceId)
+    readonly property bool _camera2NightCapture: _camera2HdrCapture && Settings.nightMode
+    // Too dark for the preview's auto exposure: the top bar offers night mode.
+    // Bright again: night mode switches itself off (its long frames would
+    // only clip), and the moon goes with it.
+    property bool sceneDark: false
+    onSceneDarkChanged: if (!sceneDark) Settings.nightMode = false
+    // A night burst is being exposed: the photo needs the phone held still.
+    readonly property bool nightCaptureRunning: captureBusy && !!_camera2BurstPlan
+                                                && _camera2BurstPlan.night === true
+    // JPEG mode shoots RAW16 and renders it (Settings.camera2JpegFromRaw).
+    readonly property bool _camera2JpegFromRaw: _camera2ViewfinderActive
+                                                && Settings.camera2JpegFromRaw(Settings.deviceId)
     readonly property bool _liveJpegCapture: _camera2ViewfinderActive
                                             && Settings.mode.camera2CaptureFormat === "jpeg"
-                                            && _camera2NativeCaptureSize
+                                            && !_camera2HdrCapture
+                                            && !_camera2JpegFromRaw
+                                            && Settings.camera2WarmJpegCaptureSupported(Settings.mode.rawCaptureSize)
                                             && camera2Viewfinder
     readonly property bool _warmJpegReady: _liveJpegCapture
                                            && camera2Viewfinder
                                            && camera2Viewfinder.jpegCaptureReady === true
     readonly property bool _liveRawCapture: _camera2ViewfinderActive
-                                           && Settings.mode.camera2CaptureFormat === "raw"
-                                           && _camera2NativeCaptureSize
+                                           && (_camera2HdrCapture || _camera2JpegFromRaw
+                                               || (Settings.mode.camera2CaptureFormat === "raw"
+                                                   && Settings.camera2WarmRawCaptureSupported(Settings.mode.rawCaptureSize)))
                                            && camera2Viewfinder
     readonly property bool _warmRawReady: _liveRawCapture
-                                          && Settings.mode.rawCaptureRawFormat === "raw16"
+                                          && (_camera2HdrCapture || _camera2JpegFromRaw
+                                              || Settings.mode.rawCaptureRawFormat === "raw16")
                                           && camera2Viewfinder
                                           && camera2Viewfinder.rawCaptureReady === true
     readonly property bool _manualCamera2Focus: _camera2ViewfinderActive
@@ -193,6 +230,8 @@ FocusScope {
     signal recordingStopped(url url, string mimeType)
     signal loaded
     signal captured
+    // The floating gallery thumbnail was tapped.
+    signal galleryRequested
 
     Item {
         id: captureSnapshot
@@ -233,6 +272,21 @@ FocusScope {
     }
 
     function setFocusPoint(point) {
+        if (_camera2ViewfinderActive && camera2Viewfinder
+                && typeof camera2Viewfinder.mapToSensor === "function") {
+            // focusArea and the viewfinder may be rotated relative to each other.
+            var local = focusArea.mapToItem(camera2Viewfinder, point.x * focusArea.width,
+                                            point.y * focusArea.height)
+            var sensor = camera2Viewfinder.mapToSensor(local.x, local.y)
+            if (sensor.x < 0 || sensor.y < 0) return // outside the drawn frame
+            focusTimer.restart()
+            tapFocusActive = true
+            tapExposureEv = 0
+            _camera2FocusPoint = point
+            _camera2SensorFocusPoint = sensor
+            camera2Viewfinder.setFocusPoint(sensor.x, sensor.y)
+            return
+        }
         focusTimer.restart()
         tapFocusActive = true
         _camera2FocusPoint = point
@@ -246,10 +300,26 @@ FocusScope {
         camera.searchAndLock()
     }
 
+    // Adjusting brightness keeps the tap focus (and this brightness) until
+    // the next tap instead of expiring after a few seconds.
+    function showVideoBrightness() {
+        videoBrightnessActive = true
+        tapExposureEv = 0
+        focusTimer.restart()
+    }
+
+    function setTapExposure(ev) {
+        tapExposureEv = Math.max(-2, Math.min(2, ev))
+        focusTimer.stop()
+    }
+
     function _resetFocus() {
         focusTimer.running = false
         tapFocusActive = false
+        videoBrightnessActive = false
+        tapExposureEv = 0
         _camera2FocusPoint = Qt.point(0.5, 0.5)
+        _camera2SensorFocusPoint = Qt.point(0.5, 0.5)
         _releaseCamera2BracketFocusHold()
         if (_camera2ViewfinderActive && camera2Viewfinder
                 && typeof camera2Viewfinder.clearFocusPoint === "function") {
@@ -324,6 +394,63 @@ FocusScope {
         return "_ev" + ev
     }
 
+    function _camera2CaptureFeedback() {
+        if (_camera2FeedbackGiven) return
+        _camera2FeedbackGiven = true
+        shutterEvent.play()
+        flashAnimation.start()
+        if (camera2Viewfinder && typeof camera2Viewfinder.saveThumbnail === "function") {
+            var thumbnail = camera2Viewfinder.saveThumbnail(_camera2CaptureRotation())
+            if (thumbnail) pendingThumbnail = thumbnail
+        }
+    }
+
+    function _clearPendingThumbnailIfIdle() {
+        if (extensions.pendingRenders === 0 && !_camera2FeedbackGiven) pendingThumbnail = ""
+    }
+
+    // RAW/DNG files are kept as chosen in the settings, in Normal and Pro
+    // mode; Pro's JPEG format keeps only the JPEG.
+    function _camera2RawSaveFormat() {
+        // YUV burst frames (cameras without RAW) are never kept.
+        return (Settings.global.advancedMode && Settings.mode.camera2CaptureFormat === "jpeg")
+                || Settings.camera2BurstFormat(Settings.deviceId) === "yuv"
+                ? "none" : Settings.global.rawCaptureSaveFormat
+    }
+
+    function _camera2FrameSuffix(index) {
+        return _camera2BurstPlan ? "_burst" + index
+                                 : _camera2BracketSuffix(_camera2BracketQueue[index])
+    }
+
+    // Burst merge needs the warm RAW16 preview path; otherwise a normal capture runs.
+    function _camera2BurstRequested() {
+        return _camera2HdrCapture
+                && _warmRawReady && !!camera2Viewfinder
+                && typeof camera2Viewfinder.captureRawBurst === "function"
+    }
+
+    function _camera2PlanBurst() {
+        var plan = extensions.camera2BurstPlan(_camera2ResolvedCameraId,
+                                               String(_camera2CurrentShutterNs()),
+                                               _camera2CurrentIso(),
+                                               camera2Viewfinder ? camera2Viewfinder.histogram : [],
+                                               _camera2NightCapture, _camera2SceneInfo())
+        return plan && plan.frames >= 2 ? plan : null
+    }
+
+    // Motion and faces the viewfinder measured, for the burst plan.
+    function _camera2SceneInfo() {
+        return camera2Viewfinder && typeof camera2Viewfinder.sceneInfo === "function"
+                ? camera2Viewfinder.sceneInfo() : ({})
+    }
+
+    function _camera2BurstQueue(frames) {
+        var queue = []
+        for (var i = 0; i < frames; ++i) queue.push(0)
+        return queue
+    }
+
     function _camera2CurrentShutterNs() {
         var shutter = Number(Settings.mode.rawCaptureShutterNs)
         if (shutter > 0) {
@@ -367,6 +494,7 @@ FocusScope {
                 _camera2WarmRawBracketTargetPaths.length) {
             var combinedPath = captureView._camera2BracketBasePath
             var sourcePaths = captureView._camera2BracketCapturedPaths
+            var burstPlan = captureView._camera2BurstPlan
             captureView._releaseCamera2BracketFocusHold()
             captureView._camera2BracketQueue = []
             captureView._camera2BracketCapturedPaths = []
@@ -374,11 +502,23 @@ FocusScope {
             captureView._camera2BracketBasePath = ""
             captureView._camera2BracketBaseShutterNs = "0"
             captureView._camera2BracketBaseIso = 0
+            captureView._camera2BurstPlan = null
             captureView._clearWarmRawBracketRenderQueue()
+            if (burstPlan) {
+                // The merge is queued; the capture is done and the next photo
+                // can be taken while it renders.
+                if (extensions.combineRawBurst(combinedPath, sourcePaths,
+                                               Settings.mode.rawCaptureJpegQuality,
+                                               burstPlan.targetGain)) {
+                    camera._completeQueuedCamera2Capture()
+                } else {
+                    camera._failCamera2ImageCapture("Could not queue the burst merge")
+                }
+                return
+            }
             captureView._camera2BracketMerging = true
-            if (!extensions.combineRawBracket(
-                        combinedPath, sourcePaths,
-                        Settings.mode.rawCaptureJpegQuality)) {
+            if (!extensions.combineRawBracket(combinedPath, sourcePaths,
+                                              Settings.mode.rawCaptureJpegQuality)) {
                 camera._failCamera2ImageCapture("Could not start bracket combine")
             }
             return
@@ -388,27 +528,38 @@ FocusScope {
         var ev = captureView._camera2BracketQueue[index]
         extensions.setNextCaptureBracketMetadata(
                     index, captureView._camera2BracketQueue.length, ev,
-                    captureView._camera2BracketBaseShutterNs)
+                    captureView._camera2BracketBaseShutterNs,
+                    captureView._camera2BurstPlan !== null)
         extensions.processRawImage(_camera2WarmRawBracketTargetPaths[index],
                                    _camera2WarmRawBracketRawPaths[index],
                                    _camera2WarmRawBracketMetadataPaths[index],
                                    Settings.mode.rawCaptureExposure,
                                    Settings.mode.rawCaptureJpegQuality,
                                    captureView._camera2CaptureRotation(),
-                                   Settings.global.rawCaptureSaveFormat,
+                                   captureView._camera2RawSaveFormat(),
                                    Settings.mode.rawRenderEngine,
                                    Settings.mode.rawCaptureColorTemperature,
                                    Settings.mode.rawCaptureColorTint,
                                    Settings.mode.rawCaptureProgressiveJpeg)
     }
 
+    // Clockwise rotation that makes a capture upright (Android's
+    // JPEG_ORIENTATION rule): the sensor's mounting plus the clockwise device
+    // rotation, subtracted instead for front cameras, which face the other way.
     function _camera2DeviceRotation() {
+        var device = 0
         switch (captureView.orientation) {
-        case Orientation.Landscape: return 0
-        case Orientation.PortraitInverted: return 270
-        case Orientation.LandscapeInverted: return 180
-        default: return 90
+        case Orientation.Landscape: device = 270; break
+        case Orientation.PortraitInverted: device = 180; break
+        case Orientation.LandscapeInverted: device = 90; break
         }
+        var cameraId = _camera2ResolvedCameraId
+        var facing = Settings.camera2LensFacing(cameraId)
+        var front = facing !== "unknown" ? facing === "front"
+                                         : Settings.global.frontFacingDeviceId !== ""
+                                           && cameraId === Settings.global.frontFacingDeviceId
+        var sensor = Settings.camera2PreviewOrientation(cameraId, front ? 270 : 90)
+        return ((front ? sensor - device : sensor + device) % 360 + 360) % 360
     }
 
     function _captureMetadata() {
@@ -417,6 +568,33 @@ FocusScope {
         metadata.exposure_compensation_ev = exposureLogic.effectiveEv
         metadata.model = deviceInfo.prettyName
         metadata.make = deviceInfo.manufacturer
+        // Read by the renderer: night lift and the photo's shape.
+        metadata.night_mode = _camera2NightCapture
+        metadata.photo_aspect = Settings.photoAspect
+        // Faces (normalised sensor rectangles) for the renderer's tone
+        // mapping, and what the viewfinder measured, for diagnostics.
+        metadata.faces = camera2Viewfinder && camera2Viewfinder.faces ? camera2Viewfinder.faces : []
+        metadata.viewfinder_scene = _camera2SceneInfo()
+        // Why a capture took the fast in-preview path or the slow cold one.
+        metadata.capture_path = {
+            "warm_raw_ready": _warmRawReady,
+            "warm_jpeg_ready": _warmJpegReady,
+            "capture_size": Settings.mode.rawCaptureSize,
+            "warm_capture_size": Settings.camera2WarmCaptureSize(),
+            "warm_raw_supported": Settings.camera2WarmRawCaptureSupported(Settings.mode.rawCaptureSize),
+            "speed_mode": Settings.mode.rawCaptureSpeedMode,
+            "raw_format": Settings.mode.rawCaptureRawFormat,
+            "preview_raw_ready": !!camera2Viewfinder && camera2Viewfinder.rawCaptureReady === true,
+            "bracket": Settings.mode.rawCaptureBracket,
+            "hdr": _camera2HdrCapture,
+            "jpeg_from_raw": _camera2JpegFromRaw,
+            "camera_id": _camera2ResolvedCameraId,
+            "burst_format": Settings.camera2BurstFormat(Settings.deviceId),
+            "burst_size": Settings.camera2BurstRawSize(),
+            "raw_capture_enabled": !!camera2Viewfinder && camera2Viewfinder.rawCaptureEnabled === true,
+            "raw_stream": camera2Viewfinder && camera2Viewfinder.rawStreamStatus !== undefined
+                          ? camera2Viewfinder.rawStreamStatus : ""
+        }
         if (!_camera2ViewfinderActive && !extensions.rawImageCaptureAvailable) {
             metadata.capture_source = "qt_multimedia"
             metadata.camera_id = Settings.deviceId
@@ -459,6 +637,15 @@ FocusScope {
 
     function _captureState() {
         return "canCapture=" + _canCapture
+                + " camera=" + _camera2ResolvedCameraId
+                + " renders=" + extensions.pendingRenders
+                + " hdr=" + _camera2HdrCapture
+                + " warmRaw=" + _warmRawReady
+                + " iso=" + _camera2CurrentIso()
+                + " shutter=" + _camera2CurrentShutterNs()
+                + " exposureReady=" + exposureLogic.captureReady
+                + " ae=" + exposureLogic.resultAeState + "/" + exposureLogic.resultAeMode
+                + " evSteps=" + exposureLogic.resultEvSteps + "/" + exposureLogic.hardwareEv.steps
                 + " busy=" + captureBusy
                 + " blocked=" + captureUiBlocked
                 + " pending=" + _camera2CapturePending
@@ -510,7 +697,13 @@ FocusScope {
                 camera.record()
             }
         } else {
+            // Never a silent shutter: say why, and log it for diagnosis.
             console.warn("Capture not ready:", _captureState())
+            extensions.logCaptureEvent("capture refused " + _captureState())
+            camera2CaptureErrorNotification.publishMessage(
+                        extensions.pendingRenders >= 3 ? "Still processing earlier photos"
+                        : (_camera2CaptureRunning || _camera2CapturePending) ? "Previous photo still being captured"
+                        : "Camera not ready")
         }
     }
 
@@ -636,6 +829,8 @@ FocusScope {
             Settings.global.previousBackFacingDeviceId = camera.deviceId
         }
         camera2ResolveCameraIdTimer.restart()
+        Settings.nightMode = false
+        sceneDark = false
     }
 
     onEffectiveActiveChanged: {
@@ -644,6 +839,33 @@ FocusScope {
         if (!effectiveActive) {
             _resetFocus()
             captureTimer.reset()
+        }
+    }
+
+    // Dark-scene detection from the preview's auto exposure: exposure time x
+    // ISO above about 1/15 s at ISO 5300 (where the preview runs out of
+    // exposure) for a second, back below about 1/15 s at ISO 3000 to clear,
+    // so the moon does not flicker at the threshold.
+    Timer {
+        id: darkSceneTimer
+
+        property int votes: 0
+
+        interval: 500
+        repeat: true
+        running: captureView._camera2ViewfinderActive && !captureView.captureBusy
+                 && Settings.camera2BurstSupported(Settings.deviceId)
+        onRunningChanged: votes = 0
+        onTriggered: {
+            if (!camera2Viewfinder) return
+            var exposure = Number(camera2Viewfinder.liveExposureTime) * camera2Viewfinder.liveSensorSensitivity
+            if (!(exposure > 0)) return
+            var dark = captureView.sceneDark ? exposure >= 2e11 : exposure >= 3.5e11
+            votes = dark === captureView.sceneDark ? 0 : votes + 1
+            if (votes >= 2) {
+                captureView.sceneDark = dark
+                votes = 0
+            }
         }
     }
 
@@ -800,7 +1022,8 @@ FocusScope {
 
         function captureImage() {
             if (captureView._camera2ViewfinderActive &&
-                    captureView._camera2BracketSteps().length > 0) {
+                    (captureView._camera2BracketSteps().length > 0
+                     || captureView._camera2BurstRequested())) {
                 _completeCapture()
                 return
             }
@@ -826,8 +1049,8 @@ FocusScope {
             var imageUrl = captureView._localFileUrl(path)
             var bracketActive = captureView._camera2BracketQueue.length > 0
             if (!bracketActive) {
-                shutterEvent.play()
-                flashAnimation.start()
+                captureView._camera2CaptureFeedback()
+                captureView._camera2FeedbackGiven = false
             }
             captureView._camera2CaptureRunning = false
             captureView._camera2LiveJpegCaptureRunning = false
@@ -851,7 +1074,7 @@ FocusScope {
                 captureView._camera2CaptureTargetPath =
                         captureView._capturePathWithSuffix(
                             captureView._camera2BracketBasePath,
-                            captureView._camera2BracketSuffix(ev))
+                            captureView._camera2FrameSuffix(captureView._camera2BracketIndex))
                 captureView._camera2CapturePending = true
                 camera._startCamera2ImageCapture()
                 return
@@ -867,6 +1090,7 @@ FocusScope {
                 captureView._camera2BracketBasePath = ""
                 captureView._camera2BracketBaseShutterNs = "0"
                 captureView._camera2BracketBaseIso = 0
+                captureView._camera2BurstPlan = null
                 captureView._camera2BracketMerging = true
                 if (!extensions.combineRawBracket(
                             combinedPath, sourcePaths,
@@ -887,17 +1111,39 @@ FocusScope {
             captureView._camera2BracketBasePath = ""
             captureView._camera2BracketBaseShutterNs = "0"
             captureView._camera2BracketBaseIso = 0
+            captureView._camera2BurstPlan = null
             captureBusy = false
             if (captureView._camera2ViewfinderActive) {
                 window.camera2CaptureBusy = false
             }
             captureView.captured()
+            captureView._clearPendingThumbnailIfIdle()
+        }
+
+        // A burst whose frames are captured and queued for merging: release
+        // the camera for the next photo; extensions.burstRendered adds it.
+        function _completeQueuedCamera2Capture() {
+            captureView._camera2BracketMerging = false
+            captureView._camera2FeedbackGiven = false
+            captureView._camera2CaptureRunning = false
+            captureView._camera2LiveJpegCaptureRunning = false
+            captureView._camera2CapturePending = false
+            captureView._unload = false
+            captureView._captureQueued = false
+            captureView._hideCaptureSnapshot()
+            camera2CaptureWatchdog.stop()
+            captureBusy = false
+            if (captureView._camera2ViewfinderActive) {
+                window.camera2CaptureBusy = false
+            }
         }
 
         function _failCamera2ImageCapture(error) {
             captureView._camera2BracketMerging = false
+            captureView._camera2FeedbackGiven = false
             extensions.discardRawBracket()
             console.warn("Camera2 image capture failed:", error)
+            extensions.logCaptureEvent("capture failed camera=" + captureView._camera2ResolvedCameraId + " " + error)
             camera2CaptureErrorNotification.publishMessage(error)
             captureView._releaseCamera2BracketFocusHold()
             captureView._camera2CapturePending = false
@@ -910,6 +1156,7 @@ FocusScope {
             captureView._camera2BracketBasePath = ""
             captureView._camera2BracketBaseShutterNs = "0"
             captureView._camera2BracketBaseIso = 0
+            captureView._camera2BurstPlan = null
             captureView._clearWarmRawBracketRenderQueue()
             captureView._unload = false
             captureBusy = false
@@ -918,6 +1165,7 @@ FocusScope {
             }
             captureView._hideCaptureSnapshot()
             camera2CaptureWatchdog.stop()
+            captureView._clearPendingThumbnailIfIdle()
         }
 
         function _startColdCamera2JpegCapture() {
@@ -996,7 +1244,10 @@ FocusScope {
             var captureSize = Settings.mode.rawCaptureSize
             var camera2Rotation = captureView._camera2CaptureRotation()
             var camera2JpegRotation = captureView._camera2AdvancedJpegRotation()
-            if (Settings.mode.camera2CaptureFormat === "jpeg") {
+            // An HDR burst always goes through RAW, and so does a JPEG shot
+            // while the preview streams RAW16; otherwise the HAL's JPEG.
+            if (Settings.mode.camera2CaptureFormat === "jpeg" && !captureView._camera2BurstPlan
+                    && !(captureView._camera2JpegFromRaw && captureView._warmRawReady)) {
                 if (captureView._warmJpegReady) {
                     try {
                         console.log("capture-rotation qml format=jpeg path=warm advanced="
@@ -1055,7 +1306,7 @@ FocusScope {
                             var ev = captureView._camera2BracketQueue[bracketIndex]
                             var targetPath = captureView._capturePathWithSuffix(
                                         captureView._camera2BracketBasePath,
-                                        captureView._camera2BracketSuffix(ev))
+                                        captureView._camera2FrameSuffix(bracketIndex))
                             var dot = targetPath.lastIndexOf(".")
                             var sidecarBase = dot >= 0
                                     ? targetPath.substring(0, dot) : targetPath
@@ -1065,8 +1316,12 @@ FocusScope {
                             exposures.push(captureView._camera2BracketShutterNs(ev))
                         }
                         captureView._camera2WarmRawBracketTargetPaths = targetPaths
-                        captureStarted = camera2Viewfinder.captureRawBracket(
-                                    rawPaths, metadataPaths, bracketIso, exposures)
+                        var burst = captureView._camera2BurstPlan
+                        captureStarted = burst
+                                ? camera2Viewfinder.captureRawBurst(
+                                      rawPaths, metadataPaths, burst.iso, burst.shutterNs)
+                                : camera2Viewfinder.captureRawBracket(
+                                      rawPaths, metadataPaths, bracketIso, exposures)
                         if (!captureStarted) {
                             captureView._clearWarmRawBracketRenderQueue()
                             _failCamera2ImageCapture("Could not start RAW bracket burst")
@@ -1129,7 +1384,7 @@ FocusScope {
                                             Settings.mode.rawCaptureExposure,
                                             Settings.mode.rawCaptureJpegQuality,
                                             camera2Rotation,
-                                            Settings.global.rawCaptureSaveFormat,
+                                            captureView._camera2RawSaveFormat(),
                                             Settings.mode.rawRenderEngine,
                                             Settings.mode.rawCaptureRawFormat,
                                             bracketActive ? "manual" : exposureLogic.scene,
@@ -1141,8 +1396,8 @@ FocusScope {
                                             Settings.mode.rawCaptureAperture,
                                             Settings.camera2HalNoiseReduction(Settings.mode.rawCaptureNoiseReduction),
                                             captureView.camera2Zoom,
-                                            tapFocusActive ? _camera2FocusPoint.x : -1,
-                                            tapFocusActive ? _camera2FocusPoint.y : -1)
+                                            tapFocusActive ? _camera2SensorFocusPoint.x : -1,
+                                            tapFocusActive ? _camera2SensorFocusPoint.y : -1)
             }
             if (!captureStarted) {
                 captureView._releaseCamera2BracketFocusHold()
@@ -1155,6 +1410,7 @@ FocusScope {
                 captureView._camera2BracketBasePath = ""
                 captureView._camera2BracketBaseShutterNs = "0"
                 captureView._camera2BracketBaseIso = 0
+                captureView._camera2BurstPlan = null
                 captureView._unload = false
                 captureBusy = false
                 if (captureView._camera2ViewfinderActive) {
@@ -1172,12 +1428,28 @@ FocusScope {
 
             if (captureView._camera2ViewfinderActive && !exposureLogic.captureReady) {
                 exposureLogic.status = "Waiting for requested exposure before capture"
+                extensions.logCaptureEvent("capture waiting for exposure " + captureView._captureState())
+                camera2CaptureErrorNotification.publishMessage("Waiting for exposure, try again")
                 return
             }
-            if (captureView._camera2BracketSteps().length > 0 &&
+            var burstRequested = captureView._camera2BurstRequested()
+            if ((captureView._camera2BracketSteps().length > 0 || burstRequested) &&
                     !(captureView._camera2CurrentIso() > 0 && captureView._camera2CurrentShutterNs() > 0)) {
                 exposureLogic.status = "Waiting for exposure results before bracketing"
+                extensions.logCaptureEvent("capture without exposure results " + captureView._captureState())
+                camera2CaptureErrorNotification.publishMessage("No exposure reading from the camera yet, try again")
                 return
+            }
+            var burstPlan = burstRequested ? captureView._camera2PlanBurst() : null
+            if (captureView._camera2HdrCapture && !burstPlan) {
+                // Say so instead of silently taking a single frame.
+                camera2CaptureErrorNotification.publishMessage(!captureView._warmRawReady
+                        ? (Settings.camera2BurstFormat(Settings.deviceId) === "yuv"
+                           ? "HDR needs the full-resolution YUV stream ("
+                             + (camera2Viewfinder ? camera2Viewfinder.rawStreamStatus : "no preview")
+                             + "); taking a normal photo"
+                           : "HDR needs the fast RAW16 preview (speed not Quality); taking a normal photo")
+                        : "No HDR plan for this exposure; taking a normal photo")
             }
             var pair = captureView._camera2BracketSteps()
             if (pair.length > 0) {
@@ -1203,7 +1475,8 @@ FocusScope {
                 console.log("capture-timing qml warm-state "
                             + captureView._warmJpegState())
             }
-            var bracketSteps = captureView._camera2BracketSteps()
+            var bracketSteps = burstPlan ? captureView._camera2BurstQueue(burstPlan.frames)
+                                         : captureView._camera2BracketSteps()
             var liveJpegCapture = bracketSteps.length > 0 ? false
                                                           : captureView._liveJpegCapture
             var liveWarmCapture = liveJpegCapture
@@ -1211,6 +1484,22 @@ FocusScope {
             captureOverlay.writeMetaData()
 
             if (extensions.rawImageCaptureAvailable) {
+                captureView._camera2BurstPlan = burstPlan
+                if (burstPlan) {
+                    var scene = captureView._camera2SceneInfo()
+                    extensions.logCaptureEvent("capture start camera=" + captureView._camera2ResolvedCameraId
+                                               + " frames=" + burstPlan.frames + " iso=" + burstPlan.iso
+                                               + " shutter=" + burstPlan.shutterNs
+                                               + " night=" + (burstPlan.night === true)
+                                               + " motion=" + scene.motion + " subject=" + scene.subjectMotion
+                                               + " faces=" + scene.faceCount + " faceLuma=" + scene.faceLuma)
+                    console.log("burst plan frames=" + burstPlan.frames + " iso=" + burstPlan.iso
+                                + " motion=" + (scene.motion !== undefined ? scene.motion.toFixed(4) : "?")
+                                + " faces=" + (scene.faceCount !== undefined ? scene.faceCount : 0)
+                                + " shutter=" + burstPlan.shutterNs
+                                + " underexposure=" + burstPlan.underexposureEv.toFixed(2)
+                                + " clipped=" + burstPlan.clippedFraction.toFixed(4))
+                }
                 captureView._camera2BracketQueue = bracketSteps
                 captureView._camera2BracketIndex = 0
                 captureView._camera2BracketBasePath = Settings.photoCapturePath('jpg')
@@ -1221,7 +1510,7 @@ FocusScope {
                     captureView._camera2CaptureTargetPath =
                             captureView._capturePathWithSuffix(
                                 captureView._camera2BracketBasePath,
-                                captureView._camera2BracketSuffix(bracketSteps[0]))
+                                captureView._camera2FrameSuffix(0))
                 } else {
                     captureView._camera2CaptureTargetPath =
                             captureView._camera2BracketBasePath
@@ -1296,6 +1585,7 @@ FocusScope {
             // Reset flash mode when changing to video mode
             if (initialized && captureMode === Camera.CaptureVideo) {
                 Settings.mode.flash = Camera.FlashOff
+                Settings.nightMode = false
             }
             captureView._resetFocus()
         }
@@ -1456,7 +1746,8 @@ FocusScope {
 
         exposure {
             exposureMode: Settings.mode.exposureMode
-            exposureCompensation: Settings.global.exposureCompensation / 2.0
+            exposureCompensation: (Settings.global.advancedMode ? Settings.global.exposureCompensation / 2.0 : 0)
+                                  + captureView.tapExposureEv
             meteringMode: Settings.mode.meteringMode
         }
 
@@ -1501,8 +1792,10 @@ FocusScope {
     CameraExtensions {
         id: extensions
 
+        keepBurstFrames: Settings.global.keepBurstFrames
+
         onRawBracketFrameReady: {
-            if (captureView._camera2BracketQueue.length !== 2) return
+            if (captureView._camera2BracketQueue.length < 2) return
             if (captureView._camera2WarmRawBracketTargetPaths.length > 0) {
                 captureView._camera2BracketCapturedPaths =
                         captureView._camera2BracketCapturedPaths.concat([path])
@@ -1513,6 +1806,8 @@ FocusScope {
             camera._finishCamera2ImageCapture(path, "application/octet-stream")
         }
 
+        onRawImageExposed: captureView._camera2CaptureFeedback()
+
         onRawImageCaptured: {
             captureView._camera2BracketMerging = false
             camera._finishCamera2ImageCapture(path, mimeType)
@@ -1522,32 +1817,51 @@ FocusScope {
             captureView._clearWarmRawBracketRenderQueue()
             camera._failCamera2ImageCapture(error)
         }
+
+        onBurstRendered: {
+            var imageUrl = captureView._localFileUrl(path)
+            if (captureModel) {
+                captureModel.appendCapture(imageUrl, "image/jpeg")
+            }
+            Settings.completePhoto(imageUrl)
+            captureView.captured()
+            captureView._clearPendingThumbnailIfIdle()
+        }
+
+        onBurstRenderFailed: {
+            camera2CaptureErrorNotification.publishMessage(error)
+            captureView._clearPendingThumbnailIfIdle()
+        }
     }
 
     Connections {
         target: captureView.camera2Viewfinder
         ignoreUnknownSignals: true
 
+        onCaptureExposed: captureView._camera2CaptureFeedback()
+
         onImageCaptured: {
             camera._finishCamera2ImageCapture(path, mimeType)
         }
 
         onRawImageReady: {
+            captureView._camera2CaptureFeedback()
             extensions.processRawImage(captureView._camera2CaptureTargetPath,
                                        rawPath,
                                        metadataPath,
                                        Settings.mode.rawCaptureExposure,
                                        Settings.mode.rawCaptureJpegQuality,
                                        captureView._camera2CaptureRotation(),
-                                       Settings.global.rawCaptureSaveFormat,
-                                       Settings.mode.rawRenderEngine,
-                                       Settings.mode.rawCaptureColorTemperature,
-                                       Settings.mode.rawCaptureColorTint,
+                                       captureView._camera2RawSaveFormat(),
+                                       captureView._camera2JpegFromRaw ? "enhanced" : Settings.mode.rawRenderEngine,
+                                       captureView._camera2JpegFromRaw ? 0 : Settings.mode.rawCaptureColorTemperature,
+                                       captureView._camera2JpegFromRaw ? 0 : Settings.mode.rawCaptureColorTint,
                                        Settings.mode.rawCaptureProgressiveJpeg)
         }
 
         onRawBracketReady: {
-            if (captureView._camera2BracketQueue.length !== 2) return
+            if (captureView._camera2BracketQueue.length < 2) return
+            captureView._camera2CaptureFeedback()
             captureView._camera2WarmRawBracketRawPaths = rawPaths
             captureView._camera2WarmRawBracketMetadataPaths = metadataPaths
             captureView._camera2WarmRawBracketRenderIndex = 0
@@ -1587,8 +1901,11 @@ FocusScope {
     Timer {
         id: camera2CaptureWatchdog
 
+        // Bursts write every frame to storage; Camera2Preview scales its timeout alike.
         interval: captureView._camera2LiveJpegCaptureRunning
                   ? 5000 : Math.max(1000, Settings.mode.rawCaptureTimeout * 1000)
+                    * (captureView._camera2BurstPlan
+                       ? Math.max(1, Math.floor(captureView._camera2BurstPlan.frames / 2)) : 1)
         repeat: false
         onTriggered: {
             if (captureView._camera2CaptureRunning) {
@@ -1879,10 +2196,11 @@ FocusScope {
                                                   ? Camera.FocusAreaFocused
                                                   : status
 
-                x: focusArea.width * (captureView._horizontalMirror
+                // Camera2 focus points are already in display coordinates.
+                x: focusArea.width * (captureView._horizontalMirror && !camera2FocusZone
                                       ? 1 - zoneArea.x - zoneArea.width
                                       : zoneArea.x)
-                y: focusArea.height * (captureView._verticalMirror
+                y: focusArea.height * (captureView._verticalMirror && !camera2FocusZone
                                       ? 1 - zoneArea.y - zoneArea.height
                                       : zoneArea.y)
                 width: focusArea.width * zoneArea.width
