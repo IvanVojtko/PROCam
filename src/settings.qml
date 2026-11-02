@@ -151,6 +151,16 @@ SettingsBase {
         // HDR: every photo is a merged RAW burst rendered to JPEG, in both
         // capture formats and both modes.
         property bool hdrBurst: true
+        // Video from ProCam's own recorder (the Camera2 viewfinder session);
+        // off falls back to gst-droid.
+        property bool camera2Video: true
+        // Electronic stabilization for camera2Video recordings.
+        property bool videoStabilization: true
+        // camera2Video codec: "avc" (H.264, plays everywhere) or "hevc".
+        property string camera2VideoCodec: "avc"
+        // camera2Video size: "1080p", "1440p" or "2160p" (4K) where the camera
+        // and the encoder take it (camera2VideoResolutions); otherwise 1080p.
+        property string camera2VideoResolution: "1080p"
         property bool advancedMode: false
         property string advancedCamera2CaptureFormat: "jpeg"
         property string advancedRawCaptureSize: "4096x3072"
@@ -440,6 +450,21 @@ SettingsBase {
 
     function camera2PreferredPreviewSize(cameraId) {
         return camera2Capabilities.camera2PreferredPreviewSize(cameraId)
+    }
+
+    function camera2VideoPreviewSize(cameraId) {
+        return camera2Capabilities.camera2VideoPreviewSize(cameraId)
+    }
+
+    function camera2VideoResolutions(cameraId) {
+        return camera2Capabilities.camera2VideoResolutions(cameraId)
+    }
+
+    // Frame size for a camera2VideoResolution key; 1080p for anything else.
+    function camera2VideoSize(resolution) {
+        return resolution === "2160p" ? Qt.size(3840, 2160)
+             : resolution === "1440p" ? Qt.size(2560, 1440)
+             : Qt.size(1920, 1080)
     }
 
     function camera2PreviewOrientation(cameraId, fallback) {

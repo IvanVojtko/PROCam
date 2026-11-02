@@ -932,6 +932,26 @@ PinchArea {
                 onClicked: Settings.global.hdrBurst = !Settings.global.hdrBurst
             }
 
+            // Electronic stabilization for ProCam's own video recorder. The
+            // bar hides while recording, so it never changes mid-clip (that
+            // restarts the camera session).
+            FloatingChip {
+                height: parent.height
+                visible: camera2BottomDeck.video && captureView._camera2VideoActive
+                checked: Settings.global.videoStabilization
+                menuDots: false
+                onClicked: Settings.global.videoStabilization = !Settings.global.videoStabilization
+
+                Image {
+                    anchors.centerIn: parent
+                    width: Theme.iconSizeSmallPlus
+                    height: width
+                    sourceSize: Qt.size(width, height)
+                    source: Settings.global.videoStabilization
+                            ? "../capture/stabilization.svg" : "../capture/stabilization-off.svg"
+                }
+            }
+
             FloatingChip {
                 height: parent.height
                 // Fit shows exactly the photo's frame.
@@ -1317,6 +1337,13 @@ PinchArea {
             visible: overlay._exposed
 
             function currentItemKeys() {
+                if (captureView._camera2VideoActive) {
+                    // ProCam's recorder ignores gst-droid's flash, ISO and
+                    // exposure modes.
+                    return Settings.camera2VideoResolutions(captureView.camera2Viewfinder.cameraId).length > 1
+                            ? [ "timer", "resolution", "codec", "grid" ]
+                            : [ "timer", "codec", "grid" ]
+                }
                 if (camera2Still) {
                     if (!Settings.global.advancedMode) {
                         return simpleCamera2ItemKeys()
@@ -1411,6 +1438,8 @@ PinchArea {
                 case "filter": return filterSettingComponent
                 case "advanced": return advancedModeSettingComponent
                 case "ratio": return aspectSettingComponent
+                case "codec": return videoCodecSettingComponent
+                case "resolution": return videoResolutionSettingComponent
                 case "rawSave": return rawSaveSettingComponent
                 case "speed": return speedSettingComponent
                 case "size": return sizeSettingComponent
@@ -1688,6 +1717,39 @@ PinchArea {
                     caption: "Ratio"
                     valueLabel: function(value) { return value === CameraConfigs.AspectRatio_16_9 ? "16:9" : "4:3" }
                     model: [ CameraConfigs.AspectRatio_4_3, CameraConfigs.AspectRatio_16_9 ]
+                }
+            }
+
+            Component {
+                id: videoResolutionSettingComponent
+                TextSettingMenu {
+                    width: grid.menuWidth
+                    title: Settings.global.camera2VideoResolution === "2160p" ? "4K: 3840x2160"
+                         : Settings.global.camera2VideoResolution === "1440p" ? "1440p: 2560x1440"
+                         : "1080p: 1920x1080"
+                    header: upperHeader
+                    settings: Settings.global
+                    property: "camera2VideoResolution"
+                    caption: "Size"
+                    valueLabel: function(value) {
+                        return value === "2160p" ? "4K" : value === "1440p" ? "1440p" : "1080p"
+                    }
+                    model: Settings.camera2VideoResolutions(captureView.camera2Viewfinder.cameraId)
+                }
+            }
+
+            Component {
+                id: videoCodecSettingComponent
+                TextSettingMenu {
+                    width: grid.menuWidth
+                    title: Settings.global.camera2VideoCodec === "hevc"
+                           ? "HEVC: smaller files" : "H.264: plays everywhere"
+                    header: upperHeader
+                    settings: Settings.global
+                    property: "camera2VideoCodec"
+                    caption: "Codec"
+                    valueLabel: function(value) { return value === "hevc" ? "HEVC" : "H.264" }
+                    model: [ "avc", "hevc" ]
                 }
             }
 

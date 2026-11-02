@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include "preview_commands.h"
+#include "recorder.h"
 
 enum preview_error {
     PREVIEW_INVALID_ARGUMENT = -30,
@@ -204,6 +205,12 @@ struct preview_context {
     struct preview_result_raw_metadata raw_bracket_result[PREVIEW_MAX_RAW_BRACKET];
     struct preview_raw_image_metadata raw_image;
     struct preview_raw_image_metadata raw_bracket_image[PREVIEW_MAX_RAW_BRACKET];
+    // Video mode: requests use the record template and video autofocus.
+    int video;
+    // Sequence id of the latest repeating request, and the newest sequence
+    // whose captures have all completed (-1: none yet).
+    int repeat_sequence;
+    atomic_int ended_sequence;
 };
 
 static bool preview_hal_exposure_suspect(int64_t hal_exposure_time_ns,
@@ -450,6 +457,7 @@ static uint8_t preview_af_mode(const struct preview_context *context,
     case SFOS_CAMERA2_FOCUS_CONTINUOUS:
         return trigger || context->focus_x >= 0.0f
                 ? ACAMERA_CONTROL_AF_MODE_AUTO
+                : context->video ? ACAMERA_CONTROL_AF_MODE_CONTINUOUS_VIDEO
                 : ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE;
     case SFOS_CAMERA2_FOCUS_MANUAL:
     case SFOS_CAMERA2_FOCUS_INFINITY:
@@ -555,11 +563,16 @@ static void preview_configure_request(ACaptureRequest *request,
                                    context->exposure_time_ns);
     if (context->sensor_sensitivity == 0 && context->exposure_time_ns == 0) {
         sfos_camera2_set_request_u8(request, ACAMERA_CONTROL_CAPTURE_INTENT,
-            still ? ACAMERA_CONTROL_CAPTURE_INTENT_STILL_CAPTURE : ACAMERA_CONTROL_CAPTURE_INTENT_PREVIEW);
+            still ? ACAMERA_CONTROL_CAPTURE_INTENT_STILL_CAPTURE
+            : context->video ? ACAMERA_CONTROL_CAPTURE_INTENT_VIDEO_RECORD
+            : ACAMERA_CONTROL_CAPTURE_INTENT_PREVIEW);
     }
     sfos_camera2_set_aperture(metadata, request, context->aperture);
-    sfos_camera2_set_noise_reduction(metadata, request,
-                                     context->noise_reduction);
+    // Video keeps the record template's noise reduction: the camera's own
+    // video tuning (the bridge default, 0, would switch it off).
+    if (!context->video)
+        sfos_camera2_set_noise_reduction(metadata, request,
+                                         context->noise_reduction);
 
     if (!context->focus_hold_active &&
             (context->focus_mode == SFOS_CAMERA2_FOCUS_MANUAL ||
@@ -826,6 +839,9 @@ static bool preview_parse_command_line(const char *line,
         return true;
     }
 
+    if (preview_parse_record_command(line, command)) {
+        return true;
+    }
     return preview_parse_capture_command(line, command);
 }
 
@@ -1878,7 +1894,12 @@ static void preview_raw_image_available(void *opaque, AImageReader *reader)
     media_status_t status = AImageReader_acquireNextImage(reader, &image);
     atomic_store_explicit(&context->status.last_media_status, status,
                           memory_order_release);
+    // A callback with nothing left to acquire (its image was taken by an
+    // earlier one) is not a failure; a frame that never arrives is caught
+    // by the capture watchdog.
+    if (status == AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE) return;
     if (status != AMEDIA_OK || !image) {
+        fprintf(stderr, "raw-image acquire failed status=%d bracket=%d\n", (int)status, bracket ? 1 : 0);
         if (bracket) {
             bracket_index = 0;
             atomic_store_explicit(
@@ -2051,6 +2072,15 @@ static void preview_raw_image_available(void *opaque, AImageReader *reader)
     if (raw_status > 0 && bracket_index < 0) {
         preview_log_warm_raw_effective(context);
     }
+    if (raw_status <= 0) {
+        // -2 image format/planes, -3 file write, -4 sidecar write,
+        // -5 no capture result, -6 image/result timestamps differ.
+        fprintf(stderr, "raw-image failed index=%d status=%d format=0x%x planes=%d "
+                "image_ts=%lld result_ts=%lld\n", bracket_index, raw_status,
+                image_metadata->format, image_metadata->planes,
+                (long long)image_metadata->timestamp_ns,
+                (long long)result_metadata->timestamp_ns);
+    }
     if (bracket_index >= 0) {
         atomic_store_explicit(&context->raw_bracket_status[bracket_index],
                               raw_status, memory_order_release);
@@ -2166,8 +2196,11 @@ static void preview_bracket_completed(void *opaque, ACameraCaptureSession *sessi
 static void preview_bracket_failed(void *opaque, ACameraCaptureSession *session,
                                     ACaptureRequest *request, ACameraCaptureFailure *failure)
 {
-    (void)session; (void)request; (void)failure;
+    (void)session; (void)request;
     struct preview_bracket_capture *capture = opaque;
+    fprintf(stderr, "raw-bracket frame failed reason=%d frame=%lld captured=%d\n",
+            failure ? failure->reason : -1, failure ? (long long)failure->frameNumber : -1LL,
+            failure ? (int)failure->wasImageCaptured : -1);
     struct preview_context *context = capture->owner;
     if (capture->generation != atomic_load_explicit(&context->raw_bracket_generation,
                                                     memory_order_acquire)) return;
@@ -2191,6 +2224,305 @@ static void preview_bracket_sequence_abort(void *opaque, ACameraCaptureSession *
     (void)sequence_id;
     preview_bracket_failed(opaque, session, NULL, NULL);
     free(opaque);
+}
+
+// Video mode (sfos_camera2_preview_set_video() before the preview starts):
+// the encoder's persistent surface is a session output from the start, and
+// record-start/record-stop add it to or remove it from the repeating
+// request, so recording starts and stops without touching the viewfinder.
+struct preview_video_options {
+    int width;
+    int height;
+    int fps;
+    int bitrate;
+    int stabilization;
+    int hevc;
+    int audio_sample_rate;
+    int audio_channels;
+};
+
+static struct preview_video_options g_preview_video;
+
+SFOS_CAMERA2_EXPORT void sfos_camera2_preview_set_video(
+    int width, int height, int fps, int bitrate, int stabilization, int hevc,
+    int audio_sample_rate, int audio_channels)
+{
+    g_preview_video = (struct preview_video_options) {
+        .width = width,
+        .height = height,
+        .fps = fps,
+        .bitrate = bitrate,
+        .stabilization = stabilization,
+        .hevc = hevc,
+        .audio_sample_rate = audio_sample_rate,
+        .audio_channels = audio_channels,
+    };
+}
+
+enum preview_video_state {
+    PREVIEW_VIDEO_IDLE = 0,
+    PREVIEW_VIDEO_RECORDING,
+    PREVIEW_VIDEO_STOPPING,
+};
+
+// After the last request with the encoder: wait for its frames, then a
+// little for their buffers (as the --record-video loop does).
+#define PREVIEW_VIDEO_SETTLE_MS 1000
+#define PREVIEW_VIDEO_BUFFER_GRACE_MS 60
+
+struct preview_video {
+    struct recorder_config config;
+    int stabilization_supported;
+    int32_t fps_range[2];
+    ANativeWindow *surface;
+    ACameraOutputTarget *target;
+    ACaptureSessionOutput *output;
+    struct recorder *recorder;
+    enum preview_video_state state;
+    int stop_sequence;
+    int64_t stop_deadline_ms;
+    int64_t ended_ms;
+    int error;
+    // The preview is ending: no encoder for a next recording.
+    bool closing;
+    char path[4096];
+};
+
+static int preview_request_u8(const ACaptureRequest *request, uint32_t tag)
+{
+    ACameraMetadata_const_entry entry;
+    if (ACaptureRequest_getConstEntry(request, tag, &entry) != ACAMERA_OK || entry.count < 1)
+        return -1;
+    return entry.data.u8[0];
+}
+
+static void preview_sequence_ended(void *opaque, ACameraCaptureSession *session,
+                                   int sequence_id, int64_t frame_number)
+{
+    (void)session;
+    (void)frame_number;
+    struct preview_context *context = opaque;
+    atomic_store_explicit(&context->ended_sequence, sequence_id, memory_order_release);
+}
+
+static void preview_sequence_aborted(void *opaque, ACameraCaptureSession *session,
+                                     int sequence_id)
+{
+    preview_sequence_ended(opaque, session, sequence_id, -1);
+}
+
+static void preview_write_message(struct preview_context *context, const char *payload,
+                                  int payload_size)
+{
+    if (payload_size <= 0) return;
+    unsigned char header[8] = { 'S', 'F', '2', 'M' };
+    preview_write_le32(header + 4, (uint32_t)payload_size);
+    pthread_mutex_lock(&context->output_lock);
+    sfos_camera2_write_all(context->output_fd, header, sizeof(header));
+    sfos_camera2_write_all(context->output_fd, payload, (size_t)payload_size);
+    pthread_mutex_unlock(&context->output_lock);
+}
+
+// "record-status=started|ok|error code=N path=..." (the path last: it may
+// contain spaces).
+static void preview_write_record_status(struct preview_context *context, const char *status,
+                                        int code, const char *path)
+{
+    char payload[4200];
+    int size = snprintf(payload, sizeof(payload), "record-status=%s code=%d path=%s\n",
+                        status, code, path && *path ? path : "-");
+    if (size > 0 && size < (int)sizeof(payload)) preview_write_message(context, payload, size);
+}
+
+// The record template's extras on a request: the frame rate and
+// stabilization. Preview frames get both too, so the viewfinder shows the
+// stabilised frame that is recorded.
+static void preview_video_configure_request(ACaptureRequest *request,
+                                            const struct preview_video *video)
+{
+    if (!request || !video->target) return;
+    ACaptureRequest_setEntry_i32(request, ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, 2,
+                                 video->fps_range);
+    if (video->stabilization_supported) {
+        sfos_camera2_set_request_u8(request, ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE,
+                                    g_preview_video.stabilization
+                                        ? ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_ON
+                                        : ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_OFF);
+    }
+}
+
+// Larger than 1080p failed: 1920x1080 if the camera streams it, at half the
+// bitrate (a quarter of 4K's pixels needs about half the bits). Returns
+// false when there is nothing smaller to fall back to.
+static bool preview_video_fall_back_to_1080p(struct preview_video *video,
+                                             const ACameraMetadata *characteristics)
+{
+    struct recorder_config *config = &video->config;
+    if (config->width * config->height <= 1920 * 1080 ||
+            !sfos_camera2_has_output_size(characteristics, AIMAGE_FORMAT_PRIVATE, 1920, 1080)) {
+        return false;
+    }
+    fprintf(stderr, "record-prepare %dx%d unavailable; using 1920x1080\n",
+            config->width, config->height);
+    config->bitrate = (int)((long long)config->bitrate * 1920 * 1080 /
+                            ((long long)config->width * config->height) * 2);
+    config->width = 1920;
+    config->height = 1080;
+    return true;
+}
+
+static void preview_video_prepare(struct preview_video *video)
+{
+    const char *stage = "encoder";
+    int media_status = 0;
+    video->recorder = recorder_prepare(&video->config, video->surface, &stage, &media_status);
+    if (!video->recorder) {
+        fprintf(stderr, "record-prepare failed stage=%s media_status=%d\n", stage, media_status);
+    }
+}
+
+// Above 1080p, encoders often cap the bitrate (40 Mbit/s is common): the
+// requested rate, then lower ones, before the caller gives up on the size.
+static void preview_video_prepare_ladder(struct preview_video *video)
+{
+    const int requested = video->config.bitrate;
+    const int rates[] = { requested, 40000000, 30000000, 20000000 };
+    preview_video_prepare(video);
+    for (size_t index = 1; !video->recorder && index < sizeof(rates) / sizeof(rates[0]) &&
+            video->config.width * video->config.height > 1920 * 1080; ++index) {
+        if (rates[index] >= requested) continue;
+        fprintf(stderr, "record-prepare %dx%d %s at %d bit/s failed; trying %d\n",
+                video->config.width, video->config.height, video->config.hevc ? "hevc" : "avc",
+                video->config.bitrate, rates[index]);
+        video->config.bitrate = rates[index];
+        preview_video_prepare(video);
+    }
+    if (!video->recorder) video->config.bitrate = requested;
+}
+
+static void preview_video_start(struct preview_video *video, struct preview_context *context,
+                                ACameraCaptureSession *session,
+                                ACameraCaptureSession_captureCallbacks *callbacks,
+                                ACaptureRequest *request, ACaptureRequest *focus_request,
+                                const struct preview_command *command)
+{
+    const char *stage = "state";
+    int code = RECORDER_STATE_ERROR;
+    if (!video->target) {
+        code = PREVIEW_CONFIGURATION_ERROR;
+        stage = "no_video_stream";
+        goto failed;
+    }
+    if (video->state != PREVIEW_VIDEO_IDLE) goto failed;
+    if (!video->recorder) preview_video_prepare(video);
+    if (!video->recorder) {
+        code = RECORDER_ENCODER_ERROR;
+        stage = "encoder";
+        goto failed;
+    }
+    code = recorder_begin(video->recorder, command->path, command->orientation, &stage);
+    if (code < 0) {
+        recorder_destroy(video->recorder);
+        video->recorder = NULL;
+        unlink(command->path);
+        goto failed;
+    }
+    ACaptureRequest_addTarget(request, video->target);
+    ACaptureRequest_addTarget(focus_request, video->target);
+    ACaptureRequest *requests[] = { request };
+    camera_status_t status = ACameraCaptureSession_setRepeatingRequest(
+        session, callbacks, 1, requests, &context->repeat_sequence);
+    atomic_store_explicit(&context->status.last_camera_status, status, memory_order_release);
+    if (status != ACAMERA_OK) {
+        ACaptureRequest_removeTarget(request, video->target);
+        ACaptureRequest_removeTarget(focus_request, video->target);
+        ACameraCaptureSession_setRepeatingRequest(session, callbacks, 1, requests,
+                                                  &context->repeat_sequence);
+        char json[64];
+        recorder_finish(video->recorder, json, sizeof(json));
+        recorder_destroy(video->recorder);
+        video->recorder = NULL;
+        unlink(command->path);
+        code = PREVIEW_SUBMIT_ERROR;
+        stage = "repeating_request";
+        goto failed;
+    }
+    snprintf(video->path, sizeof(video->path), "%s", command->path);
+    video->state = PREVIEW_VIDEO_RECORDING;
+    video->error = 0;
+    fprintf(stderr, "record-start orientation=%d path=%s\n", command->orientation, video->path);
+    preview_write_record_status(context, "started", 0, video->path);
+    return;
+
+failed:
+    fprintf(stderr, "record-start failed stage=%s code=%d path=%s\n", stage, code, command->path);
+    preview_write_record_status(context, "error", code, command->path);
+}
+
+// Takes the encoder off the requests; the file is finished once the
+// frames already on their way have reached it (preview_video_step).
+static void preview_video_stop(struct preview_video *video, struct preview_context *context,
+                               ACameraCaptureSession *session,
+                               ACameraCaptureSession_captureCallbacks *callbacks,
+                               ACaptureRequest *request, ACaptureRequest *focus_request)
+{
+    if (video->state != PREVIEW_VIDEO_RECORDING) return;
+    ACaptureRequest_removeTarget(request, video->target);
+    ACaptureRequest_removeTarget(focus_request, video->target);
+    video->stop_sequence = context->repeat_sequence;
+    if (session) {
+        ACaptureRequest *requests[] = { request };
+        ACameraCaptureSession_setRepeatingRequest(session, callbacks, 1, requests,
+                                                  &context->repeat_sequence);
+    }
+    video->state = PREVIEW_VIDEO_STOPPING;
+    video->stop_deadline_ms = sfos_camera2_now_ms() + PREVIEW_VIDEO_SETTLE_MS;
+    video->ended_ms = 0;
+}
+
+static void preview_video_finish(struct preview_video *video, struct preview_context *context)
+{
+    char json[4096];
+    int code = recorder_finish(video->recorder, json, sizeof(json));
+    recorder_destroy(video->recorder);
+    video->recorder = NULL;
+    if (code == 0 && video->error) code = video->error;
+    fprintf(stderr, "record-result %s\n", json);
+    if (code == RECORDER_NO_FRAMES) unlink(video->path);
+    preview_write_record_status(context, code == 0 ? "ok" : "error", code, video->path);
+    video->state = PREVIEW_VIDEO_IDLE;
+    // The next recording's encoder, ready before it is asked for.
+    if (!video->closing) preview_video_prepare(video);
+}
+
+// Every loop pass: encoded data into the file, and the end of a stopping
+// recording once its last frames are in.
+static void preview_video_step(struct preview_video *video, struct preview_context *context,
+                               ACameraCaptureSession *session,
+                               ACameraCaptureSession_captureCallbacks *callbacks,
+                               ACaptureRequest *request, ACaptureRequest *focus_request)
+{
+    if (video->state == PREVIEW_VIDEO_IDLE) return;
+    if (!video->error) {
+        const char *stage = "recording";
+        const int code = recorder_poll(video->recorder, &stage);
+        if (code < 0) {
+            fprintf(stderr, "record-error stage=%s code=%d\n", stage, code);
+            video->error = code;
+            preview_video_stop(video, context, session, callbacks, request, focus_request);
+        }
+    }
+    if (video->state != PREVIEW_VIDEO_STOPPING) return;
+    const int64_t now = sfos_camera2_now_ms();
+    if (!video->ended_ms &&
+            atomic_load_explicit(&context->ended_sequence, memory_order_acquire) >=
+                video->stop_sequence) {
+        video->ended_ms = now;
+    }
+    if ((video->ended_ms && now - video->ended_ms >= PREVIEW_VIDEO_BUFFER_GRACE_MS) ||
+            now >= video->stop_deadline_ms) {
+        preview_video_finish(video, context);
+    }
 }
 
 static void preview_status_json(char *out, size_t out_size, bool success,
@@ -2270,6 +2602,10 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     char raw_error[48] = "";
     bool raw_fallback_tried = false;
     int requested_raw_width = raw_width, requested_raw_height = raw_height;
+    struct preview_video video;
+    memset(&video, 0, sizeof(video));
+    const char *video_error = "none";
+    bool quit = false;
 
     struct preview_context context;
     memset(&context, 0, sizeof(context));
@@ -2287,6 +2623,8 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     }
     atomic_init(&context.live_sensor_sensitivity, -1);
     atomic_init(&context.live_exposure_time_ns, -1);
+    atomic_init(&context.ended_sequence, -1);
+    context.repeat_sequence = -1;
     context.width = width;
     context.height = height;
     context.frame_count = frame_count;
@@ -2322,7 +2660,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     context.noise_reduction = SFOS_CAMERA2_NOISE_REDUCTION_NONE;
 
 		    if (!camera_id || !*camera_id || width <= 0 || height <= 0 ||
-		            frame_count <= 0 || frame_count > 10000 ||
+		            frame_count <= 0 || frame_count > 100000000 ||
 		            timeout_ms < 1000 || output_fd < 0 ||
 		            jpeg_quality < 1 || jpeg_quality > 100 ||
                     raw_width < 0 || raw_height < 0 ||
@@ -2381,6 +2719,49 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         snprintf(raw_error, sizeof(raw_error), "unsupported_size");
         context.raw_width = 0;
         context.raw_height = 0;
+    }
+    if (g_preview_video.width > 0 && g_preview_video.height > 0) {
+        // Only the viewfinder and the encoder, the pair every camera records
+        // with: no still streams next to them.
+        context.video = 1;
+        context.jpeg_width = 0;
+        context.jpeg_height = 0;
+        context.raw_width = 0;
+        context.raw_height = 0;
+        video.config = (struct recorder_config) {
+            .width = g_preview_video.width,
+            .height = g_preview_video.height,
+            .fps = g_preview_video.fps,
+            .bitrate = g_preview_video.bitrate,
+            .hevc = g_preview_video.hevc,
+            .audio_sample_rate = g_preview_video.audio_sample_rate,
+            .audio_channels = g_preview_video.audio_channels,
+        };
+        video.stabilization_supported = sfos_camera2_metadata_has_u8(
+            characteristics, ACAMERA_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
+            ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_ON);
+        if (!sfos_camera2_has_output_size(characteristics, AIMAGE_FORMAT_PRIVATE,
+                                          video.config.width, video.config.height)) {
+            video_error = "video_size";
+        } else if (!sfos_camera2_video_fps_range(characteristics, video.config.fps,
+                                                 video.fps_range)) {
+            video_error = "fps_range";
+        } else if (!(video.surface = recorder_surface_create())) {
+            video_error = "persistent_surface";
+        } else {
+            // The first encoder before the session: the camera sees the
+            // surface's size and format when it configures the stream.
+            preview_video_prepare_ladder(&video);
+            if (!video.recorder && video.config.hevc) {
+                // No HEVC encoder: record H.264 rather than nothing.
+                fprintf(stderr, "record-prepare hevc unavailable; using avc\n");
+                video.config.hevc = 0;
+                preview_video_prepare_ladder(&video);
+            }
+            if (!video.recorder && preview_video_fall_back_to_1080p(&video, characteristics))
+                preview_video_prepare(&video);
+            if (!video.recorder) video_error = "encoder";
+        }
     }
 		    preview_read_metering_info(characteristics, &context);
     preview_copy_raw_static_metadata(&context.raw_static, characteristics);
@@ -2502,10 +2883,10 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     }
 
     if (ACameraOutputTarget_create(window, &target) != ACAMERA_OK ||
-            ACameraDevice_createCaptureRequest(device, TEMPLATE_PREVIEW,
+            ACameraDevice_createCaptureRequest(device, context.video ? TEMPLATE_RECORD : TEMPLATE_PREVIEW,
                                                &request) != ACAMERA_OK ||
             ACaptureRequest_addTarget(request, target) != ACAMERA_OK ||
-            ACameraDevice_createCaptureRequest(device, TEMPLATE_PREVIEW,
+            ACameraDevice_createCaptureRequest(device, context.video ? TEMPLATE_RECORD : TEMPLATE_PREVIEW,
                                                &focus_request) != ACAMERA_OK ||
             ACaptureRequest_addTarget(focus_request, target) != ACAMERA_OK ||
             ACaptureSessionOutput_create(window, &output) != ACAMERA_OK ||
@@ -2515,6 +2896,16 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         result_code = PREVIEW_CONFIGURATION_ERROR;
         stage = "configure";
         goto cleanup;
+    }
+    if (video.recorder &&
+            (ACameraOutputTarget_create(video.surface, &video.target) != ACAMERA_OK ||
+             ACaptureSessionOutput_create(video.surface, &video.output) != ACAMERA_OK ||
+             ACaptureSessionOutputContainer_add(container, video.output) != ACAMERA_OK)) {
+        video_error = "video_configure";
+        if (video.output) ACaptureSessionOutput_free(video.output);
+        if (video.target) ACameraOutputTarget_free(video.target);
+        video.output = NULL;
+        video.target = NULL;
     }
     if (jpeg_window &&
             (ACameraOutputTarget_create(jpeg_window, &jpeg_target) !=
@@ -2550,6 +2941,13 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     preview_configure_request(focus_request, &context, characteristics, 0);
     preview_configure_focus_request(focus_request, &context, context.focus_x,
                                     context.focus_y, 1);
+    preview_video_configure_request(request, &video);
+    preview_video_configure_request(focus_request, &video);
+    if (context.video) {
+        fprintf(stderr, "video-template nr=%d edge=%d\n",
+                preview_request_u8(request, ACAMERA_NOISE_REDUCTION_MODE),
+                preview_request_u8(request, ACAMERA_EDGE_MODE));
+    }
     if (jpeg_request) {
         preview_configure_request(jpeg_request, &context, characteristics, 1);
     }
@@ -2569,8 +2967,8 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         .onCaptureProgressed = NULL,
         .onCaptureCompleted = preview_capture_completed,
         .onCaptureFailed = NULL,
-        .onCaptureSequenceCompleted = NULL,
-        .onCaptureSequenceAborted = NULL,
+        .onCaptureSequenceCompleted = preview_sequence_ended,
+        .onCaptureSequenceAborted = preview_sequence_aborted,
         .onCaptureBufferLost = NULL,
     };
     camera_status = ACameraDevice_createCaptureSession(
@@ -2641,6 +3039,35 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         camera_status = ACameraDevice_createCaptureSession(
             device, container, &session_callbacks, &session);
     }
+    if ((camera_status != ACAMERA_OK || !session) && video.output &&
+            preview_video_fall_back_to_1080p(&video, characteristics)) {
+        // 4K refused next to the viewfinder: the same surface at 1080p.
+        fprintf(stderr, "preview session with video failed (status %d); trying 1920x1080\n",
+                camera_status);
+        recorder_destroy(video.recorder);
+        video.recorder = NULL;
+        preview_video_prepare(&video);
+        session = NULL;
+        camera_status = video.recorder
+                ? ACameraDevice_createCaptureSession(device, container, &session_callbacks,
+                                                     &session)
+                : ACAMERA_ERROR_UNKNOWN;
+    }
+    if ((camera_status != ACAMERA_OK || !session) && video.output) {
+        // The camera refused the encoder next to the viewfinder: keep the
+        // viewfinder; recording reports the stream as missing.
+        fprintf(stderr, "preview session with video %dx%d failed (status %d); retrying without it\n",
+                video.config.width, video.config.height, camera_status);
+        video_error = "session";
+        ACaptureSessionOutputContainer_remove(container, video.output);
+        ACaptureSessionOutput_free(video.output);
+        video.output = NULL;
+        ACameraOutputTarget_free(video.target);
+        video.target = NULL;
+        session = NULL;
+        camera_status = ACameraDevice_createCaptureSession(
+            device, container, &session_callbacks, &session);
+    }
     atomic_store_explicit(&context.status.last_camera_status, camera_status,
                           memory_order_release);
     if (camera_status != ACAMERA_OK || !session) {
@@ -2652,10 +3079,21 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     preview_write_stream_status(&context, raw_target && raw_request,
                                 jpeg_target && jpeg_request, raw_error,
                                 requested_raw_width, requested_raw_height);
+    if (context.video) {
+        char payload[192];
+        int size = snprintf(payload, sizeof(payload),
+                            "video-stream=%d size=%dx%d fps=%d codec=%s stabilization=%d error=%s\n",
+                            video.target ? 1 : 0, video.config.width, video.config.height,
+                            video.config.fps, video.config.hevc ? "hevc" : "avc",
+                            video.stabilization_supported && g_preview_video.stabilization,
+                            video_error);
+        if (size > 0 && size < (int)sizeof(payload)) preview_write_message(&context, payload, size);
+        fprintf(stderr, "%s", payload);
+    }
 
     ACaptureRequest *requests[] = { request };
     camera_status = ACameraCaptureSession_setRepeatingRequest(
-        session, &preview_callbacks, 1, requests, NULL);
+        session, &preview_callbacks, 1, requests, &context.repeat_sequence);
     atomic_store_explicit(&context.status.last_camera_status, camera_status,
                           memory_order_release);
     if (camera_status != ACAMERA_OK) {
@@ -2678,7 +3116,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
             atomic_load_explicit(&context.status.device_error,
                                  memory_order_acquire) == 0 &&
             atomic_load_explicit(&context.status.image_status,
-                                 memory_order_acquire) >= 0) {
+                                 memory_order_acquire) >= 0 && !quit) {
         struct preview_command command;
         preview_read_command_data(control_fd, &command_buffer);
         while (preview_pop_command(&command_buffer, &command)) {
@@ -2701,6 +3139,25 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                     continue;
                 }
             }
+            if (command.type == PREVIEW_COMMAND_QUIT) {
+                quit = true;
+                break;
+            }
+            if (command.type == PREVIEW_COMMAND_RECORD_START) {
+                preview_video_start(&video, &context, session, &preview_callbacks,
+                                    request, focus_request, &command);
+                continue;
+            }
+            if (command.type == PREVIEW_COMMAND_RECORD_STOP) {
+                preview_video_stop(&video, &context, session, &preview_callbacks,
+                                   request, focus_request);
+                continue;
+            }
+            if (command.type == PREVIEW_COMMAND_RECORD_INVALID) {
+                fprintf(stderr, "record-command rejected reason=invalid-arguments\n");
+                preview_write_record_status(&context, "error", PREVIEW_INVALID_ARGUMENT, "-");
+                continue;
+            }
             if (command.type == PREVIEW_COMMAND_FOCUS) {
                 context.focus_hold_active = 0;
                 context.focus_x = command.focus_x;
@@ -2722,7 +3179,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
-                    session, &preview_callbacks, 1, requests, NULL);
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
                 ACaptureRequest *focus_requests[] = { focus_request };
                 ACameraCaptureSession_capture(session, NULL, 1, focus_requests,
                                               NULL);
@@ -2742,7 +3199,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
-                    session, &preview_callbacks, 1, requests, NULL);
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_SETTINGS) {
                 context.focus_mode = command.focus_mode;
                 context.focus_distance = command.focus_distance;
@@ -2775,7 +3232,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
-                    session, &preview_callbacks, 1, requests, NULL);
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_EXPOSURE_SETTINGS) {
                 context.sensor_sensitivity = command.sensor_sensitivity;
                 context.exposure_time_ns = command.exposure_time_ns;
@@ -2794,7 +3251,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
-                    session, &preview_callbacks, 1, requests, NULL);
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_FOCUS_HOLD) {
                 int focus_distance_micros = atomic_load_explicit(
                     &context.live_focus_distance_micros,
@@ -2825,7 +3282,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
-                    session, &preview_callbacks, 1, requests, NULL);
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_FOCUS_HOLD_RELEASE) {
                 context.focus_hold_active = 0;
                 preview_configure_request(request, &context, characteristics,
@@ -2840,7 +3297,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
-                    session, &preview_callbacks, 1, requests, NULL);
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_CAPTURE_JPEG &&
                     jpeg_request) {
                 snprintf(context.jpeg_path, sizeof(context.jpeg_path), "%s",
@@ -3084,6 +3541,8 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 }
             }
         }
+        preview_video_step(&video, &context, session, &preview_callbacks, request,
+                           focus_request);
         sfos_camera2_sleep_10_ms();
     }
     if (atomic_load_explicit(&context.status.image_status,
@@ -3100,11 +3559,30 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     }
 
 cleanup:
+    // A recording still running when the preview ends (quit, timeout, camera
+    // error) is finished, not lost.
+    video.closing = true;
+    if (video.state == PREVIEW_VIDEO_RECORDING) {
+        preview_video_stop(&video, &context, session, &preview_callbacks, request,
+                           focus_request);
+    }
+    while (video.state == PREVIEW_VIDEO_STOPPING) {
+        preview_video_step(&video, &context, session, &preview_callbacks, request,
+                           focus_request);
+        sfos_camera2_sleep_10_ms();
+    }
     preview_status_json(out, out_size, result_code == 0, stage, result_code,
                         &context);
     if (session) {
         ACameraCaptureSession_stopRepeating(session);
         ACameraCaptureSession_close(session);
+    }
+    recorder_destroy(video.recorder);
+    if (video.target) {
+        ACameraOutputTarget_free(video.target);
+    }
+    if (video.output) {
+        ACaptureSessionOutput_free(video.output);
     }
     if (target) {
         ACameraOutputTarget_free(target);
@@ -3165,6 +3643,7 @@ cleanup:
     if (manager) {
         ACameraManager_delete(manager);
     }
+    recorder_surface_release(video.surface);
     if (output_lock_ready) {
         pthread_mutex_destroy(&context.output_lock);
     }

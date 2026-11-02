@@ -56,6 +56,8 @@ FocusScope {
     property real camera2TopInset: 0
 
     readonly property bool recording: active && camera.videoRecorder.recorderState == CameraRecorder.RecordingState
+                                      || _camera2Recording
+    readonly property bool _camera2Recording: camera2Viewfinder !== null && camera2Viewfinder.recording
 
     property bool _unload
 
@@ -104,7 +106,9 @@ FocusScope {
                          && extensions.pendingRenders < 3
                        : camera.imageCapture.ready
             case Camera.CaptureVideo:
-                return camera.videoRecorder.recorderStatus >= CameraRecorder.LoadedStatus 
+                return (captureView._camera2VideoActive
+                        ? camera2Viewfinder.videoReady && !camera2Viewfinder.recording
+                        : camera.videoRecorder.recorderStatus >= CameraRecorder.LoadedStatus)
                     && captureOverlay != null && captureOverlay._recSecsRemaining > 0
             default: 
                 return false
@@ -182,11 +186,36 @@ FocusScope {
                                                      && Settings.mode.camera2Viewfinder
                                                      && extensions.rawImageCaptureAvailable
     readonly property bool camera2CaptureAvailable: extensions.rawImageCaptureAvailable
+    // Video recorded by ProCam's Camera2 recorder from its own viewfinder
+    // (the "ProCam video recorder" setting); gst-droid otherwise.
+    readonly property bool _camera2VideoActive: Settings.global.captureMode === "video"
+                                                && effectiveActive
+                                                && Settings.global.camera2Video
+                                                && extensions.rawImageCaptureAvailable
+                                                && camera2Viewfinder !== null
+                                                && camera2Viewfinder.videoMode
+    // Either Camera2 viewfinder: zoom goes to it rather than to gst-droid.
+    readonly property bool _camera2PreviewActive: _camera2ViewfinderActive || _camera2VideoActive
+
+    on_Camera2VideoActiveChanged: {
+        // The photo viewfinder's own exposure (ISO and shutter pairs) must
+        // not carry over: video runs on the camera's auto exposure.
+        if (_camera2VideoActive)
+            camera2Viewfinder.setExposurePair(0, "0", 0)
+    }
     // HDR is a global switch: every photo is a merged RAW16 burst, in both
     // formats. Night mode is a burst too, of long frames.
     readonly property bool _camera2HdrCapture: _camera2ViewfinderActive
                                                && (Settings.global.hdrBurst || Settings.nightMode)
                                                && Settings.camera2BurstSupported(Settings.deviceId)
+                                               && _burstFailedCameras.indexOf("|" + _camera2ResolvedCameraId + "|") < 0
+    // Cameras whose burst failed in this session ("|0|1|"): they take single
+    // frames until ProCam restarts, so a camera that cannot deliver bursts
+    // still takes photos.
+    property string _burstFailedCameras: ""
+    // The first camera open has been checked for video stabilization.
+    property bool _videoStabilizationChecked: false
+    property bool _startedInVideo: false
     readonly property bool _camera2NightCapture: _camera2HdrCapture && Settings.nightMode
     // Too dark for the preview's auto exposure: the top bar offers night mode.
     // Bright again: night mode switches itself off (its long frames would
@@ -684,8 +713,9 @@ FocusScope {
             captureTimer.reset()
         } else if (startRecordTimer.running) {
             startRecordTimer.running = false
-        } else if (camera.videoRecorder.recorderState == CameraRecorder.RecordingState) {
-            camera.videoRecorder.stop()
+        } else if (camera.videoRecorder.recorderState == CameraRecorder.RecordingState
+                   || _camera2Recording) {
+            stopVideoRecording()
         } else if (_canCapture) {
             if (Settings.mode.timer != 0) {
                 microphoneWarningNotification.publishIfNeeded()
@@ -707,6 +737,14 @@ FocusScope {
         }
     }
 
+
+    function stopVideoRecording() {
+        if (_camera2Recording) {
+            camera2Viewfinder.stopRecording()
+        } else {
+            camera.videoRecorder.stop()
+        }
+    }
 
     function _pickViewfinderResolution(resolutions, aspectRatio) {
         var ratio
@@ -873,7 +911,7 @@ FocusScope {
         // prevent video recording continuing forever in the background
         running: recording && !effectiveActive
         interval: 60*1000
-        onTriggered: camera.videoRecorder.stop()
+        onTriggered: captureView.stopVideoRecording()
     }
 
     Timer {
@@ -919,6 +957,10 @@ FocusScope {
 
         interval: 200
         onTriggered: {
+            if (captureView._camera2VideoActive) {
+                camera._recordCamera2()
+                return
+            }
             captureOverlay.writeMetaData()
             camera.videoRecorder.record()
             if (camera.videoRecorder.recorderState == CameraRecorder.RecordingState) {
@@ -980,6 +1022,25 @@ FocusScope {
     }
 
     Connections {
+        target: captureView.camera2Viewfinder
+        ignoreUnknownSignals: true
+        onRecordingFinished: {
+            extensions.disableNotifications(captureView, false)
+            recordStopEvent.play()
+            extensions.logCaptureEvent("camera2 recording " + (success ? "ok " : "failed ")
+                                       + path + (error ? " " + error : ""))
+            if (!success) {
+                camera2CaptureErrorNotification.publishMessage(error || "Recording failed")
+                return
+            }
+            var finalUrl = Settings.completeCapture(captureView._localFileUrl(path))
+            if (finalUrl != "") {
+                captureView.recordingStopped(finalUrl, "video/mp4")
+            }
+        }
+    }
+
+    Connections {
         target: CameraConfigs
         onReadyChanged: {
             // Reset flash torch mode if it's not supported
@@ -1035,9 +1096,21 @@ FocusScope {
         }
 
         function record() {
-            videoRecorder.outputLocation = Settings.videoCapturePath("mp4")
+            if (!captureView._camera2VideoActive)
+                videoRecorder.outputLocation = Settings.videoCapturePath("mp4")
             startRecordTimer.running = true
             recordStartEvent.play()
+        }
+
+        function _recordCamera2() {
+            var path = Settings.videoCapturePath("mp4")
+            if (camera2Viewfinder.startRecording(path, captureView._camera2DeviceRotation())) {
+                extensions.disableNotifications(captureView, true)
+            } else {
+                extensions.logCaptureEvent("camera2 record-start refused " + path)
+                camera2CaptureErrorNotification.publishMessage(
+                            camera2Viewfinder.captureStartError() || "Recording could not start")
+            }
         }
 
         function _captureWithQtMultimedia() {
@@ -1139,6 +1212,13 @@ FocusScope {
         }
 
         function _failCamera2ImageCapture(error) {
+            var cameraId = String(captureView._camera2ResolvedCameraId)
+            if (captureView._camera2BurstPlan && !captureView._camera2BracketMerging
+                    && error.indexOf("cancelled") < 0
+                    && captureView._burstFailedCameras.indexOf("|" + cameraId + "|") < 0) {
+                captureView._burstFailedCameras += "|" + cameraId + "|"
+                error += ". HDR is off for this camera until ProCam restarts; take the photo again"
+            }
             captureView._camera2BracketMerging = false
             captureView._camera2FeedbackGiven = false
             extensions.discardRawBracket()
@@ -1267,7 +1347,8 @@ FocusScope {
                     }
                     captureView._camera2LiveJpegCaptureRunning = captureStarted
                     if (!captureStarted) {
-                        _failCamera2ImageCapture("Camera2 warm JPEG preview is not running")
+                        _failCamera2ImageCapture(camera2Viewfinder.captureStartError()
+                                                 || "Camera2 warm JPEG preview is not running")
                         return
                     }
                     camera2CaptureWatchdog.restart()
@@ -1324,7 +1405,8 @@ FocusScope {
                                       rawPaths, metadataPaths, bracketIso, exposures)
                         if (!captureStarted) {
                             captureView._clearWarmRawBracketRenderQueue()
-                            _failCamera2ImageCapture("Could not start RAW bracket burst")
+                            _failCamera2ImageCapture(camera2Viewfinder.captureStartError()
+                                                     || "Could not start RAW bracket burst")
                             return
                         }
                     } else if (bracketActive) {
@@ -1346,7 +1428,8 @@ FocusScope {
                     }
                     if (!captureStarted) {
                         captureView._clearWarmRawBracketRenderQueue()
-                        _failCamera2ImageCapture("Camera2 warm RAW preview is not running")
+                        _failCamera2ImageCapture(camera2Viewfinder.captureStartError()
+                                                 || "Camera2 warm RAW preview is not running")
                         return
                     }
                     camera2CaptureWatchdog.restart()
@@ -1563,7 +1646,10 @@ FocusScope {
                                            && camera.cameraStatus === Camera.UnloadedStatus))
         property bool initialized
 
-        Component.onCompleted: reloadCheckEnabled = true
+        Component.onCompleted: {
+            reloadCheckEnabled = true
+            captureView._startedInVideo = captureMode === Camera.CaptureVideo
+        }
 
         onErrorCodeChanged: {
             if (errorCode == Camera.CameraError) {
@@ -1591,7 +1677,7 @@ FocusScope {
         }
 
         cameraState: {
-            if (captureView._camera2ViewfinderActive) {
+            if (captureView._camera2ViewfinderActive || captureView._camera2VideoActive) {
                 return Camera.UnloadedState
             } else if (captureView.effectiveActive && !captureView._unload) {
                 if (CameraConfigs.ready) {
@@ -1605,7 +1691,7 @@ FocusScope {
         }
 
         onCameraStateChanged: {
-            if ((cameraState == Camera.ActiveState || captureView._camera2ViewfinderActive)
+            if ((cameraState == Camera.ActiveState || captureView._camera2PreviewActive)
                     && captureOverlay) {
                 captureView.loaded()
             }
@@ -1614,6 +1700,19 @@ FocusScope {
         onCameraStatusChanged: {
             if (camera.cameraStatus === Camera.ActiveStatus) {
                 reactivateTimer.retryCounter = 0
+                // gst-droid applies its start-up quirk (video stabilization)
+                // in the mode the camera opens in, and the first open is
+                // always in photo mode: started in Video, reopen it once.
+                // Switching from Photo to Video reopens it anyway.
+                if (!captureView._videoStabilizationChecked) {
+                    captureView._videoStabilizationChecked = true
+                    if (captureView._startedInVideo
+                            && camera.captureMode === Camera.CaptureVideo
+                            && extensions.videoStabilizationConfigured()) {
+                        extensions.logCaptureEvent("video stabilization: reopening the camera in video mode")
+                        captureView._unload = true
+                    }
+                }
                 if (captureView._qtFallbackCapturePending) {
                     captureView._qtFallbackCapturePending = false
                     _captureWithQtMultimedia()
@@ -1924,9 +2023,35 @@ FocusScope {
     }
 
     Binding {
-        target: captureView._camera2ViewfinderActive ? captureView.camera2Viewfinder : null
+        target: captureView._camera2PreviewActive ? captureView.camera2Viewfinder : null
         property: "zoom"
         value: captureView.camera2Zoom
+    }
+
+    // Video from the Camera2 viewfinder: continuous video autofocus, the
+    // camera's own scene and white balance, whatever photo mode had set.
+    Binding {
+        target: captureView._camera2VideoActive ? captureView.camera2Viewfinder : null
+        property: "focusMode"
+        value: "continuous"
+    }
+
+    Binding {
+        target: captureView._camera2VideoActive ? captureView.camera2Viewfinder : null
+        property: "sceneMode"
+        value: "manual"
+    }
+
+    Binding {
+        target: captureView._camera2VideoActive ? captureView.camera2Viewfinder : null
+        property: "colorTemperature"
+        value: 0
+    }
+
+    Binding {
+        target: captureView._camera2VideoActive ? captureView.camera2Viewfinder : null
+        property: "colorTint"
+        value: 0
     }
 
     Binding {
@@ -2138,7 +2263,7 @@ FocusScope {
                 })
                 overlayFadeIn.start()
                 overlayIncubator = null
-                if ((camera.cameraState == Camera.ActiveState || captureView._camera2ViewfinderActive)
+                if ((camera.cameraState == Camera.ActiveState || captureView._camera2PreviewActive)
                         && captureOverlay) {
                     captureView.loaded()
                 }

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 ProCam Contributors -->
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <g fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round">
+    <rect x="7.5" y="5.5" width="9" height="13" rx="1.5"/>
+    <path d="M 4.6 8.5 Q 2.8 12 4.6 15.5"/>
+    <path d="M 19.4 8.5 Q 21.2 12 19.4 15.5"/>
+    <path d="M 4 4 L 20 20"/>
+  </g>
+</svg>

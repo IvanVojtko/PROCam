@@ -39,7 +39,7 @@ SOURCES += rawbracket.cpp \
 
 HEADERS += rawbracket.h rawbracketmath.h \
         rawpipeline.h rawpipelinemath.h raisr.h \
-        previewsize.h previewaids.h \
+        previewsize.h previewaids.h videoencoderlimits.h \
         camera2preview.h \
         previewnode.h \
         capturemodel.h \

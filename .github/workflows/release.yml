@@ -118,6 +118,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Only for release-notes/<tag>.md, the user-facing notes.
+      - name: Check out release notes
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          sparse-checkout: release-notes
+          persist-credentials: false
+
       - name: Download RPM
         uses: actions/download-artifact@v5
         with:
@@ -143,6 +151,9 @@ jobs:
 
           SHA-256 checksums are in \`SHA256SUMS\`.
           EOF
+          if [ -f "../release-notes/${TAG}.md" ]; then
+            { echo; cat "../release-notes/${TAG}.md"; } >> notes.md
+          fi
           flags=(--repo "${GITHUB_REPOSITORY}" --title "ProCam ${TAG}" --notes-file notes.md --generate-notes --verify-tag)
           if [ "${PRERELEASE}" = "true" ]; then flags+=(--prerelease); fi
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then

@@ -160,10 +160,10 @@ void DeclarativeSettings::verifyStoragePath()
 
     if (m_storagePathStatus == Available && !path.isEmpty()) {
         m_photoDirectory = path + QStringLiteral("/Pictures/ProCam");
-        m_videoDirectory = path + QStringLiteral("/Videos/Camera");
+        m_videoDirectory = path + QStringLiteral("/Videos/ProCam");
     } else {
         m_photoDirectory = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + QLatin1String("/ProCam");
-        m_videoDirectory = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + QLatin1String("/Camera");
+        m_videoDirectory = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + QLatin1String("/ProCam");
         QVector<Partition> partitions = m_partitionManager->partitions(Partition::User | Partition::Mass);
         auto it = std::find_if(partitions.begin(), partitions.end(), [path](const Partition &partition) {
             return QStandardPaths::writableLocation(QStandardPaths::MoviesLocation).startsWith(partition.mountPath()); });

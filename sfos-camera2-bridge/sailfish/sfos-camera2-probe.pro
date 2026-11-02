@@ -11,7 +11,10 @@ QMAKE_CFLAGS += -std=c11 -Wall -Wextra
 
 SOURCES += main.c
 
-LIBS += -ldl
+CONFIG += link_pkgconfig
+PKGCONFIG += libpulse-simple
+
+LIBS += -ldl -lpthread
 
 target.path = /usr/libexec/procam
 INSTALLS += target

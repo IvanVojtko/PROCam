@@ -37,6 +37,8 @@ mkdir -p "$output_dir"
     "$project_dir/android/raw_capture.c" \
     "$project_dir/android/preview.c" \
     "$project_dir/android/jpeg_capture.c" \
+    "$project_dir/android/video_record.c" \
+    "$project_dir/android/recorder.c" \
     -I"$project_dir/android" \
     -lcamera2ndk -lmediandk -landroid -lm \
     -o "$output_dir/libprocamcamera2.so"

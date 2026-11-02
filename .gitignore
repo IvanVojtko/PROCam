@@ -66,6 +66,7 @@ compile_commands.json
 # Photos, RAW frames and their sidecars copied from the phone, and Camera2
 # probe dumps: personal data, never part of the source.
 /RAW/
+/Videos/
 *.raw16
 *.raw10
 *.dng

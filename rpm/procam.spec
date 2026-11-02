@@ -34,6 +34,7 @@ BuildRequires:  pkgconfig(mlite5) >= 0.2.5
 BuildRequires:  pkgconfig(systemsettings) >= 0.2.13
 BuildRequires:  libtiff-devel
 BuildRequires:  pkgconfig(libexif)
+BuildRequires:  pkgconfig(libpulse-simple)
 BuildRequires:  qt5-qttools
 BuildRequires:  qt5-qttools-linguist
 BuildRequires:  oneshot
@@ -117,6 +118,18 @@ merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
 %{_sysconfdir}/dconf/db/vendor.d/00-procam.txt
 
 %changelog
+* Mon Nov 02 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.4-1
+- Own video recorder in the Camera2 bridge, on by default: 1080p or 1440p
+  at 30 fps, H.264 or HEVC, AAC sound, electronic stabilization with an
+  on/off button, 16:9 viewfinder, videos in Videos/ProCam. Sizes are those
+  both the camera and the hardware encoder take (media_codecs.xml). Falls
+  back to gst-droid per camera, or by the "ProCam video recorder" setting.
+- Video quality: the record template's noise reduction, constant-bitrate
+  encoding with the High/Main profile.
+- Bursts drop frames exposed more than 25% off the request (Xperia 10 III);
+  a camera whose burst failed takes single frames for the session; a clear
+  error when the capture folder can't be written.
+- Bridge 0.14.0: failure logging, stabilization modes in the probe.
 * Mon Nov 02 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.3-1
 - HDR and night bursts on phones whose camera leaves exposure keys out of its
   result key list (Xperia 10 III): bursts no longer require them.

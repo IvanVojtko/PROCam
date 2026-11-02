@@ -69,6 +69,17 @@ class Camera2Preview : public QQuickItem
     // fill crops it).
     Q_PROPERTY(QRectF contentRect READ contentRect NOTIFY contentRectChanged)
     Q_PROPERTY(QString errorString READ errorString NOTIFY errorStringChanged)
+    // Video mode: a valid videoSize puts the encoder in the preview session
+    // (no still streams); startRecording()/stopRecording() then record from
+    // it without restarting the viewfinder.
+    Q_PROPERTY(QSize videoSize READ videoSize WRITE setVideoSize NOTIFY videoSizeChanged)
+    Q_PROPERTY(int videoFrameRate READ videoFrameRate WRITE setVideoFrameRate NOTIFY videoFrameRateChanged)
+    Q_PROPERTY(int videoBitrate READ videoBitrate WRITE setVideoBitrate NOTIFY videoBitrateChanged)
+    Q_PROPERTY(bool videoStabilization READ videoStabilization WRITE setVideoStabilization NOTIFY videoStabilizationChanged)
+    // "avc" (H.264) or "hevc"; the bridge falls back to avc without an HEVC encoder.
+    Q_PROPERTY(QString videoCodec READ videoCodec WRITE setVideoCodec NOTIFY videoCodecChanged)
+    Q_PROPERTY(bool videoReady READ videoReady NOTIFY videoReadyChanged)
+    Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
 
 public:
     explicit Camera2Preview(QQuickItem *parent = nullptr);
@@ -179,6 +190,25 @@ public:
 
     QString errorString() const;
 
+    QSize videoSize() const { return m_videoSize; }
+    void setVideoSize(const QSize &videoSize);
+    int videoFrameRate() const { return m_videoFrameRate; }
+    void setVideoFrameRate(int videoFrameRate);
+    int videoBitrate() const { return m_videoBitrate; }
+    void setVideoBitrate(int videoBitrate);
+    bool videoStabilization() const { return m_videoStabilization; }
+    void setVideoStabilization(bool videoStabilization);
+    QString videoCodec() const { return m_videoCodec; }
+    void setVideoCodec(const QString &videoCodec);
+    bool videoReady() const { return m_videoReady; }
+    bool recording() const { return m_recording; }
+    // Records to path (an .mp4 that must not exist yet); orientation is the
+    // clockwise rotation players apply (0, 90, 180, 270). recordingStarted
+    // or recordingFinished(success false) follows.
+    Q_INVOKABLE bool startRecording(const QString &path, int orientation);
+    // recordingFinished follows once the file is complete.
+    Q_INVOKABLE void stopRecording();
+
     /**
      * Restarts the Camera2 preview helper process.
      */
@@ -233,6 +263,9 @@ public:
                                      const QVariantList &metadataPaths,
                                      int sensorSensitivity,
                                      const QString &exposureTime);
+    // Why the last capture call returned false, if its folder was the
+    // reason ("Cannot write to folder ..."); empty otherwise.
+    Q_INVOKABLE QString captureStartError() const { return m_captureStartError; }
 
 protected:
     void geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -292,6 +325,18 @@ signals:
     void rawBracketReady(const QVariantList &rawPaths,
                          const QVariantList &metadataPaths);
     void imageCaptureFailed(const QString &error);
+    void videoSizeChanged();
+    void videoFrameRateChanged();
+    void videoBitrateChanged();
+    void videoStabilizationChanged();
+    void videoCodecChanged();
+    void videoReadyChanged();
+    void recordingChanged();
+    void recordingStarted(const QString &path);
+    void recordingFinished(const QString &path, bool success, const QString &error);
+    // The camera refused the encoder next to the viewfinder (error: the
+    // bridge's stage); the app records through gst-droid instead.
+    void videoStreamUnavailable(const QString &error);
 
 private slots:
     void readFrames();
@@ -313,6 +358,8 @@ private:
     void parseFrames();
     void parseMetadata(const QByteArray &payload);
     void parseCaptureResult(const QMap<QString, QString> &fields);
+    void parseRecordStatus(const QByteArray &payload, const QMap<QString, QString> &fields);
+    void finishRecording(bool success, const QString &error);
     void updateHistogram(const QImage &frame);
     void updateHistogramYuv();
     bool hasFrame() const;
@@ -373,6 +420,8 @@ private:
     QString m_liveExposureTime = QStringLiteral("0");
     QVariantList m_histogram;
     QString m_errorString;
+    QString m_captureStartError;
+    bool prepareCaptureFolders(const QStringList &paths);
     // Newest preview frame as the bridge sent it (sensor orientation, not
     // mirrored) when it came as RGB; the scene graph rotates and mirrors it.
     QImage m_frame;
@@ -423,6 +472,16 @@ private:
     bool m_restoreExposureOnlySettingsAfterCapture = false;
     QTimer m_captureTimer;
     QProcess *m_process = nullptr;
+    QSize m_videoSize;
+    int m_videoFrameRate = 30;
+    int m_videoBitrate = 20000000;
+    bool m_videoStabilization = true;
+    QString m_videoCodec = QStringLiteral("avc");
+    bool m_videoReady = false;
+    bool m_recording = false;
+    QString m_recordingPath;
+    // A stop that the helper never answers still ends the recording.
+    QTimer m_recordingStopTimer;
 };
 
 #endif

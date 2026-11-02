@@ -10,6 +10,7 @@
 #define SFOS_CAMERA2_BRIDGE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -269,6 +270,36 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_capture_jpeg(
     float zoom_ratio,
     char *out,
     size_t out_size);
+
+/**
+ * @brief Record video (no audio) to an MP4: record template, hardware encoder
+ * fed through its input surface (prototype).
+ *
+ * @param stabilization Non-zero requests Android video stabilization.
+ * @param hevc Non-zero encodes HEVC instead of H.264.
+ * @param orientation_degrees MP4 rotation hint.
+ * @param audio_channels 0 for no audio track, else 1 or 2 (PCM from
+ *        sfos_camera2_record_audio_push()).
+ * @param repeat Files recorded back to back in one camera session (1-4);
+ *        the second is name-2.mp4 and so on.
+ * @return 0 on success or a negative video_error code; JSON report in out.
+ */
+SFOS_CAMERA2_EXPORT int sfos_camera2_record_video(
+    const char *camera_id, int width, int height, int fps, int bitrate,
+    int duration_ms, int stabilization, int hevc, int orientation_degrees,
+    int audio_sample_rate, int audio_channels, int repeat,
+    const char *output_path, char *out, size_t out_size);
+
+/**
+ * @brief Queue microphone PCM (interleaved 16-bit, at most 2048 samples) for
+ * the recording in progress; ignored when none is.
+ *
+ * Safe to call from another thread than sfos_camera2_record_video().
+ *
+ * @param age_us How long ago the first sample was captured.
+ */
+SFOS_CAMERA2_EXPORT void sfos_camera2_record_audio_push(
+    const int16_t *pcm, int samples, long long age_us);
 
 /**
  * @brief Return the bridge ABI version string.

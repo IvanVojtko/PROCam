@@ -10,6 +10,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
+#include <pthread.h>
+#include <pulse/error.h>
+#include <pulse/simple.h>
+#include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +50,17 @@ typedef int (*capture_jpeg_fn)(
     int scene_mode, int sensor_sensitivity, long long exposure_time_ns,
     int aperture, int noise_reduction, float zoom_ratio,
     char *out, size_t out_size);
+typedef int (*record_video_fn)(
+    const char *camera_id, int width, int height, int fps, int bitrate,
+    int duration_ms, int stabilization, int hevc, int orientation_degrees,
+    int audio_sample_rate, int audio_channels, int repeat,
+    const char *output_path, char *out, size_t out_size);
+typedef void (*record_audio_push_fn)(const int16_t *pcm, int samples,
+                                     long long age_us);
+typedef void (*preview_set_video_fn)(int width, int height, int fps,
+                                     int bitrate, int stabilization, int hevc,
+                                     int audio_sample_rate,
+                                     int audio_channels);
 typedef const char *(*version_fn)(void);
 typedef void (*droid_media_init_fn)(void);
 typedef void (*droid_media_deinit_fn)(void);
@@ -111,6 +128,225 @@ enum focus_mode {
     FOCUS_INFINITY = 4,
 };
 
+/* Microphone capture for --record-video: 10 ms PulseAudio reads pushed to
+ * the bridge with their age (stream latency + chunk length), from which the
+ * bridge timestamps them on the camera's clock. */
+struct audio_capture {
+    pa_simple *stream;
+    record_audio_push_fn push;
+    int sample_rate;
+    int channels;
+    atomic_int stop;
+    int reads;
+    int error;
+};
+
+static void *audio_capture_main(void *opaque)
+{
+    struct audio_capture *capture = opaque;
+    const int frames = capture->sample_rate / 100;
+    int16_t pcm[2048];
+    const size_t bytes = (size_t)frames * capture->channels * sizeof(int16_t);
+    while (!atomic_load(&capture->stop)) {
+        int error = 0;
+        if (pa_simple_read(capture->stream, pcm, bytes, &error) < 0) {
+            capture->error = error;
+            break;
+        }
+        pa_usec_t latency = pa_simple_get_latency(capture->stream, &error);
+        if (latency == (pa_usec_t)-1) {
+            latency = 0;
+        }
+        capture->push(pcm, frames * capture->channels,
+                      (long long)latency +
+                          (long long)frames * 1000000 / capture->sample_rate);
+        ++capture->reads;
+    }
+    return NULL;
+}
+
+static int audio_capture_open(struct audio_capture *capture)
+{
+    const pa_sample_spec spec = {
+        .format = PA_SAMPLE_S16LE,
+        .rate = (uint32_t)capture->sample_rate,
+        .channels = (uint8_t)capture->channels,
+    };
+    const uint32_t chunk = (uint32_t)(capture->sample_rate / 100 *
+                                      capture->channels * sizeof(int16_t));
+    const pa_buffer_attr attributes = {
+        .maxlength = (uint32_t)-1,
+        .tlength = (uint32_t)-1,
+        .prebuf = (uint32_t)-1,
+        .minreq = (uint32_t)-1,
+        .fragsize = chunk,
+    };
+    int error = 0;
+    capture->stream = pa_simple_new(NULL, "ProCam", PA_STREAM_RECORD, NULL,
+                                    "video recording", &spec, NULL,
+                                    &attributes, &error);
+    if (!capture->stream) {
+        fprintf(stderr, "Microphone unavailable (%s); recording without "
+                        "audio\n", pa_strerror(error));
+        return -1;
+    }
+    return 0;
+}
+
+/* Video preview: stdin goes to the bridge through a pipe, so the helper sees
+ * record-start/record-stop and keeps the microphone open only while
+ * recording. It opens before record-start reaches the bridge, and closes a
+ * little after record-stop, once the last frames' sound is in. */
+#define RELAY_AUDIO_LINGER_MS 2000
+
+struct control_relay {
+    int bridge_fd;
+    int audio;
+    struct audio_capture capture;
+    pthread_t audio_thread;
+    int audio_running;
+    long long audio_stop_ms;
+    pthread_mutex_t lock;
+};
+
+static int g_relay_fd = -1;
+
+static void relay_quit_signal(int signal_number)
+{
+    (void)signal_number;
+    if (g_relay_fd >= 0) {
+        static const char quit[] = "quit\n";
+        ssize_t written = write(g_relay_fd, quit, sizeof(quit) - 1);
+        (void)written;
+    }
+}
+
+static int relay_write_all(int fd, const char *data, size_t size)
+{
+    while (size) {
+        ssize_t written = write(fd, data, size);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            return -1;
+        }
+        data += written;
+        size -= (size_t)written;
+    }
+    return 0;
+}
+
+static void relay_audio_start(struct control_relay *relay)
+{
+    pthread_mutex_lock(&relay->lock);
+    relay->audio_stop_ms = 0;
+    if (relay->audio && !relay->audio_running &&
+            audio_capture_open(&relay->capture) == 0) {
+        atomic_store(&relay->capture.stop, 0);
+        relay->audio_running = pthread_create(&relay->audio_thread, NULL,
+                                              audio_capture_main,
+                                              &relay->capture) == 0;
+        if (!relay->audio_running) {
+            pa_simple_free(relay->capture.stream);
+            relay->capture.stream = NULL;
+        }
+    }
+    pthread_mutex_unlock(&relay->lock);
+}
+
+static void relay_audio_stop(struct control_relay *relay)
+{
+    pthread_mutex_lock(&relay->lock);
+    relay->audio_stop_ms = 0;
+    if (relay->audio_running) {
+        atomic_store(&relay->capture.stop, 1);
+        pthread_join(relay->audio_thread, NULL);
+        pa_simple_free(relay->capture.stream);
+        relay->capture.stream = NULL;
+        relay->audio_running = 0;
+        if (relay->capture.error) {
+            fprintf(stderr, "Microphone read failed after %d reads: %s\n",
+                    relay->capture.reads,
+                    pa_strerror(relay->capture.error));
+        }
+    }
+    pthread_mutex_unlock(&relay->lock);
+}
+
+static int relay_starts_with(const char *line, size_t length, const char *word)
+{
+    const size_t word_length = strlen(word);
+    return length >= word_length && !memcmp(line, word, word_length) &&
+           (length == word_length || line[word_length] == ' ' ||
+            line[word_length] == '\n' || line[word_length] == '\r');
+}
+
+static void *relay_main(void *opaque)
+{
+    struct control_relay *relay = opaque;
+    char buffer[8192];
+    size_t length = 0;
+    for (;;) {
+        pthread_mutex_lock(&relay->lock);
+        const long long stop_ms = relay->audio_stop_ms;
+        pthread_mutex_unlock(&relay->lock);
+        int timeout = -1;
+        if (stop_ms) {
+            const long long wait = stop_ms - monotonic_ms();
+            timeout = wait > 0 ? (int)wait : 0;
+        }
+        struct pollfd input = { .fd = STDIN_FILENO, .events = POLLIN };
+        const int ready = poll(&input, 1, timeout);
+        if (ready < 0 && errno == EINTR) {
+            continue;
+        }
+        if (ready == 0) {
+            relay_audio_stop(relay);
+            continue;
+        }
+        ssize_t bytes = ready > 0
+                ? read(STDIN_FILENO, buffer + length, sizeof(buffer) - length)
+                : -1;
+        if (bytes < 0 && errno == EINTR) {
+            continue;
+        }
+        if (bytes <= 0) {
+            /* The app is gone: end the preview, finishing any recording. */
+            relay_write_all(relay->bridge_fd, "\nquit\n", 6);
+            break;
+        }
+        length += (size_t)bytes;
+        char *newline;
+        while ((newline = memchr(buffer, '\n', length))) {
+            const size_t line_length = (size_t)(newline - buffer) + 1;
+            if (relay_starts_with(buffer, line_length, "record-start")) {
+                relay_audio_start(relay);
+            } else if (relay_starts_with(buffer, line_length, "record-stop") ||
+                       relay_starts_with(buffer, line_length, "quit")) {
+                pthread_mutex_lock(&relay->lock);
+                if (relay->audio_running) {
+                    relay->audio_stop_ms = monotonic_ms() + RELAY_AUDIO_LINGER_MS;
+                }
+                pthread_mutex_unlock(&relay->lock);
+            }
+            if (relay_write_all(relay->bridge_fd, buffer, line_length) != 0) {
+                return NULL;
+            }
+            length -= line_length;
+            memmove(buffer, buffer + line_length, length);
+        }
+        if (length == sizeof(buffer)) {
+            /* No newline in 8 KB: pass it on; the bridge drops the line. */
+            if (relay_write_all(relay->bridge_fd, buffer, length) != 0) {
+                return NULL;
+            }
+            length = 0;
+        }
+    }
+    return NULL;
+}
+
 static void usage(FILE *stream, const char *program)
 {
     fprintf(stream,
@@ -130,6 +366,14 @@ static void usage(FILE *stream, const char *program)
             "     [--orientation DEGREES] [--zoom R]\n"
             "     [--raw-size WIDTHxHEIGHT] [--raw-format raw16|yuv]\n"
             "     [--preview-format rgb|yuv] [--focus-x X --focus-y Y]\n"
+            "     [--video-size WIDTHxHEIGHT [--video-fps N]\n"
+            "      [--video-bitrate BPS] [--stabilization on|off]\n"
+            "      [--codec avc|hevc] [--audio on|off] [--audio-channels 1|2]]\n"
+            "  %s --record-video --output PATH.mp4 [--camera ID]\n"
+            "     [--size WIDTHxHEIGHT] [--fps N] [--seconds N]\n"
+            "     [--bitrate BPS] [--stabilization on|off] [--codec avc|hevc]\n"
+            "     [--orientation DEGREES] [--audio on|off]\n"
+            "     [--audio-channels 1|2] [--repeat N] [--force]\n"
             "  %s --capture-jpeg --output PATH [--camera ID]\n"
             "     [--size WIDTHxHEIGHT] [--timeout SECONDS]\n"
             "     [--quality N] [--orientation DEGREES]\n"
@@ -145,8 +389,10 @@ static void usage(FILE *stream, const char *program)
             "continuous, manual, and infinity. Manual distance is in diopters.\n"
             "Noise reduction is none, bayer, ycc, temporal, fixed, extra, or a flag value.\n"
             "Color temperature/tint use bridge Camera2 request tags when present.\n"
-            "Preview mode writes consecutive binary RGB888 frames.\n",
-            program, program, program, program, program);
+            "Preview mode writes consecutive binary RGB888 frames. With\n"
+            "--video-size it also takes record-start DEGREES PATH.mp4 and\n"
+            "record-stop on standard input.\n",
+            program, program, program, program, program, program);
 }
 
 static long long absolute_i64(long long value)
@@ -480,6 +726,12 @@ int main(int argc, char **argv)
         bridge, "sfos_camera2_preview_ppm");
     capture_jpeg_fn capture_jpeg = (capture_jpeg_fn)android_dlsym(
         bridge, "sfos_camera2_capture_jpeg");
+    record_video_fn record_video = (record_video_fn)android_dlsym(
+        bridge, "sfos_camera2_record_video");
+    record_audio_push_fn record_audio_push = (record_audio_push_fn)
+        android_dlsym(bridge, "sfos_camera2_record_audio_push");
+    preview_set_video_fn preview_set_video = (preview_set_video_fn)
+        android_dlsym(bridge, "sfos_camera2_preview_set_video");
     version_fn version =
         (version_fn)android_dlsym(bridge, "sfos_camera2_bridge_version");
     if (!probe || !capture_options || !version) {
@@ -511,6 +763,14 @@ int main(int argc, char **argv)
         float zoom_ratio = 1.0f;
         float focus_x = -1.0f;
         float focus_y = -1.0f;
+        int video_width = 0;
+        int video_height = 0;
+        int video_fps = 30;
+        int video_bitrate = 20000000;
+        int stabilization = 1;
+        int hevc = 0;
+        int audio = 1;
+        int audio_channels = 1;
 
         if (!preview_ppm) {
             fprintf(stderr,
@@ -598,6 +858,52 @@ int main(int argc, char **argv)
                     fprintf(stderr, "Invalid --focus-y value\n");
                     return 2;
                 }
+            } else if (!strcmp(argv[index], "--video-size") && index + 1 < argc) {
+                if (parse_size(argv[++index], &video_width, &video_height) != 0) {
+                    fprintf(stderr, "Invalid --video-size value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--video-fps") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &video_fps) != 0 ||
+                        video_fps > 240) {
+                    fprintf(stderr, "Invalid --video-fps value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--video-bitrate") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &video_bitrate) != 0) {
+                    fprintf(stderr, "Invalid --video-bitrate value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--stabilization") && index + 1 < argc) {
+                const char *value = argv[++index];
+                if (!strcmp(value, "on") || !strcmp(value, "off")) {
+                    stabilization = !strcmp(value, "on");
+                } else {
+                    fprintf(stderr, "--stabilization is on or off\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--codec") && index + 1 < argc) {
+                const char *value = argv[++index];
+                if (!strcmp(value, "avc") || !strcmp(value, "hevc")) {
+                    hevc = !strcmp(value, "hevc");
+                } else {
+                    fprintf(stderr, "--codec is avc or hevc\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--audio") && index + 1 < argc) {
+                const char *value = argv[++index];
+                if (!strcmp(value, "on") || !strcmp(value, "off")) {
+                    audio = !strcmp(value, "on");
+                } else {
+                    fprintf(stderr, "--audio is on or off\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--audio-channels") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &audio_channels) != 0 ||
+                        audio_channels > 2) {
+                    fprintf(stderr, "--audio-channels is 1 or 2\n");
+                    return 2;
+                }
             } else {
                 fprintf(stderr, "Unknown or incomplete option: %s\n",
                         argv[index]);
@@ -619,13 +925,58 @@ int main(int argc, char **argv)
             fprintf(stderr, "--focus-x and --focus-y must be used together\n");
             return 2;
         }
+        int control_fd = STDIN_FILENO;
+        struct control_relay relay;
+        memset(&relay, 0, sizeof(relay));
+        if (video_width > 0) {
+            if (!preview_set_video || !record_audio_push) {
+                fprintf(stderr, "The installed bridge does not record from "
+                                "the preview. Install libprocamcamera2.so "
+                                "0.14.0 or newer.\n");
+                return 14;
+            }
+            int pipe_fds[2];
+            pthread_t relay_thread;
+            if (pipe(pipe_fds) != 0) {
+                fprintf(stderr, "Could not create the control pipe: %s\n",
+                        strerror(errno));
+                return 3;
+            }
+            relay.bridge_fd = pipe_fds[1];
+            relay.audio = audio;
+            relay.capture.push = record_audio_push;
+            relay.capture.sample_rate = 48000;
+            relay.capture.channels = audio_channels;
+            pthread_mutex_init(&relay.lock, NULL);
+            if (pthread_create(&relay_thread, NULL, relay_main, &relay) != 0) {
+                fprintf(stderr, "Could not start the control relay\n");
+                return 3;
+            }
+            pthread_detach(relay_thread);
+            control_fd = pipe_fds[0];
+            /* SIGTERM ends the preview through the bridge, so a recording
+             * in progress is finished rather than left without its index. */
+            g_relay_fd = relay.bridge_fd;
+            signal(SIGTERM, relay_quit_signal);
+            signal(SIGINT, relay_quit_signal);
+            signal(SIGPIPE, SIG_IGN);
+            preview_set_video(video_width, video_height, video_fps,
+                              video_bitrate, stabilization, hevc,
+                              relay.capture.sample_rate,
+                              audio ? audio_channels : 0);
+        }
         result = preview_ppm(camera_id, width, height, frames,
-                             timeout_seconds * 1000, output_fd, STDIN_FILENO,
+                             timeout_seconds * 1000, output_fd, control_fd,
                              jpeg_width, jpeg_height, jpeg_quality,
                              jpeg_orientation, raw_width, raw_height,
                              raw_format | (preview_yuv ? SFOS_CAMERA2_PREVIEW_YUV_FRAMES : 0),
                              zoom_ratio, focus_x, focus_y,
                              json, sizeof(json));
+        if (video_width > 0) {
+            signal(SIGTERM, SIG_DFL);
+            signal(SIGINT, SIG_DFL);
+            relay_audio_stop(&relay);
+        }
         if (output_fd != STDOUT_FILENO) {
             close(output_fd);
         }
@@ -906,6 +1257,153 @@ int main(int argc, char **argv)
         if (result == 0 && write_json_sidecar(output_path, json) != 0) {
             fprintf(stderr, "Could not write JPEG metadata sidecar\n");
             return 15;
+        }
+    } else if (!strcmp(argv[1], "--record-video")) {
+        const char *camera_id = "0";
+        const char *output_path = NULL;
+        int width = 1920;
+        int height = 1080;
+        int fps = 30;
+        int seconds = 10;
+        int bitrate = 20000000;
+        int stabilization = 1;
+        int hevc = 0;
+        int orientation = 0;
+        int audio = 1;
+        int audio_channels = 1;
+        int repeat = 1;
+        int force = 0;
+
+        if (!record_video || !record_audio_push) {
+            fprintf(stderr, "The installed bridge does not support video "
+                            "recording. Install libprocamcamera2.so 0.13.0 "
+                            "or newer.\n");
+            return 14;
+        }
+        for (int index = 2; index < argc; ++index) {
+            if (!strcmp(argv[index], "--camera") && index + 1 < argc) {
+                camera_id = argv[++index];
+            } else if (!strcmp(argv[index], "--size") && index + 1 < argc) {
+                if (parse_size(argv[++index], &width, &height) != 0) {
+                    fprintf(stderr, "Invalid --size value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--output") && index + 1 < argc) {
+                output_path = argv[++index];
+            } else if (!strcmp(argv[index], "--fps") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &fps) != 0 || fps > 240) {
+                    fprintf(stderr, "Invalid --fps value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--seconds") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &seconds) != 0 ||
+                        seconds > 600) {
+                    fprintf(stderr, "Invalid --seconds value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--bitrate") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &bitrate) != 0) {
+                    fprintf(stderr, "Invalid --bitrate value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--stabilization") &&
+                       index + 1 < argc) {
+                const char *value = argv[++index];
+                if (!strcmp(value, "on")) {
+                    stabilization = 1;
+                } else if (!strcmp(value, "off")) {
+                    stabilization = 0;
+                } else {
+                    fprintf(stderr, "--stabilization is on or off\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--codec") && index + 1 < argc) {
+                const char *value = argv[++index];
+                if (!strcmp(value, "avc")) {
+                    hevc = 0;
+                } else if (!strcmp(value, "hevc")) {
+                    hevc = 1;
+                } else {
+                    fprintf(stderr, "--codec is avc or hevc\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--orientation") &&
+                       index + 1 < argc) {
+                if (parse_nonnegative_int(argv[++index], &orientation) != 0 ||
+                        orientation % 90 != 0 || orientation >= 360) {
+                    fprintf(stderr, "Invalid --orientation value\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--audio") && index + 1 < argc) {
+                const char *value = argv[++index];
+                if (!strcmp(value, "on")) {
+                    audio = 1;
+                } else if (!strcmp(value, "off")) {
+                    audio = 0;
+                } else {
+                    fprintf(stderr, "--audio is on or off\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--repeat") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &repeat) != 0 ||
+                        repeat > 4) {
+                    fprintf(stderr, "--repeat is 1 to 4\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--audio-channels") &&
+                       index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &audio_channels) != 0 ||
+                        audio_channels > 2) {
+                    fprintf(stderr, "--audio-channels is 1 or 2\n");
+                    return 2;
+                }
+            } else if (!strcmp(argv[index], "--force")) {
+                force = 1;
+            } else {
+                fprintf(stderr, "Unknown or incomplete option: %s\n",
+                        argv[index]);
+                usage(stderr, argv[0]);
+                return 2;
+            }
+        }
+        if (!output_path || !*output_path) {
+            fprintf(stderr, "--output PATH.mp4 is required for recording\n");
+            return 2;
+        }
+        if (!force && access(output_path, F_OK) == 0) {
+            fprintf(stderr,
+                    "Output exists; choose another path or pass --force\n");
+            return 3;
+        }
+        struct audio_capture capture = {
+            .push = record_audio_push,
+            .sample_rate = 48000,
+            .channels = audio_channels,
+        };
+        pthread_t audio_thread;
+        int audio_running = 0;
+        if (audio && audio_capture_open(&capture) == 0) {
+            atomic_init(&capture.stop, 0);
+            audio_running = pthread_create(&audio_thread, NULL,
+                                           audio_capture_main, &capture) == 0;
+            if (!audio_running) {
+                pa_simple_free(capture.stream);
+                capture.stream = NULL;
+            }
+        }
+        result = record_video(camera_id, width, height, fps, bitrate,
+                              seconds * 1000, stabilization, hevc, orientation,
+                              capture.sample_rate,
+                              audio_running ? audio_channels : 0, repeat,
+                              output_path, json, sizeof(json));
+        if (audio_running) {
+            atomic_store(&capture.stop, 1);
+            pthread_join(audio_thread, NULL);
+            pa_simple_free(capture.stream);
+            if (capture.error) {
+                fprintf(stderr, "Microphone read failed after %d reads: %s\n",
+                        capture.reads, pa_strerror(capture.error));
+            }
         }
     } else if (!strcmp(argv[1], "--capture")) {
         const char *camera_id = "0";

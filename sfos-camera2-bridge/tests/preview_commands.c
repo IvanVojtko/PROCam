@@ -12,7 +12,30 @@ static void invalid(const char *text) {
     assert(preview_parse_capture_command(text, &command));
     assert(command.type == PREVIEW_COMMAND_CAPTURE_INVALID);
 }
+static void record_invalid(const char *text) {
+    memset(&command, 0, sizeof(command));
+    assert(preview_parse_record_command(text, &command));
+    assert(command.type == PREVIEW_COMMAND_RECORD_INVALID);
+}
 int main(void) {
+    assert(preview_parse_record_command("record-start 90 /home/u/Videos/My clip.mp4\r", &command));
+    assert(command.type == PREVIEW_COMMAND_RECORD_START);
+    assert(command.orientation == 90);
+    assert(!strcmp(command.path, "/home/u/Videos/My clip.mp4"));
+    assert(preview_parse_record_command("record-stop", &command));
+    assert(command.type == PREVIEW_COMMAND_RECORD_STOP);
+    assert(preview_parse_record_command(" quit \r", &command));
+    assert(command.type == PREVIEW_COMMAND_QUIT);
+    assert(!preview_parse_record_command("record-stopper", &command));
+    assert(!preview_parse_record_command("record-starts 0 /a.mp4", &command));
+    assert(!preview_parse_record_command("focus 0.5 0.5", &command));
+    record_invalid("record-start");
+    record_invalid("record-start 90");
+    record_invalid("record-start 90 ");
+    record_invalid("record-start 360 /a.mp4");
+    record_invalid("record-start -90 /a.mp4");
+    record_invalid("record-start 90 relative.mp4");
+    record_invalid("record-start 9x /a.mp4");
     assert(preview_parse_capture_command("capture-raw /tmp/a.raw /tmp/a.json", &command));
     assert(command.type == PREVIEW_COMMAND_CAPTURE_RAW);
     assert(!strcmp(command.path, "/tmp/a.raw"));

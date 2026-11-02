@@ -17,6 +17,7 @@
 #include <QJsonDocument>
 #include <QSaveFile>
 #include <QTransform>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -373,7 +374,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             return renderYuvImage(metadataPaths, settings, image, info);
         QElapsedTimer timer;
         timer.start();
-        const int count = metadataPaths.size();
+        int count = metadataPaths.size();
         std::vector<std::unique_ptr<BayerFrame>> frames;
         std::vector<QJsonObject> metadata;
         for (const QString &path : metadataPaths) {
@@ -391,6 +392,40 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         for (int i = 0; i < count; ++i) {
             const double t = number(metadata[i], "exposure_time_ns"), iso = number(metadata[i], "iso");
             exposures[i] = t > 0 && iso > 0 ? t * iso : 1.0;
+        }
+        // Burst frames are requested with one exposure, but some cameras
+        // (Xperia 10 III) apply it a few frames late: the first frames still
+        // carry the preview's exposure, often several times longer, blurrier
+        // and clipped. Drop frames more than 25% off the requested exposure
+        // (the median if none was recorded). HAL rounding stays far inside
+        // that: Jolla Phone 2 bursts are within 0.1% of the request.
+        int exposureOutliers = 0;
+        if (count > 1) {
+            const double requested = number(metadata[0], "exposure_time_requested_ns")
+                    * number(metadata[0], "sensor_sensitivity_requested");
+            double target = requested;
+            if (!(target > 0)) {
+                std::vector<double> sorted = exposures;
+                std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.end());
+                target = sorted[count / 2];
+            }
+            int kept = 0;
+            for (int i = 0; i < count; ++i) {
+                const double ratio = exposures[i] / target;
+                if (ratio < 0.8 || ratio > 1.25) continue;
+                frames[kept].swap(frames[i]);
+                std::swap(metadata[kept], metadata[i]);
+                std::swap(exposures[kept], exposures[i]);
+                ++kept;
+            }
+            // No frame matches (a camera that ignores the request): keep
+            // them all, as before.
+            if (kept == 0) kept = count;
+            exposureOutliers = count - kept;
+            count = kept;
+            frames.resize(count);
+            metadata.resize(count);
+            exposures.resize(count);
         }
 
         // Reference: the sharpest frame (least shake). A burst spans half a
@@ -546,6 +581,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         if (info) {
             QJsonObject p;
             p.insert(QStringLiteral("frames"), count);
+            if (exposureOutliers) p.insert(QStringLiteral("exposure_outliers"), exposureOutliers);
             p.insert(QStringLiteral("reference_frame"), reference);
             p.insert(QStringLiteral("noise_model_source"), noiseSource);
             QJsonArray scale, offset;
@@ -592,7 +628,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             p.insert(QStringLiteral("threads"), int(std::thread::hardware_concurrency()));
             *info = p;
         }
-        qDebug() << "rawpipeline frames" << count << "reference" << reference << "noise" << noiseSource
+        qDebug() << "rawpipeline frames" << count << "outliers" << exposureOutliers << "reference" << reference << "noise" << noiseSource
                  << "rejection" << mergeStats.rejection << "gains" << finishStats.shortGain << finishStats.longGain
                  << "ms load" << loadMs << "align" << alignMs << "merge" << mergeMs << "finish" << finishMs;
         return true;

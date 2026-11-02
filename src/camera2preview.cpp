@@ -135,6 +135,12 @@ Camera2Preview::Camera2Preview(QQuickItem *parent)
     m_captureTimer.setInterval(50);
     connect(&m_captureTimer, &QTimer::timeout,
             this, &Camera2Preview::checkCaptureResult);
+    // The helper finishes a file within about 1.5 s of record-stop.
+    m_recordingStopTimer.setSingleShot(true);
+    m_recordingStopTimer.setInterval(5000);
+    connect(&m_recordingStopTimer, &QTimer::timeout, this, [this]() {
+        finishRecording(false, QStringLiteral("Recording did not finish"));
+    });
 }
 
 Camera2Preview::~Camera2Preview()
@@ -348,6 +354,118 @@ void Camera2Preview::setJpegCaptureEnabled(bool jpegCaptureEnabled)
 bool Camera2Preview::rawCaptureEnabled() const
 {
     return m_rawCaptureEnabled;
+}
+
+void Camera2Preview::setVideoSize(const QSize &videoSize)
+{
+    if (m_videoSize == videoSize)
+        return;
+    m_videoSize = videoSize;
+    emit videoSizeChanged();
+    restart();
+}
+
+void Camera2Preview::setVideoFrameRate(int videoFrameRate)
+{
+    if (m_videoFrameRate == videoFrameRate || videoFrameRate <= 0)
+        return;
+    m_videoFrameRate = videoFrameRate;
+    emit videoFrameRateChanged();
+    if (!m_videoSize.isEmpty())
+        restart();
+}
+
+void Camera2Preview::setVideoBitrate(int videoBitrate)
+{
+    if (m_videoBitrate == videoBitrate || videoBitrate <= 0)
+        return;
+    m_videoBitrate = videoBitrate;
+    emit videoBitrateChanged();
+    if (!m_videoSize.isEmpty())
+        restart();
+}
+
+void Camera2Preview::setVideoStabilization(bool videoStabilization)
+{
+    if (m_videoStabilization == videoStabilization)
+        return;
+    m_videoStabilization = videoStabilization;
+    emit videoStabilizationChanged();
+    if (!m_videoSize.isEmpty())
+        restart();
+}
+
+void Camera2Preview::setVideoCodec(const QString &videoCodec)
+{
+    const QString codec = videoCodec == QLatin1String("hevc") ? videoCodec : QStringLiteral("avc");
+    if (m_videoCodec == codec)
+        return;
+    m_videoCodec = codec;
+    emit videoCodecChanged();
+    if (!m_videoSize.isEmpty())
+        restart();
+}
+
+bool Camera2Preview::startRecording(const QString &path, int orientation)
+{
+    if (!m_process || !m_running || !m_videoReady || m_recording || path.isEmpty()
+            || !QFileInfo(path).isAbsolute() || !prepareCaptureFolders({path})) {
+        qWarning() << "record-start refused" << path << "running" << m_running
+                   << "video" << m_videoReady << "recording" << m_recording;
+        return false;
+    }
+    const int degrees = ((orientation % 360) + 360) % 360 / 90 * 90;
+    const QByteArray command = "record-start " + QByteArray::number(degrees) + ' '
+            + QFile::encodeName(path) + '\n';
+    if (m_process->write(command) < 0)
+        return false;
+    m_recording = true;
+    m_recordingPath = path;
+    emit recordingChanged();
+    return true;
+}
+
+void Camera2Preview::stopRecording()
+{
+    if (!m_recording || m_recordingStopTimer.isActive())
+        return;
+    if (m_process)
+        m_process->write("record-stop\n");
+    m_recordingStopTimer.start();
+}
+
+void Camera2Preview::finishRecording(bool success, const QString &error)
+{
+    if (!m_recording)
+        return;
+    m_recordingStopTimer.stop();
+    const QString path = m_recordingPath;
+    m_recording = false;
+    m_recordingPath.clear();
+    qDebug() << "record-finished" << path << success << error;
+    emit recordingChanged();
+    emit recordingFinished(path, success, error);
+}
+
+// record-status=started|ok|error code=N path=... (the path is the rest of
+// the payload and may contain spaces).
+void Camera2Preview::parseRecordStatus(const QByteArray &payload,
+                                       const QMap<QString, QString> &fields)
+{
+    const QString status = fields.value(QStringLiteral("record-status"));
+    const int pathAt = payload.indexOf(" path=");
+    const QString path = pathAt >= 0 ? QFile::decodeName(payload.mid(pathAt + 6).trimmed())
+                                     : QString();
+    if (!m_recording || (path != m_recordingPath && path != QLatin1String("-")))
+        return;
+    if (status == QLatin1String("started")) {
+        emit recordingStarted(path);
+    } else if (status == QLatin1String("ok")) {
+        finishRecording(true, QString());
+    } else {
+        finishRecording(false, QStringLiteral("Recording failed (%1)")
+                        .arg(fields.value(QStringLiteral("code"))));
+    }
 }
 
 void Camera2Preview::setRawCaptureEnabled(bool rawCaptureEnabled)
@@ -937,6 +1055,23 @@ void Camera2Preview::setCaptureMetadata(const QVariantMap &metadata)
     m_originalJpegExif.clear();
 }
 
+// Creates the folders of the files a capture writes. A folder that cannot
+// be created or written fails the capture up front, with a message that
+// names it, instead of the bridge failing to write a frame later.
+bool Camera2Preview::prepareCaptureFolders(const QStringList &paths)
+{
+    m_captureStartError.clear();
+    for (const QString &path : paths) {
+        const QString directory = QFileInfo(path).absolutePath();
+        if (QDir().mkpath(directory) && QFileInfo(directory).isWritable()) continue;
+        m_captureStartError = QStringLiteral("Cannot write to folder %1").arg(directory);
+        appendRawCaptureLog(m_captureStartError);
+        setErrorString(m_captureStartError);
+        return false;
+    }
+    return true;
+}
+
 bool Camera2Preview::captureJpeg(const QString &path)
 {
     if (path.isEmpty()) {
@@ -957,8 +1092,7 @@ bool Camera2Preview::captureJpeg(const QString &path)
         return false;
     }
 
-    const QFileInfo fileInfo(path);
-    QDir().mkpath(fileInfo.absolutePath());
+    if (!prepareCaptureFolders({path})) return false;
 
     m_lastCaptureResultFields.clear();
     m_previewCaptureRunning = true;
@@ -1031,8 +1165,7 @@ bool Camera2Preview::captureRaw(const QString &rawPath,
         return false;
     }
 
-    QDir().mkpath(QFileInfo(rawPath).absolutePath());
-    QDir().mkpath(QFileInfo(metadataPath).absolutePath());
+    if (!prepareCaptureFolders({rawPath, metadataPath})) return false;
     QFile::remove(rawPath);
     QFile::remove(metadataPath);
 
@@ -1164,11 +1297,13 @@ bool Camera2Preview::startRawFrameSet(const QByteArray &command,
         setErrorString(QStringLiteral("Camera2 RAW capture is already running"));
         return false;
     }
+    QStringList folders;
+    for (int index = 0; index < count; ++index)
+        folders << rawPaths.at(index).toString() << metadataPaths.at(index).toString();
+    if (!prepareCaptureFolders(folders)) return false;
     for (int index = 0; index < count; ++index) {
         const QString rawPath = rawPaths.at(index).toString();
         const QString metadataPath = metadataPaths.at(index).toString();
-        QDir().mkpath(QFileInfo(rawPath).absolutePath());
-        QDir().mkpath(QFileInfo(metadataPath).absolutePath());
         QFile::remove(rawPath);
         QFile::remove(metadataPath);
     }
@@ -1419,7 +1554,10 @@ void Camera2Preview::readErrors()
             if (line.startsWith(QStringLiteral("capture-timing "))) {
                 qDebug().noquote() << line;
             } else if (line.startsWith(QStringLiteral("capture-exposure ")) ||
-                       line.startsWith(QStringLiteral("capture-effective "))) {
+                       line.startsWith(QStringLiteral("capture-effective ")) ||
+                       // Recording reports; failures reach the app as record-status.
+                       line.startsWith(QStringLiteral("record-")) ||
+                       line.startsWith(QStringLiteral("video-stream="))) {
                 qDebug().noquote() << line;
                 appendRawCaptureLog(line);
             } else if (isBenignCamera2HelperWarning(line)) {
@@ -1443,6 +1581,11 @@ void Camera2Preview::processFinished(int, QProcess::ExitStatus)
     }
     m_process->deleteLater();
     m_process = nullptr;
+    finishRecording(false, QStringLiteral("Camera stopped while recording"));
+    if (m_videoReady) {
+        m_videoReady = false;
+        emit videoReadyChanged();
+    }
     if (m_running) {
         m_running = false;
         emit runningChanged();
@@ -1608,6 +1751,11 @@ void Camera2Preview::startPreview()
     m_statsTimer.invalidate();
     m_statsFrames = 0;
     m_statsParseNs = 0;
+    const bool videoMode = m_videoSize.isValid() && !m_videoSize.isEmpty();
+    if (m_videoReady) {
+        m_videoReady = false;
+        emit videoReadyChanged();
+    }
     m_process = new QProcess(this);
     m_process->setProgram(program);
     QStringList arguments;
@@ -1615,17 +1763,26 @@ void Camera2Preview::startPreview()
               << QStringLiteral("--camera") << m_cameraId
               << QStringLiteral("--size")
               << QStringLiteral("%1x%2").arg(m_previewSize.width()).arg(m_previewSize.height())
-              << QStringLiteral("--frames") << QStringLiteral("10000")
-              << QStringLiteral("--timeout") << QStringLiteral("3600")
+              // A recording keeps the viewfinder for hours, beyond 10000 frames.
+              << QStringLiteral("--frames") << QLatin1String(videoMode ? "100000000" : "10000")
+              << QStringLiteral("--timeout") << QLatin1String(videoMode ? "86400" : "3600")
               << QStringLiteral("--zoom") << QString::number(m_zoom, 'f', 4)
               // I420 frames: half the bytes of RGB, converted on the GPU.
               << QStringLiteral("--preview-format") << QStringLiteral("yuv");
-    if (m_jpegCaptureEnabled) {
+    if (videoMode) {
+        arguments << QStringLiteral("--video-size")
+                  << QStringLiteral("%1x%2").arg(m_videoSize.width()).arg(m_videoSize.height())
+                  << QStringLiteral("--video-fps") << QString::number(m_videoFrameRate)
+                  << QStringLiteral("--video-bitrate") << QString::number(m_videoBitrate)
+                  << QStringLiteral("--stabilization")
+                  << QLatin1String(m_videoStabilization ? "on" : "off")
+                  << QStringLiteral("--codec") << m_videoCodec;
+    } else if (m_jpegCaptureEnabled) {
         arguments << QStringLiteral("--jpeg-size") << m_captureSize
                   << QStringLiteral("--quality") << QString::number(m_jpegQuality)
                   << QStringLiteral("--orientation") << QStringLiteral("0");
     }
-    if (m_rawCaptureEnabled) {
+    if (m_rawCaptureEnabled && !videoMode) {
         arguments << QStringLiteral("--raw-size") << rawCaptureSize()
                   << QStringLiteral("--raw-format") << m_rawCaptureFormat;
     }
@@ -1668,6 +1825,20 @@ void Camera2Preview::stop()
     QProcess *process = m_process;
     m_process = nullptr;
     process->disconnect(this);
+    if (m_recording && process->state() != QProcess::NotRunning) {
+        // quit makes the helper finish the file (its index is written last);
+        // killing it would leave an unplayable one.
+        process->write(m_recordingStopTimer.isActive() ? "quit\n" : "record-stop\nquit\n");
+        const bool finished = process->waitForFinished(4000);
+        const QString path = m_recordingPath;
+        finishRecording(finished && process->exitStatus() == QProcess::NormalExit
+                            && QFileInfo(path).size() > 0,
+                        finished ? QString() : QStringLiteral("Recording did not finish"));
+    }
+    if (m_videoReady) {
+        m_videoReady = false;
+        emit videoReadyChanged();
+    }
     if (process->state() != QProcess::NotRunning) {
         process->terminate();
         if (!process->waitForFinished(500)) {
@@ -2157,6 +2328,22 @@ void Camera2Preview::parseMetadata(const QByteArray &payload)
     if (parsedFields.contains(QStringLiteral("capture-status"))) {
         parseCaptureResult(parsedFields);
     }
+    if (parsedFields.contains(QStringLiteral("video-stream"))) {
+        const bool ready = parsedFields.value(QStringLiteral("video-stream")) == QLatin1String("1");
+        qDebug() << "video-stream" << QString::fromLatin1(payload).trimmed();
+        if (m_videoReady != ready) {
+            m_videoReady = ready;
+            emit videoReadyChanged();
+        }
+        if (!ready) {
+            appendRawCaptureLog(QStringLiteral("video-stream unavailable camera=%1 error=%2")
+                                .arg(m_cameraId, parsedFields.value(QStringLiteral("error"))));
+            emit videoStreamUnavailable(parsedFields.value(QStringLiteral("error")));
+        }
+    }
+    if (parsedFields.contains(QStringLiteral("record-status"))) {
+        parseRecordStatus(payload, parsedFields);
+    }
 }
 
 void Camera2Preview::parseCaptureResult(const QMap<QString, QString> &fields)
@@ -2173,6 +2360,12 @@ void Camera2Preview::parseCaptureResult(const QMap<QString, QString> &fields)
     const bool rawBracketCapture = m_pendingRawBracketCapture;
     const QString rawPath = m_pendingCaptureFinalPath;
     m_lastCaptureResultFields = fields;
+    if (status != QLatin1String("ok")) {
+        QStringList details;
+        for (auto it = fields.constBegin(); it != fields.constEnd(); ++it)
+            details.append(it.key() + QLatin1Char('=') + it.value());
+        appendRawCaptureLog(QStringLiteral("capture-result ") + details.join(QLatin1Char(' ')));
+    }
 
     if (rawBracketCapture) {
         const int metadataIndex = m_pendingRawBracketMetadataPaths.indexOf(path);

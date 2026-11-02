@@ -558,7 +558,44 @@ static void append_video_capabilities(struct json_writer *writer,
             first = false;
         }
     }
-    json_appendf(writer, "]}");
+    /* Stabilization: electronic (video_stabilization: 0 off, 1 on, 2 preview
+     * stabilization, Android 13+) and optical (0 off, 1 on), and whether
+     * requests may set them. */
+    static const char *const video_modes[] = { "off", "on", "preview" };
+    json_appendf(writer, "],\"video_stabilization_modes\":[");
+    if (ACameraMetadata_getConstEntry(
+            metadata, ACAMERA_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
+            &entry) == ACAMERA_OK) {
+        for (uint32_t index = 0; index < entry.count; ++index) {
+            const uint8_t mode = entry.data.u8[index];
+            if (mode < 3) {
+                json_appendf(writer, "%s\"%s\"", index ? "," : "", video_modes[mode]);
+            } else {
+                json_appendf(writer, "%s%u", index ? "," : "", (unsigned int)mode);
+            }
+        }
+    }
+    json_appendf(writer, "],\"video_stabilization_settable\":%s",
+                 sfos_camera2_metadata_has_i32(
+                     metadata, ACAMERA_REQUEST_AVAILABLE_REQUEST_KEYS,
+                     ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE) ? "true" : "false");
+    json_appendf(writer, ",\"optical_stabilization_modes\":[");
+    if (ACameraMetadata_getConstEntry(
+            metadata, ACAMERA_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION,
+            &entry) == ACAMERA_OK) {
+        for (uint32_t index = 0; index < entry.count; ++index) {
+            const uint8_t mode = entry.data.u8[index];
+            if (mode < 2) {
+                json_appendf(writer, "%s\"%s\"", index ? "," : "", mode ? "on" : "off");
+            } else {
+                json_appendf(writer, "%s%u", index ? "," : "", (unsigned int)mode);
+            }
+        }
+    }
+    json_appendf(writer, "],\"optical_stabilization_settable\":%s}",
+                 sfos_camera2_metadata_has_i32(
+                     metadata, ACAMERA_REQUEST_AVAILABLE_REQUEST_KEYS,
+                     ACAMERA_LENS_OPTICAL_STABILIZATION_MODE) ? "true" : "false");
 }
 
 /**
@@ -566,7 +603,7 @@ static void append_video_capabilities(struct json_writer *writer,
  */
 const char *sfos_camera2_bridge_version(void)
 {
-    return "0.10.1";
+    return "0.14.0";
 }
 
 /**

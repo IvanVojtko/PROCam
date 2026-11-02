@@ -26,7 +26,7 @@ SettingsOverlay {
     property var camera
     property Item focusArea
     readonly property real camera2MaximumZoom: Settings.camera2MaximumZoom()
-    currentZoom: captureView._camera2ViewfinderActive ? captureView.camera2Zoom : camera.digitalZoom
+    currentZoom: captureView._camera2PreviewActive ? captureView.camera2Zoom : camera.digitalZoom
     maximumZoom: zoomController.limit
     zoomButtonsEnabled: zoomController.allowed && maximumZoom > 1
     onZoomPressed: zoomController.press(direction)
@@ -43,7 +43,7 @@ SettingsOverlay {
     ZoomController {
         id: zoomController
         zoom: settingsOverlay.currentZoom
-        maximumZoom: captureView._camera2ViewfinderActive
+        maximumZoom: captureView._camera2PreviewActive
                      ? settingsOverlay.camera2MaximumZoom : camera.maximumDigitalZoom
         allowed: Settings.global.advancedMode && Settings.global.captureMode === "image"
                  && captureView.effectiveActive && !captureView.captureBusy
@@ -51,7 +51,7 @@ SettingsOverlay {
                  && !settingsOverlay._pinchActive
                  && !settingsOverlay.orientationTransitionRunning
         onZoomRequested: {
-            if (captureView._camera2ViewfinderActive) {
+            if (captureView._camera2PreviewActive) {
                 captureView.camera2Zoom = value
             } else {
                 camera.digitalZoom = value
@@ -62,7 +62,9 @@ SettingsOverlay {
 
     property int _recordingDuration: clock.enabled ? ((clock.time - _startTime) / 1000) : 0
     property int _recSecsRemaining: {
-        var totalBitRate = (camera.videoRecorder.videoBitRate + camera.videoRecorder.audioBitRate) * 1.05
+        var totalBitRate = (captureView._camera2VideoActive
+                            ? captureView.camera2Viewfinder.videoBitrate + 128000
+                            : camera.videoRecorder.videoBitRate + camera.videoRecorder.audioBitRate) * 1.05
         var maxDuration = Settings.storageMaxFileSize * 8 / totalBitRate
         return maxDuration - _recordingDuration
     }
@@ -236,14 +238,14 @@ SettingsOverlay {
         zoomController.cancel()
         // We're not getting notifications when the maximumDigitalZoom changes,
         // so update the value here.
-        zoomIndicator.maximumZoom = captureView._camera2ViewfinderActive
+        zoomIndicator.maximumZoom = captureView._camera2PreviewActive
                 ? camera2MaximumZoom : camera.maximumDigitalZoom
     }
 
     onPinchUpdated: {
-        var maximumZoom = captureView._camera2ViewfinderActive
+        var maximumZoom = captureView._camera2PreviewActive
                 ? camera2MaximumZoom : camera.maximumDigitalZoom
-        var currentZoom = captureView._camera2ViewfinderActive
+        var currentZoom = captureView._camera2PreviewActive
                 ? captureView.camera2Zoom : camera.digitalZoom
         var nextZoom = Math.max(1, Math.min(
                     currentZoom + ((maximumZoom - 1)
@@ -519,6 +521,7 @@ SettingsOverlay {
 
         updateFrequency: WallClock.Second
         enabled: camera.videoRecorder.recorderState == CameraRecorder.RecordingState
+                 || captureView._camera2Recording
         onEnabledChanged: {
             if (enabled) {
                 _startTime = clock.time
@@ -526,7 +529,7 @@ SettingsOverlay {
         }
         onTimeChanged: {
             if (enabled && _recSecsRemaining <= 0 && camera) {
-                camera.videoRecorder.stop()
+                captureView.stopVideoRecording()
             }
         }
     }
@@ -720,9 +723,9 @@ SettingsOverlay {
             horizontalCenter: parent.horizontalCenter
         }
 
-        zoom: captureView._camera2ViewfinderActive
+        zoom: captureView._camera2PreviewActive
               ? captureView.camera2Zoom : camera.digitalZoom
-        maximumZoom: captureView._camera2ViewfinderActive
+        maximumZoom: captureView._camera2PreviewActive
                      ? settingsOverlay.camera2MaximumZoom
                      : camera.maximumDigitalZoom
     }

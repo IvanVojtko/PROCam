@@ -199,7 +199,8 @@ assert(read('src/camera2preview.cpp').includes('frames received)'));
   // 16:9 from the per-camera aspect ratio, cropped by the renderer and shown by the viewfinder.
   assert(settings.includes('aspectRatio === CameraConfigs.AspectRatio_16_9 ? "16:9" : "4:3"'));
   assert(source.includes('metadata.photo_aspect = Settings.photoAspect'));
-  assert(read('camera.qml').includes('photoAspect: Settings.photoAspect'));
+  // Photo mode uses the photo aspect; video recorded from the viewfinder is 16:9.
+  assert(read('camera.qml').includes('photoAspect: videoMode ? "16:9" : Settings.photoAspect'));
   assert(read('src/rawpipeline.cpp').includes('cropToAspect(image, aspect);'));
   console.log('Night mode, RAW and aspect checks passed.');
 }

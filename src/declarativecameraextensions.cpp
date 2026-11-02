@@ -11,6 +11,7 @@
 #include "rawbracket.h"
 #include "rawpipeline.h"
 #include "rawpipelinemath.h"
+#include "videoencoderlimits.h"
 
 #include <QDir>
 #include <QDateTime>
@@ -1218,6 +1219,84 @@ QSize DeclarativeCameraExtensions::camera2PreferredPreviewSize(const QString &ca
                                 m_camera2PreviewSizes, QSize(1440, 1080));
 }
 
+QSize DeclarativeCameraExtensions::camera2VideoPreviewSize(const QString &cameraId)
+{
+    const QString id = cameraId.isEmpty() ? QStringLiteral("0") : cameraId;
+    if (!loadCamera2Capabilities(id))
+        return QSize();
+    const QJsonObject camera = camera2ProbeCamera(m_camera2ProbeJson, id);
+    if (camera.value(QStringLiteral("status")).toString() != QLatin1String("ok") ||
+            m_camera2SelectedCamera.value(QStringLiteral("id")).toString() != id)
+        return QSize();
+    // 1280x720: the frames cross a pipe while the encoder works; a smaller
+    // 16:9 size if that is missing, never above 1920x1080.
+    QSize best;
+    for (const QString &text : camera2OutputSizes(camera, QStringLiteral("preview_outputs"))) {
+        const QStringList parts = text.split(QLatin1Char('x'));
+        const QSize size(parts.value(0).toInt(), parts.value(1).toInt());
+        if (size.width() <= 0 || size.width() * 9 != size.height() * 16 || size.width() > 1920)
+            continue;
+        if (size == QSize(1280, 720))
+            return size;
+        const auto distance = [](const QSize &candidate) {
+            return qAbs(candidate.width() - 1280);
+        };
+        if (!best.isValid() || distance(size) < distance(best))
+            best = size;
+    }
+    return best;
+}
+
+// The hardware H.264 encoder's limits, read once. H.264 because the bridge
+// falls back to it when HEVC is missing.
+static const VideoEncoderLimits &hardwareAvcEncoderLimits()
+{
+    static const VideoEncoderLimits limits = []() {
+        VideoEncoderLimits found;
+        const QDir vendor(QStringLiteral("/vendor/etc"));
+        for (const QString &name : vendor.entryList({QStringLiteral("media_codecs*.xml")}, QDir::Files)) {
+            QFile file(vendor.filePath(name));
+            if (file.open(QIODevice::ReadOnly))
+                videoEncoderReadLimits(file.readAll(), QStringLiteral("video/avc"), &found);
+        }
+        qDebug() << "video-encoder avc max" << found.maxSize << "blocks" << found.maxBlocks
+                 << "per second" << found.maxBlocksPerSecond;
+        return found;
+    }();
+    return limits;
+}
+
+QStringList DeclarativeCameraExtensions::camera2VideoResolutions(const QString &cameraId)
+{
+    QStringList resolutions { QStringLiteral("1080p") };
+    const QString id = cameraId.isEmpty() ? QStringLiteral("0") : cameraId;
+    if (!loadCamera2Capabilities(id))
+        return resolutions;
+    const QJsonObject camera = camera2ProbeCamera(m_camera2ProbeJson, id);
+    const QJsonArray rates = camera.value(QStringLiteral("video")).toObject()
+            .value(QStringLiteral("max_fps")).toArray();
+    const VideoEncoderLimits &encoder = hardwareAvcEncoderLimits();
+    const struct { const char *name; QSize size; } larger[] = {
+        { "1440p", QSize(2560, 1440) },
+        { "2160p", QSize(3840, 2160) },
+    };
+    for (const auto &candidate : larger) {
+        if (!encoder.supports(candidate.size, 30))
+            continue;
+        for (const QJsonValue &value : rates) {
+            const QJsonObject rate = value.toObject();
+            if (rate.value(QStringLiteral("format")).toString() == QLatin1String("PRIVATE")
+                    && rate.value(QStringLiteral("width")).toInt() == candidate.size.width()
+                    && rate.value(QStringLiteral("height")).toInt() == candidate.size.height()
+                    && rate.value(QStringLiteral("fps")).toDouble() >= 29.5) {
+                resolutions << QLatin1String(candidate.name);
+                break;
+            }
+        }
+    }
+    return resolutions;
+}
+
 int DeclarativeCameraExtensions::camera2PreviewOrientation(const QString &cameraId,
                                                           int fallback)
 {
@@ -1540,6 +1619,13 @@ QStringList DeclarativeCameraExtensions::camera2BracketModel(
         model.append(QStringLiteral("ev3"));
     }
     return model;
+}
+
+bool DeclarativeCameraExtensions::videoStabilizationConfigured() const
+{
+    QFile file(QStringLiteral("/etc/gst-droid/gstdroidcamsrcquirks.conf"));
+    return file.open(QIODevice::ReadOnly)
+            && file.readAll().contains("prop=video-stabilization");
 }
 
 bool DeclarativeCameraExtensions::camera2BurstSupported(const QString &cameraId)

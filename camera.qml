@@ -83,15 +83,42 @@ ApplicationWindow {
         y: camera2TopStripHeight
         width: window.width
         height: Math.max(1, window.height - camera2TopStripHeight)
-        active: Settings.global.captureMode === "image"
+        // Video mode with the "ProCam video recorder" setting: the encoder
+        // joins this session, at 1080p with a 16:9 viewfinder.
+        readonly property bool videoMode: Settings.global.captureMode === "video"
+                                          && Settings.global.camera2Video
+                                          && videoFailedCameras.indexOf(cameraId) < 0
+        // Cameras that refused the encoder stream this session: their video
+        // is recorded through gst-droid instead.
+        property var videoFailedCameras: []
+
+        onVideoStreamUnavailable: {
+            if (videoFailedCameras.indexOf(cameraId) < 0)
+                videoFailedCameras = videoFailedCameras.concat([cameraId])
+        }
+        active: (Settings.global.captureMode === "image" || videoMode)
                 && !window.camera2CaptureBusy
-                && window._applicationActive
+                // A recording continues in the background (CaptureView stops
+                // it after a minute) instead of losing the file.
+                && (window._applicationActive || recording)
                 && pageStack.depth < 2
                 && !galleryActive
         visible: pageStack.depth < 2 && !galleryActive
                  && (active || window.camera2CaptureBusy)
         cameraId: Settings.deviceId || (Settings.global.position === Camera.FrontFace ? "1" : "0")
-        previewSize: Settings.camera2PreferredPreviewSize(cameraId)
+        previewSize: videoMode ? Settings.camera2VideoPreviewSize(cameraId)
+                               : Settings.camera2PreferredPreviewSize(cameraId)
+        readonly property string videoResolution:
+            Settings.camera2VideoResolutions(cameraId).indexOf(Settings.global.camera2VideoResolution) >= 0
+            ? Settings.global.camera2VideoResolution : "1080p"
+        videoSize: videoMode ? Settings.camera2VideoSize(videoResolution) : Qt.size(0, 0)
+        videoStabilization: Settings.global.videoStabilization
+        videoCodec: Settings.global.camera2VideoCodec
+        // HEVC needs about 30% fewer bits for the same picture; larger
+        // frames need fewer bits per pixel (Android's camera profiles alike).
+        videoBitrate: (videoResolution === "2160p" ? 48000000
+                       : videoResolution === "1440p" ? 32000000 : 20000000)
+                      * (videoCodec === "hevc" ? 0.7 : 1)
         // HDR merges RAW16 bursts whatever the capture format; JPEG mode then
         // streams RAW instead of JPEG.
         readonly property bool hdrCapture: Settings.global.hdrBurst || Settings.nightMode
@@ -121,7 +148,7 @@ ApplicationWindow {
         mirror: Settings.camera2PreviewMirror(cameraId, frontFacing)
         selfieCamera: frontFacing
         fill: Settings.global.viewfinderFill
-        photoAspect: Settings.photoAspect
+        photoAspect: videoMode ? "16:9" : Settings.photoAspect
 
         Behavior on y {
             enabled: !galleryVisible

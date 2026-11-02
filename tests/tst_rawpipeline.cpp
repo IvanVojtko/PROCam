@@ -640,6 +640,44 @@ private slots:
         QVERIFY2(renderImage({paths[0]}, RenderSettings(), &single, &singleInfo, &error), qPrintable(error));
         QCOMPARE(single.size(), QSize(320, 240));
 
+        // A frame still at the preview's exposure (camera applied the burst
+        // exposure late) is dropped; frames matching the request are kept,
+        // and so are all frames when none matches it.
+        auto rewrite = [&](int index, const QString &name, qint64 exposure, qint64 requested) {
+            QFile in(paths[index]);
+            if (!in.open(QIODevice::ReadOnly)) return QString();
+            QJsonObject m = QJsonDocument::fromJson(in.readAll()).object();
+            m.insert("exposure_time_ns", double(exposure));
+            if (requested > 0) {
+                m.insert("exposure_time_requested_ns", double(requested));
+                m.insert("sensor_sensitivity_requested", 400);
+            }
+            QFile out(dir.path() + "/" + name);
+            if (!out.open(QIODevice::WriteOnly)) return QString();
+            out.write(QJsonDocument(m).toJson());
+            return out.fileName();
+        };
+        const qint64 nominal = 10000000, late = 40000000;
+        for (const qint64 requested : {nominal, qint64(0)}) {
+            QStringList burst;
+            for (int i = 0; i < 4; ++i)
+                burst << rewrite(i, QStringLiteral("late%1_%2.json").arg(requested).arg(i),
+                                 i == 1 ? late : nominal + 7000 * i, requested);
+            QImage merged;
+            QJsonObject mergedInfo;
+            QVERIFY2(renderImage(burst, settings, &merged, &mergedInfo, &error), qPrintable(error));
+            QCOMPARE(mergedInfo.value("frames").toInt(), 3);
+            QCOMPARE(mergedInfo.value("exposure_outliers").toInt(), 1);
+        }
+        QStringList ignored;
+        for (int i = 0; i < 3; ++i)
+            ignored << rewrite(i, QStringLiteral("ignored%1.json").arg(i), late, nominal);
+        QImage kept;
+        QJsonObject keptInfo;
+        QVERIFY2(renderImage(ignored, settings, &kept, &keptInfo, &error), qPrintable(error));
+        QCOMPARE(keptInfo.value("frames").toInt(), 3);
+        QVERIFY(!keptInfo.contains("exposure_outliers"));
+
         // Mismatched geometry is rejected without output.
         QFile other(paths[1]);
         QVERIFY(other.open(QIODevice::ReadOnly));

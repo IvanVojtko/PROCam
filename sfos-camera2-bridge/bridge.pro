@@ -17,6 +17,9 @@ OTHER_FILES += \
     android/camera2_common.c \
     android/camera2_common.h \
     android/jpeg_capture.c \
+    android/video_record.c \
+    android/recorder.c \
+    android/recorder.h \
     android/preview.c \
     android/raw_capture.c \
     scripts/build-android.sh \

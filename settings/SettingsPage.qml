@@ -73,6 +73,15 @@ ApplicationSettings {
         onClicked: Settings.global.experimentalExposureLayout = !checked
     }
 
+    IconTextSwitch {
+        automaticCheck: false
+        text: "ProCam video recorder"
+        description: "Record video through ProCam's own camera session: 1080p at 30 fps with electronic stabilization, no system configuration needed. Turn off to record with the system camera service instead, if recording fails."
+        enabled: AccessPolicy.cameraEnabled
+        checked: Settings.global.camera2Video
+        onClicked: Settings.global.camera2Video = !checked
+    }
+
     LocationSettings { id: locationSettings }
 
     DisabledByMdmBanner {

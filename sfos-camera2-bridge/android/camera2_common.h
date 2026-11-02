@@ -280,6 +280,15 @@ bool sfos_camera2_set_zoom_ratio(const ACameraMetadata *metadata,
                                  ACaptureRequest *request,
                                  float zoom_ratio);
 
+/**
+ * @brief Video AE target range for fps: the fixed [fps, fps] range if the
+ * camera lists it, else the widest range ending at fps.
+ *
+ * @return false when no range reaches fps.
+ */
+bool sfos_camera2_video_fps_range(const ACameraMetadata *metadata, int fps,
+                                  int32_t range[2]);
+
 void sfos_camera2_active_physical_id(const ACameraMetadata *metadata, char *out, size_t capacity);
 
 #endif

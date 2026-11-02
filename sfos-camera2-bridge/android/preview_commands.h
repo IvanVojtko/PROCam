@@ -25,6 +25,10 @@ enum preview_command_type {
     PREVIEW_COMMAND_EXPOSURE_SETTINGS,
     PREVIEW_COMMAND_FOCUS_HOLD,
     PREVIEW_COMMAND_FOCUS_HOLD_RELEASE,
+    PREVIEW_COMMAND_RECORD_START,
+    PREVIEW_COMMAND_RECORD_STOP,
+    PREVIEW_COMMAND_RECORD_INVALID,
+    PREVIEW_COMMAND_QUIT,
 };
 
 struct preview_command {
@@ -42,6 +46,7 @@ struct preview_command {
     int64_t exposure_time_ns;
     int aperture;
     int noise_reduction;
+    int orientation;
     char path[4096];
     char metadata_path[4096];
     int bracket_count;
@@ -144,6 +149,47 @@ static bool preview_parse_capture_command(const char *line, struct preview_comma
         command->bracket_count = (int)count;
         command->type = PREVIEW_COMMAND_CAPTURE_RAW_BRACKET;
     }
+    return true;
+}
+
+// Video recording: "record-start <orientation> <path>" (the path is the rest
+// of the line and may contain spaces), "record-stop", and "quit", which ends
+// the preview and finishes a recording on the way out. Returns true for
+// these, including a malformed record-start (RECORD_INVALID, answered so the
+// host doesn't wait for a recording that never starts).
+static bool preview_parse_record_command(const char *line, struct preview_command *command)
+{
+    const char *start = line;
+    while (*start == ' ' || *start == '\t' || *start == '\r') ++start;
+    size_t length = strlen(start);
+    while (length && (start[length - 1] == '\r' || start[length - 1] == ' ' ||
+                      start[length - 1] == '\t')) --length;
+    if (length == 4 && !strncmp(start, "quit", 4)) {
+        command->type = PREVIEW_COMMAND_QUIT;
+        return true;
+    }
+    if (length == 11 && !strncmp(start, "record-stop", 11)) {
+        command->type = PREVIEW_COMMAND_RECORD_STOP;
+        return true;
+    }
+    if (strncmp(start, "record-start", 12) || (length > 12 && start[12] != ' ')) return false;
+    command->type = PREVIEW_COMMAND_RECORD_INVALID;
+    const char *cursor = start + 12;
+    while (*cursor == ' ') ++cursor;
+    int orientation = 0, digits = 0;
+    while (*cursor >= '0' && *cursor <= '9' && digits < 4) {
+        orientation = orientation * 10 + (*cursor++ - '0');
+        ++digits;
+    }
+    if (!digits || orientation > 359 || *cursor != ' ') return true;
+    while (*cursor == ' ') ++cursor;
+    const size_t path_length = length - (size_t)(cursor - start);
+    if ((size_t)(cursor - start) >= length || *cursor != '/' ||
+            path_length >= sizeof(command->path)) return true;
+    memcpy(command->path, cursor, path_length);
+    command->path[path_length] = '\0';
+    command->orientation = orientation;
+    command->type = PREVIEW_COMMAND_RECORD_START;
     return true;
 }
 #endif

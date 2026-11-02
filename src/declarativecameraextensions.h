@@ -50,6 +50,11 @@ public:
                                                 const QString &rawFormat);
     Q_INVOKABLE QStringList camera2JpegSizeModel(const QString &cameraId);
     Q_INVOKABLE QSize camera2PreferredPreviewSize(const QString &cameraId);
+    // A 16:9 viewfinder for video recorded from the Camera2 preview.
+    Q_INVOKABLE QSize camera2VideoPreviewSize(const QString &cameraId);
+    // Video sizes ("1080p", "1440p", "2160p") that both the camera (at
+    // 30 fps) and the hardware H.264 encoder take; 1080p at least.
+    Q_INVOKABLE QStringList camera2VideoResolutions(const QString &cameraId);
     Q_INVOKABLE int camera2PreviewOrientation(const QString &cameraId, int fallback);
     Q_INVOKABLE QVariantMap camera2SimpleModeOverrides(const QString &cameraId);
     Q_INVOKABLE bool camera2PreviewMirror(const QString &cameraId, bool fallback);
@@ -78,6 +83,9 @@ public:
     // Adds a line to Pictures/ProCam/procam-capture.log (capture diagnostics
     // from QML: refused or stalled shutter presses).
     Q_INVOKABLE void logCaptureEvent(const QString &message);
+    // True when gst-droid's quirk file turns on Android video stabilization
+    // (/etc/gst-droid/gstdroidcamsrcquirks.conf, see README).
+    Q_INVOKABLE bool videoStabilizationConfigured() const;
     // night: night mode (long frames held still, see RawPipeline::planBurst).
     // scene: Camera2Preview::sceneInfo() (motion, faces) or empty.
     Q_INVOKABLE QVariantMap camera2BurstPlan(const QString &cameraId,
