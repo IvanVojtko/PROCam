@@ -488,7 +488,7 @@ int main(int argc, char **argv)
         return 13;
     }
 
-    char json[65536] = {0};
+    char json[131072] = {0};
     int result;
 
     if (argc == 1) {

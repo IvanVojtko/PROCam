@@ -15,15 +15,20 @@ Column {
     // Video records through Qt Multimedia: its own front/rear ids, no ultra-wide.
     property bool qtCamera: false
     onQtCameraChanged: refresh()
-    property var roles: ({ "front": "", "main": "", "ultrawide": "" })
+    property var roles: ({ "front": "", "main": "", "ultrawide": "", "tele": "", "teleZoom": 0 })
     readonly property bool frontActive: roles.front !== "" && Settings.deviceId === roles.front
     readonly property bool ultraWideActive: roles.ultrawide !== "" && Settings.deviceId === roles.ultrawide
+    readonly property bool teleActive: !!roles.tele && Settings.deviceId === roles.tele
+    readonly property int buttonCount: (roles.front !== "" ? 1 : 0)
+                                       + (roles.ultrawide !== "" && !frontActive ? 1 : 0)
+                                       + (!!roles.tele && !frontActive ? 1 : 0)
     // Space the stacked buttons may take; they shrink to fit.
     property real availableWidth: Theme.itemSizeSmall
     property real availableHeight: 2 * Theme.itemSizeSmall + spacing
     readonly property real buttonSize: Math.max(Theme.itemSizeExtraSmall * 0.75,
                                                  Math.min(Theme.itemSizeSmall, availableWidth,
-                                                          (availableHeight - spacing) / 2))
+                                                          (availableHeight - spacing * (Math.max(2, buttonCount) - 1))
+                                                          / Math.max(2, buttonCount)))
 
     signal switched()
 
@@ -32,7 +37,7 @@ Column {
             var back = Settings.global.previousBackFacingDeviceId
             roles = { "front": Settings.global.frontFacingDeviceId,
                       "main": back && back !== Settings.global.frontFacingDeviceId ? back : "",
-                      "ultrawide": "" }
+                      "ultrawide": "", "tele": "", "teleZoom": 0 }
         } else {
             roles = Settings.camera2CameraRoles()
         }
@@ -116,6 +121,35 @@ Column {
     }
 
     // Front / rear flip.
+    // Telephoto, labelled with its magnification ("2×"); tapping it again
+    // returns to the main camera.
+    MouseArea {
+        id: teleButton
+
+        width: root.buttonSize
+        height: root.buttonSize
+        visible: !!root.roles.tele && !root.frontActive
+        onClicked: root.select(root.teleActive ? root.roles.main : root.roles.tele)
+
+        Rectangle {
+            anchors.fill: parent
+            radius: width / 2
+            color: root.teleActive ? Theme.rgba(Theme.highlightBackgroundColor, 0.6)
+                                   : Theme.rgba("black", teleButton.pressed ? 0.6 : 0.4)
+        }
+
+        Label {
+            anchors.centerIn: parent
+            text: {
+                var zoom = Math.round((root.roles.teleZoom || 2) * 10) / 10
+                return (zoom % 1 === 0 ? zoom.toFixed(0) : zoom.toFixed(1)) + "×"
+            }
+            font.pixelSize: Theme.fontSizeSmall
+            font.bold: root.teleActive
+            color: teleButton.pressed && !root.teleActive ? Theme.highlightColor : Theme.lightPrimaryColor
+        }
+    }
+
     MouseArea {
         id: flipButton
 

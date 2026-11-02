@@ -117,6 +117,13 @@ merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
 %{_sysconfdir}/dconf/db/vendor.d/00-procam.txt
 
 %changelog
+* Mon Nov 02 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.3-1
+- HDR and night bursts on phones whose camera leaves exposure keys out of its
+  result key list (Xperia 10 III): bursts no longer require them.
+- A telephoto button next to the ultra-wide one on phones with a telephoto
+  camera.
+- The camera probe lists video frame rates (normal ranges, fastest rate per
+  size, high-speed modes); the log says why bursts are unavailable.
 * Sun Nov 01 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.2-1
 - Installs side by side with RAWfish: own QML module (com.procam.camera) and
   Camera2 bridge library (libprocamcamera2.so); the conflict is gone.

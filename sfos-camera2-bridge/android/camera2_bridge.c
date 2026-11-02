@@ -492,12 +492,81 @@ static void append_sensor_modes(struct json_writer *writer,
     json_appendf(writer, "}");
 }
 
+/* Not in the NDK headers (Java-only features); the NDK may also filter
+ * them out of the metadata, so absence here is not proof the HAL lacks
+ * them. */
+#define SFOS_CAPABILITY_CONSTRAINED_HIGH_SPEED_VIDEO 9
+#define SFOS_CONTROL_AVAILABLE_HIGH_SPEED_VIDEO_CONFIGURATIONS (ACAMERA_CONTROL_START + 35)
+
+/* Video frame rates: the AE target ranges a normal session accepts, the
+ * constrained high-speed modes (120/240 fps; Java-only sessions on most
+ * releases), and the fastest frame rate of each video-sized output in a
+ * normal session (from its minimum frame duration). */
+static void append_video_capabilities(struct json_writer *writer,
+                                      const ACameraMetadata *metadata)
+{
+    ACameraMetadata_const_entry entry;
+    json_appendf(writer, "{\"constrained_high_speed\":%s",
+                 sfos_camera2_metadata_has_u8(
+                     metadata, ACAMERA_REQUEST_AVAILABLE_CAPABILITIES,
+                     SFOS_CAPABILITY_CONSTRAINED_HIGH_SPEED_VIDEO)
+                     ? "true" : "false");
+    json_appendf(writer, ",\"ae_target_fps_ranges\":[");
+    if (ACameraMetadata_getConstEntry(
+            metadata, ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, &entry) == ACAMERA_OK) {
+        for (uint32_t index = 0; index + 1 < entry.count; index += 2) {
+            json_appendf(writer, "%s[%d,%d]", index ? "," : "",
+                         entry.data.i32[index], entry.data.i32[index + 1]);
+        }
+    }
+    json_appendf(writer, "],\"high_speed_configurations\":[");
+    if (ACameraMetadata_getConstEntry(
+            metadata, SFOS_CONTROL_AVAILABLE_HIGH_SPEED_VIDEO_CONFIGURATIONS,
+            &entry) == ACAMERA_OK) {
+        /* width, height, fps min, fps max, max batch size */
+        for (uint32_t index = 0; index + 4 < entry.count; index += 5) {
+            json_appendf(writer,
+                         "%s{\"width\":%d,\"height\":%d,\"fps_min\":%d,"
+                         "\"fps_max\":%d,\"batch\":%d}",
+                         index ? "," : "",
+                         entry.data.i32[index], entry.data.i32[index + 1],
+                         entry.data.i32[index + 2], entry.data.i32[index + 3],
+                         entry.data.i32[index + 4]);
+        }
+    }
+    json_appendf(writer, "],\"max_fps\":[");
+    bool first = true;
+    if (ACameraMetadata_getConstEntry(
+            metadata, ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, &entry) == ACAMERA_OK) {
+        /* format, width, height, minimum frame duration (ns); YUV and
+         * PRIVATE (encoder / display surfaces), 720p and larger. */
+        for (uint32_t index = 0; index + 3 < entry.count; index += 4) {
+            const int64_t format = entry.data.i64[index];
+            const int64_t width = entry.data.i64[index + 1];
+            const int64_t height = entry.data.i64[index + 2];
+            const int64_t duration = entry.data.i64[index + 3];
+            if ((format != AIMAGE_FORMAT_YUV_420_888 && format != 0x22) ||
+                    width * height < 1280 * 720 || duration <= 0) {
+                continue;
+            }
+            json_appendf(writer,
+                         "%s{\"format\":\"%s\",\"width\":%lld,\"height\":%lld,"
+                         "\"fps\":%.1f}",
+                         first ? "" : ",",
+                         format == 0x22 ? "PRIVATE" : "YUV_420_888",
+                         (long long)width, (long long)height, 1e9 / (double)duration);
+            first = false;
+        }
+    }
+    json_appendf(writer, "]}");
+}
+
 /**
  * @brief Return the bridge ABI version string exported to Sailfish.
  */
 const char *sfos_camera2_bridge_version(void)
 {
-    return "0.10.0";
+    return "0.10.1";
 }
 
 /**
@@ -599,6 +668,8 @@ int sfos_camera2_probe(char *out, size_t out_size)
         append_outputs(&writer, metadata, AIMAGE_FORMAT_YUV_420_888);
         json_appendf(&writer, ",\"sensor_modes\":");
         append_sensor_modes(&writer, metadata);
+        json_appendf(&writer, ",\"video\":");
+        append_video_capabilities(&writer, metadata);
         json_appendf(&writer, "}");
 
         ACameraMetadata_free(metadata);

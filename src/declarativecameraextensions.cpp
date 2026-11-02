@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHash>
 #include <QImage>
 #include <QImageReader>
 #include <QImageWriter>
@@ -1285,6 +1286,8 @@ QVariantMap DeclarativeCameraExtensions::camera2CameraRoles()
     roles.insert(QStringLiteral("front"), QString());
     roles.insert(QStringLiteral("main"), QString());
     roles.insert(QStringLiteral("ultrawide"), QString());
+    roles.insert(QStringLiteral("tele"), QString());
+    roles.insert(QStringLiteral("teleZoom"), 0.0);
     if (m_camera2ProbeJson.isEmpty() && !loadCamera2Capabilities(QString()))
         return roles;
 
@@ -1348,6 +1351,25 @@ QVariantMap DeclarativeCameraExtensions::camera2CameraRoles()
     }
     if (wide)
         roles.insert(QStringLiteral("ultrawide"), wide->id);
+    // Telephoto (e.g. the Xperia 10 III's 2x): the narrowest other back
+    // camera, clearly narrower than the main one; teleZoom is its
+    // magnification relative to the main camera.
+    const Lens *tele = nullptr;
+    auto zoomOf = [&](const Lens &lens) {
+        return main->fov() > 0 && lens.fov() > 0
+                ? std::tan(main->fov() / 2) / std::tan(lens.fov() / 2)
+                : lens.focal > 0 && main->focal > 0 ? lens.focal / main->focal : 0.0;
+    };
+    for (const Lens &lens : back) {
+        if (lens.id == main->id || (wide && lens.id == wide->id) || zoomOf(lens) < 1.3)
+            continue;
+        if (!tele || zoomOf(lens) > zoomOf(*tele))
+            tele = &lens;
+    }
+    if (tele) {
+        roles.insert(QStringLiteral("tele"), tele->id);
+        roles.insert(QStringLiteral("teleZoom"), zoomOf(*tele));
+    }
     return roles;
 }
 
@@ -1522,10 +1544,26 @@ QStringList DeclarativeCameraExtensions::camera2BracketModel(
 
 bool DeclarativeCameraExtensions::camera2BurstSupported(const QString &cameraId)
 {
-    return loadCamera2Capabilities(cameraId) && m_camera2ManualBracketingSupported
-            && cameraExposureObject(m_camera2SelectedCamera).value(QStringLiteral("manual_supported")).toBool()
-            && cameraExposureObject(m_camera2SelectedCamera).value(QStringLiteral("result_exposure_supported")).toBool()
-            && !camera2BurstRawSize(cameraId, QString()).isEmpty();
+    if (!loadCamera2Capabilities(cameraId)) return false;
+    const QJsonObject exposure = cameraExposureObject(m_camera2SelectedCamera);
+    const bool manual = exposure.value(QStringLiteral("manual_supported")).toBool();
+    const bool results = exposure.value(QStringLiteral("result_exposure_supported")).toBool();
+    const bool size = !camera2BurstRawSize(cameraId, QString()).isEmpty();
+    // Exposure results are not required: burst frames record the ISO and
+    // shutter they asked for, and the shutter press already refuses a burst
+    // while the preview has no exposure reading. The Xperia 10 III leaves
+    // some exposure keys out of its result key list, yet reports them.
+    const bool supported = m_camera2ManualBracketingSupported && manual && size;
+    // Bindings call this often: log each camera's answer once, so a phone
+    // that falls back to single frames says which capability is missing.
+    static QHash<QString, bool> logged;
+    if (!logged.contains(cameraId) || logged.value(cameraId) != supported) {
+        logged.insert(cameraId, supported);
+        appendRawCaptureLog(QStringLiteral("burst-support camera=%1 supported=%2 bracketing=%3 manual=%4 results=%5 burst_size=%6")
+                            .arg(cameraId).arg(int(supported)).arg(int(m_camera2ManualBracketingSupported))
+                            .arg(int(manual)).arg(int(results)).arg(int(size)));
+    }
+    return supported;
 }
 
 QString DeclarativeCameraExtensions::camera2BurstFormat(const QString &cameraId)

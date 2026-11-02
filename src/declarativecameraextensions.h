@@ -58,7 +58,8 @@ public:
     Q_INVOKABLE QString camera2LensLabel(const QString &cameraId);
     // "front", "back", "external" or "unknown" (older bridge / HAL).
     Q_INVOKABLE QString camera2LensFacing(const QString &cameraId);
-    // Camera2 ids by role: {front, main, ultrawide}; "" where there is none.
+    // Camera2 ids by role: {front, main, ultrawide, tele}; "" where there is
+    // none. teleZoom: the telephoto's magnification over the main camera.
     Q_INVOKABLE QVariantMap camera2CameraRoles();
     // Burst input for HDR: "raw16", "yuv" (cameras without RAW) or "".
     Q_INVOKABLE QString camera2BurstFormat(const QString &cameraId);
@@ -69,7 +70,7 @@ public:
     Q_INVOKABLE QStringList camera2BracketModel(const QString &cameraId);
     // Burst exposure plan for the metered exposure; keys frames, shutterNs,
     // iso, targetGain, underexposureEv (empty map when unsupported).
-    // HDR burst needs manual exposure, exposure results and RAW16.
+    // HDR burst needs manual ISO and shutter and a RAW16 burst size.
     Q_INVOKABLE bool camera2BurstSupported(const QString &cameraId);
     // RAW16 size for the burst stream: `preferred` if it can stream next to
     // the preview, else the largest such size (empty if none).

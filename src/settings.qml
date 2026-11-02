@@ -603,7 +603,7 @@ SettingsBase {
         return model.length > 0 ? model : [ deviceId ]
     }
 
-    // Camera2 ids by role ({front, main, ultrawide}, "" where missing), with
+    // Camera2 ids by role ({front, main, ultrawide, tele}, "" where missing), with
     // Qt Multimedia's front camera as the fallback for bridges that do not
     // report lens facing.
     function camera2CameraRoles() {
