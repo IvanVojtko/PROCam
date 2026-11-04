@@ -29,6 +29,7 @@ enum preview_command_type {
     PREVIEW_COMMAND_RECORD_STOP,
     PREVIEW_COMMAND_RECORD_INVALID,
     PREVIEW_COMMAND_QUIT,
+    PREVIEW_COMMAND_RESUME,
 };
 
 struct preview_command {
@@ -166,6 +167,10 @@ static bool preview_parse_record_command(const char *line, struct preview_comman
                       start[length - 1] == '\t')) --length;
     if (length == 4 && !strncmp(start, "quit", 4)) {
         command->type = PREVIEW_COMMAND_QUIT;
+        return true;
+    }
+    if (length == 6 && !strncmp(start, "resume", 6)) {
+        command->type = PREVIEW_COMMAND_RESUME;
         return true;
     }
     if (length == 11 && !strncmp(start, "record-stop", 11)) {

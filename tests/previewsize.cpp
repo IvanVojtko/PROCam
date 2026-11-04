@@ -34,4 +34,10 @@ int main()
     assert(preferredPreviewSize(jp2, jp2, larger) == larger);
     assert(preferredPreviewSize(existing, existing, larger) == larger);
     assert(preferredPreviewSize({"1280x960", "640x480"}, {"1280x960", "640x480"}, larger) == QSize(1280, 960));
+    // The large viewfinder (1920x1440, offered by all three JP2 cameras),
+    // and the nearest 4:3 size up to it where it is missing.
+    const QSize large(1920, 1440);
+    assert(preferredPreviewSize(jp2, jp2, large) == large);
+    const QStringList noLarge = {"2560x1920", "1600x1200", "1440x1080", "1280x720"};
+    assert(preferredPreviewSize(noLarge, noLarge, large) == QSize(1600, 1200));
 }

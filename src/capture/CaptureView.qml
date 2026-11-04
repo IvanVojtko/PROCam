@@ -225,6 +225,8 @@ FocusScope {
     // A night burst is being exposed: the photo needs the phone held still.
     readonly property bool nightCaptureRunning: captureBusy && !!_camera2BurstPlan
                                                 && _camera2BurstPlan.night === true
+    // From the first frame's exposure to the last (when the shutter sounds).
+    property bool _camera2Exposing
     // JPEG mode shoots RAW16 and renders it (Settings.camera2JpegFromRaw).
     readonly property bool _camera2JpegFromRaw: _camera2ViewfinderActive
                                                 && Settings.camera2JpegFromRaw(Settings.deviceId)
@@ -428,9 +430,19 @@ FocusScope {
         _camera2FeedbackGiven = true
         shutterEvent.play()
         flashAnimation.start()
-        if (camera2Viewfinder && typeof camera2Viewfinder.saveThumbnail === "function") {
-            var thumbnail = camera2Viewfinder.saveThumbnail(_camera2CaptureRotation())
-            if (thumbnail) pendingThumbnail = thumbnail
+        // The thumbnail (a JPEG encode on this thread) after the flash's
+        // first frames, not before them.
+        camera2ThumbnailTimer.restart()
+    }
+
+    Timer {
+        id: camera2ThumbnailTimer
+        interval: 50
+        onTriggered: {
+            if (camera2Viewfinder && typeof camera2Viewfinder.saveThumbnail === "function") {
+                var thumbnail = camera2Viewfinder.saveThumbnail(captureView._camera2CaptureRotation())
+                if (thumbnail) captureView.pendingThumbnail = thumbnail
+            }
         }
     }
 
@@ -1124,6 +1136,7 @@ FocusScope {
             if (!bracketActive) {
                 captureView._camera2CaptureFeedback()
                 captureView._camera2FeedbackGiven = false
+                captureView._camera2Exposing = false
             }
             captureView._camera2CaptureRunning = false
             captureView._camera2LiveJpegCaptureRunning = false
@@ -1198,6 +1211,7 @@ FocusScope {
         function _completeQueuedCamera2Capture() {
             captureView._camera2BracketMerging = false
             captureView._camera2FeedbackGiven = false
+            captureView._camera2Exposing = false
             captureView._camera2CaptureRunning = false
             captureView._camera2LiveJpegCaptureRunning = false
             captureView._camera2CapturePending = false
@@ -1221,6 +1235,7 @@ FocusScope {
             }
             captureView._camera2BracketMerging = false
             captureView._camera2FeedbackGiven = false
+            captureView._camera2Exposing = false
             extensions.discardRawBracket()
             console.warn("Camera2 image capture failed:", error)
             extensions.logCaptureEvent("capture failed camera=" + captureView._camera2ResolvedCameraId + " " + error)
@@ -1892,6 +1907,9 @@ FocusScope {
         id: extensions
 
         keepBurstFrames: Settings.global.keepBurstFrames
+        // Selfies saved as the mirrored viewfinder shows them.
+        captureMirror: Settings.global.mirrorSelfies && captureView.camera2Viewfinder !== null
+                       && captureView.camera2Viewfinder.selfieCamera
 
         onRawBracketFrameReady: {
             if (captureView._camera2BracketQueue.length < 2) return
@@ -1931,13 +1949,23 @@ FocusScope {
             camera2CaptureErrorNotification.publishMessage(error)
             captureView._clearPendingThumbnailIfIdle()
         }
+
+        // Its photos now come from YUV frames: the session and the menus
+        // follow once the bindings on its capabilities are read again.
+        onCamera2RawDamaged: Settings.camera2RawRevision++
     }
 
     Connections {
         target: captureView.camera2Viewfinder
         ignoreUnknownSignals: true
 
-        onCaptureExposed: captureView._camera2CaptureFeedback()
+        // The shutter sounds once the last frame is exposed, so the phone
+        // is not moved before; "Hold still" covers a long burst until then.
+        onCaptureStarted: captureView._camera2Exposing = true
+        onCaptureExposed: {
+            captureView._camera2Exposing = false
+            captureView._camera2CaptureFeedback()
+        }
 
         onImageCaptured: {
             camera._finishCamera2ImageCapture(path, mimeType)

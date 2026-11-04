@@ -140,7 +140,9 @@ assert(read('src/camera2preview.cpp').includes('frames received)'));
   const overlay=read('src/settings/SettingsOverlay.qml'), capture=read('src/capture/CaptureOverlay.qml');
   const preview=read('src/camera2preview.cpp'), exposure=read('src/capture/ExposureController.qml');
   assert(preview.includes('QString Camera2Preview::saveThumbnail(int captureRotation)'));
-  assert(source.includes('camera2Viewfinder.saveThumbnail(_camera2CaptureRotation())'));
+  // Made just after the shutter flash starts, not before it.
+  assert(source.includes('camera2Viewfinder.saveThumbnail(captureView._camera2CaptureRotation())'));
+  assert(source.includes('camera2ThumbnailTimer.restart()'));
   assert(overlay.includes('pendingSource: captureView ? captureView.pendingThumbnail : ""'));
   assert(exposure.includes('+ tapEv'));
   assert(capture.includes('captureView.setTapExposure('));
@@ -223,7 +225,9 @@ assert(read('src/camera2preview.cpp').includes('frames received)'));
   assert(bridge.includes("unsigned char header[16] = { 'S', 'F', '2', 'Y' };"));
   assert(bridge.includes('context.preview_yuv = (raw_format & SFOS_CAMERA2_PREVIEW_YUV_FRAMES) != 0;'));
   assert(read('sfos-camera2-bridge/sailfish/main.c').includes('raw_format | (preview_yuv ? SFOS_CAMERA2_PREVIEW_YUV_FRAMES : 0)'));
-  assert(read('src/declarativecameraextensions.cpp').includes('m_camera2PreviewSizes, QSize(1440, 1080));'));
+  // 1920x1440 viewfinder, 1440x1080 for a camera that refused RAW next to it.
+  assert(read('src/declarativecameraextensions.cpp').includes('large ? QSize(1920, 1440) : QSize(1440, 1080));'));
+  assert(read('camera.qml').includes('cameraId, largePreviewRefused.indexOf(cameraId) < 0)'));
   assert(node.includes('case 90: return QPointF(v, 1.0 - u);'));
   assert(read('src/src.pro').includes('previewnode.cpp'));
   console.log('Viewfinder rendering checks passed.');

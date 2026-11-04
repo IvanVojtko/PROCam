@@ -113,6 +113,9 @@ enum sfos_camera2_raw_format {
  * Half the bytes and no per-pixel conversion; the app converts on the GPU.
  */
 #define SFOS_CAMERA2_PREVIEW_YUV_FRAMES 0x100
+/* OR'd into the same argument: the camera runs, but no preview frames go
+ * out until a "resume" command (an early start the app adopts later). */
+#define SFOS_CAMERA2_PREVIEW_START_PAUSED 0x200
 
 /**
  * @brief Options for RAW capture.

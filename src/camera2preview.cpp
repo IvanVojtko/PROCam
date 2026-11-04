@@ -7,6 +7,8 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDir>
+#include <QGuiApplication>
+#include <QSaveFile>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageWriter>
@@ -20,6 +22,7 @@
 #include <QSGTexture>
 #include <QUrl>
 #include <cstring>
+#include <unistd.h>
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTransform>
@@ -33,6 +36,22 @@
 #include <thread>
 
 static QRectF photoAspectRect(const QSizeF &size, const QString &aspect);
+
+// Milliseconds since this process started (from /proc), for start-up timing.
+qint64 procamMsSinceProcessStart()
+{
+    QFile stat(QStringLiteral("/proc/self/stat")), uptime(QStringLiteral("/proc/uptime"));
+    if (!stat.open(QIODevice::ReadOnly) || !uptime.open(QIODevice::ReadOnly))
+        return -1;
+    const QByteArray line = stat.readAll();
+    // Field 22 (start time in clock ticks); fields after the ")" of the name.
+    const QList<QByteArray> fields = line.mid(line.lastIndexOf(')') + 2).split(' ');
+    if (fields.size() < 20)
+        return -1;
+    const double startSeconds = fields.at(19).toDouble() / double(sysconf(_SC_CLK_TCK));
+    const double upSeconds = uptime.readAll().split(' ').value(0).toDouble();
+    return qint64((upSeconds - startSeconds) * 1000.0);
+}
 
 namespace {
 
@@ -93,12 +112,12 @@ QSize sizeFromString(const QString &value)
     return widthOk && heightOk ? QSize(width, height) : QSize();
 }
 
-bool rewriteJpegPixels(const QString &path, int rotationDegrees, qreal exposure,
+bool rewriteJpegPixels(const QString &path, int rotationDegrees, bool mirror, qreal exposure,
                        int colorTemperature, int colorTint, int quality,
                        QString *error)
 {
     const int rotation = ((rotationDegrees % 360) + 360) % 360;
-    if (rotation == 0 &&
+    if (rotation == 0 && !mirror &&
             !ImageAdjustments::requested(exposure, colorTemperature, colorTint)) {
         return true;
     }
@@ -112,6 +131,10 @@ bool rewriteJpegPixels(const QString &path, int rotationDegrees, qreal exposure,
     }
     if (rotation != 0) {
         image = image.transformed(QTransform().rotate(rotation));
+    }
+    // A selfie kept as the viewfinder showed it: flipped once upright.
+    if (mirror) {
+        image = image.mirrored(true, false);
     }
     ImageAdjustments::apply(&image, exposure, colorTemperature, colorTint);
 
@@ -275,6 +298,8 @@ QString Camera2Preview::saveThumbnail(int captureRotation)
     // The frame is in sensor orientation and unmirrored, like the photo
     // before its rotation; turn it upright the same way.
     QImage image = rgbFrame().transformed(QTransform().rotate(captureRotation));
+    if (m_captureMirror)
+        image = image.mirrored(true, false);
     image = image.copy(photoAspectRect(image.size(), m_photoAspect).toRect());
     const qreal zoom = qMax<qreal>(1.0, m_zoom);
     if (zoom > 1.01) {
@@ -508,7 +533,8 @@ void Camera2Preview::setJpegOrientation(int jpegOrientation)
     }
     m_jpegOrientation = orientation;
     emit jpegOrientationChanged();
-    restart();
+    // Applied when the photo is saved; the helper always gets 0, so turning
+    // the phone needs no camera restart.
 }
 
 QVariant Camera2Preview::source() const
@@ -1170,6 +1196,7 @@ bool Camera2Preview::captureRaw(const QString &rawPath,
     QFile::remove(metadataPath);
 
     m_previewCaptureRunning = true;
+    m_captureClock.start();
     m_pendingCapturePath = metadataPath;
     m_pendingCaptureFinalPath = rawPath;
     m_pendingRawCapture = true;
@@ -1309,6 +1336,7 @@ bool Camera2Preview::startRawFrameSet(const QByteArray &command,
     }
 
     m_previewCaptureRunning = true;
+    m_captureClock.start();
     m_pendingRawCapture = true;
     m_pendingRawBracketCapture = true;
     m_pendingRawBracketCount = count;
@@ -1557,6 +1585,7 @@ void Camera2Preview::readErrors()
                        line.startsWith(QStringLiteral("capture-effective ")) ||
                        // Recording reports; failures reach the app as record-status.
                        line.startsWith(QStringLiteral("record-")) ||
+                       line.startsWith(QStringLiteral("timing ")) ||
                        line.startsWith(QStringLiteral("video-stream="))) {
                 qDebug().noquote() << line;
                 appendRawCaptureLog(line);
@@ -1791,6 +1820,35 @@ void Camera2Preview::startPreview()
                   << QStringLiteral("--focus-y") << QString::number(m_focusY, 'f', 4);
     }
     m_process->setArguments(arguments);
+    // The helper camera.cpp launched (paused) at process start with the last
+    // run's arguments: the same ones now, so it is adopted with its camera
+    // already open. Any other arguments: it goes, before this one starts.
+    bool adopted = false;
+    if (QProcess *early = qobject_cast<QProcess *>(
+                qApp->property("procamPreviewPrelaunch").value<QObject *>())) {
+        qApp->setProperty("procamPreviewPrelaunch", QVariant());
+        if (early->state() != QProcess::NotRunning && early->program() == program
+                && early->arguments() == QStringList(arguments) << QStringLiteral("--start-paused")) {
+            delete m_process;
+            m_process = early;
+            m_process->setParent(this);
+            adopted = true;
+        } else {
+            early->kill();
+            early->waitForFinished(1000);
+            early->deleteLater();
+        }
+    }
+    {
+        // For the next launch's early start.
+        QSaveFile launch(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                         + QStringLiteral("/preview-launch.args"));
+        if (QDir().mkpath(QFileInfo(launch.fileName()).absolutePath())
+                && launch.open(QIODevice::WriteOnly)) {
+            launch.write((QStringList(program) + arguments).join(QLatin1Char('\n')).toUtf8());
+            launch.commit();
+        }
+    }
     connect(m_process, &QProcess::readyReadStandardOutput,
             this, &Camera2Preview::readFrames);
     connect(m_process, &QProcess::readyReadStandardError,
@@ -1799,8 +1857,21 @@ void Camera2Preview::startPreview()
             static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
             this, &Camera2Preview::processFinished);
     m_rawStreamActive = false;
-    m_process->start();
-    if (m_process->waitForStarted(1000)) {
+    m_firstFrameLogged = false;
+    m_helperClock.start();
+    appendRawCaptureLog(QStringLiteral("timing preview-start camera=%1 since_app_start_ms=%2")
+                        .arg(m_cameraId).arg(procamMsSinceProcessStart()));
+    if (adopted) {
+        m_process->write("resume\n");
+        appendRawCaptureLog(QStringLiteral("timing preview-adopted camera=%1 since_app_start_ms=%2")
+                            .arg(m_cameraId).arg(procamMsSinceProcessStart()));
+        // Status messages it sent while waiting (streams, video stream).
+        QTimer::singleShot(0, this, &Camera2Preview::readFrames);
+        QTimer::singleShot(0, this, &Camera2Preview::readErrors);
+    } else {
+        m_process->start();
+    }
+    if (adopted || m_process->waitForStarted(1000)) {
         m_running = true;
         emit runningChanged();
         emit jpegCaptureReadyChanged();
@@ -2075,6 +2146,12 @@ void Camera2Preview::parseFrames()
         if (frameSize() != previous || wasPlaceholder) {
             emit contentRectChanged();
         }
+        if (!m_firstFrameLogged && m_helperClock.isValid()) {
+            m_firstFrameLogged = true;
+            appendRawCaptureLog(QStringLiteral("timing first-frame camera=%1 since_preview_start_ms=%2 since_app_start_ms=%3")
+                                .arg(m_cameraId).arg(m_helperClock.elapsed())
+                                .arg(procamMsSinceProcessStart()));
+        }
         ++m_statsFrames;
         m_statsParseNs += parseTimer.nsecsElapsed();
         if (!m_statsTimer.isValid()) {
@@ -2328,6 +2405,20 @@ void Camera2Preview::parseMetadata(const QByteArray &payload)
     if (parsedFields.contains(QStringLiteral("capture-status"))) {
         parseCaptureResult(parsedFields);
     }
+    if (parsedFields.contains(QStringLiteral("capture-started"))
+            && (m_pendingRawCapture || m_pendingRawBracketCapture)) {
+        appendRawCaptureLog(QStringLiteral("timing capture-started since_command_ms=%1")
+                            .arg(m_captureClock.isValid() ? m_captureClock.elapsed() : -1));
+        emit captureStarted();
+    }
+    // The last RAW frame of a capture is exposed; its files come later.
+    if (parsedFields.contains(QStringLiteral("capture-exposed"))
+            && (m_pendingRawCapture || m_pendingRawBracketCapture)) {
+        appendRawCaptureLog(QStringLiteral("timing capture-exposed frames=%1 since_command_ms=%2")
+                            .arg(parsedFields.value(QStringLiteral("frames")))
+                            .arg(m_captureClock.isValid() ? m_captureClock.elapsed() : -1));
+        emit captureExposed();
+    }
     if (parsedFields.contains(QStringLiteral("video-stream"))) {
         const bool ready = parsedFields.value(QStringLiteral("video-stream")) == QLatin1String("1");
         qDebug() << "video-stream" << QString::fromLatin1(payload).trimmed();
@@ -2433,6 +2524,9 @@ void Camera2Preview::parseCaptureResult(const QMap<QString, QString> &fields)
         m_pendingCaptureStablePolls = 0;
         m_previewCaptureRunning = false;
         restorePreviewSettingsAfterCapture();
+        appendRawCaptureLog(QStringLiteral("timing capture-files frames=%1 since_command_ms=%2")
+                            .arg(rawPaths.size())
+                            .arg(m_captureClock.isValid() ? m_captureClock.elapsed() : -1));
         emit rawBracketReady(rawPaths, metadataPaths);
         return;
     }
@@ -2477,6 +2571,7 @@ void Camera2Preview::finishJpegCapture(const QString &path)
     emit captureExposed();
     m_originalJpegExif = ExifUtils::originalJpegExif(path);
     const int orientation = m_jpegOrientation, quality = m_jpegQuality;
+    const bool mirror = m_captureMirror;
     const qreal exposure = m_renderExposure;
     const int temperature = m_colorTemperature, tint = m_colorTint;
     const QString size = m_captureSize;
@@ -2496,7 +2591,7 @@ void Camera2Preview::finishJpegCapture(const QString &path)
     });
     watcher->setFuture(QtConcurrent::run([=]() {
         QString error;
-        if (!rewriteJpegPixels(path, orientation, exposure, temperature, tint, quality, &error))
+        if (!rewriteJpegPixels(path, orientation, mirror, exposure, temperature, tint, quality, &error))
             return error.isEmpty() ? QStringLiteral("Could not rewrite Camera2 JPEG") : error;
         return QString();
     }));

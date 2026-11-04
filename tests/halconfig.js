@@ -13,7 +13,7 @@ assert(page.includes('signal showViewfinder'));
 assert(page.includes('signal showFrontViewfinder'));
 const app = read('camera.qml');
 assert.equal((app.match(/ensureCamera2GeneratedHalConfig/g)||[]).length, 1);
-assert(app.includes('Component.onCompleted: Settings.camera2Capabilities.ensureCamera2GeneratedHalConfig'));
+assert(/Component\.onCompleted: \{[^}]*Settings\.camera2Capabilities\.ensureCamera2GeneratedHalConfig/.test(app));
 const cpp = read('src/declarativecameraextensions.cpp');
 const ensure = cpp.split('QString DeclarativeCameraExtensions::ensureCamera2GeneratedHalConfig(')[1]
  .split('bool DeclarativeCameraExtensions::loadCamera2Capabilities')[0];
@@ -21,8 +21,13 @@ const exists = 'QFileInfo::exists(path) || QFileInfo(path).isSymLink()';
 assert.equal(ensure.split(exists).length-1, 2);
 assert(ensure.indexOf(exists)<ensure.indexOf('QDir().mkpath'));
 assert(ensure.indexOf('lock.tryLock(0)')<ensure.lastIndexOf(exists));
-assert(ensure.lastIndexOf(exists)<ensure.indexOf('QProcess probe'));
-assert(ensure.indexOf('m_camera2ProbeJson')<ensure.indexOf('probe.start'));
+// The probe runs once per process (and is kept on disk) in camera2Probe().
+assert(ensure.lastIndexOf(exists)<ensure.indexOf('camera2Probe()'));
+assert(ensure.indexOf('m_camera2ProbeJson')<ensure.indexOf('camera2Probe()'));
+assert(!ensure.includes('QProcess probe'));
+const probe = cpp.split('static const Camera2ProbeResult &camera2Probe()')[1].split('static QString rawFastJpegConverterPath')[0];
+assert(probe.includes('camera2ProbeFingerprint()') && probe.includes('QSaveFile save(cachePath)'));
+assert(probe.includes('camera2ProbeUsable(result.json)'));
 assert(ensure.includes('if (!validProbe(document))'));
 assert(ensure.includes('camera.value(QStringLiteral("status")).toString() == QLatin1String("ok")'));
 assert(ensure.includes('appendRawCaptureLog(message)'));

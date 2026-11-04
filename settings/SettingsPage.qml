@@ -9,12 +9,62 @@ import com.procam.camera 1.0
 import Nemo.Configuration 1.0
 import org.nemomobile.systemsettings 1.0
 import Sailfish.Silica 1.0
+import Sailfish.Pickers 1.0
 import Sailfish.Policy 1.0
 import com.jolla.settings 1.0
 import com.jolla.settings.system 1.0
 
 ApplicationSettings {
+    id: settingsPage
+
     CameraExtensions { id: camera2Compatibility }
+
+    // A picked folder was outside what ProCam's sandbox can write to.
+    property bool folderRefused
+
+    // "Pictures/Trips" for a folder in the home directory, "Memory card/DCIM"
+    // for one on a card (mounted at /run/media/<user>/<card>).
+    function folderName(path) {
+        var home = StandardPaths.home
+        if (path.indexOf(home + "/") === 0)
+            return path.substring(home.length + 1)
+        var card = path.match(/^\/run\/media\/[^\/]+\/[^\/]+(\/.*)?$/)
+        if (card)
+            return "Memory card" + (card[1] ? card[1] : "")
+        return path
+    }
+
+    function folderDescription(custom, available, used) {
+        if (custom !== "" && !available)
+            return "The selected folder is not available. Saving to " + folderName(used) + " instead."
+        return "Saving to " + folderName(used)
+    }
+
+    function pickFolder(videos) {
+        folderRefused = false
+        pageStack.animatorPush(folderPickerPage, { videos: videos })
+    }
+
+    Component {
+        id: folderPickerPage
+
+        FolderPickerPage {
+            property bool videos
+
+            dialogTitle: videos ? "Save videos here" : "Save photos here"
+            onSelectedPathChanged: {
+                if (selectedPath === "")
+                    return
+                if (!Settings.folderAllowed(selectedPath)) {
+                    settingsPage.folderRefused = true
+                } else if (videos) {
+                    Settings.customVideoDirectory = selectedPath
+                } else {
+                    Settings.customPhotoDirectory = selectedPath
+                }
+            }
+        }
+    }
 
     function aspectRatioName(aspectRatio) {
         if (aspectRatio === CameraConfigs.AspectRatio_16_9) {
@@ -243,6 +293,54 @@ ApplicationSettings {
         x: Theme.horizontalPageMargin
         width: parent.width - x*2
         color: Theme.secondaryColor
+        font.pixelSize: Theme.fontSizeExtraSmall
+        wrapMode: Text.Wrap
+    }
+
+    ComboBox {
+        label: "Photos folder"
+        value: Settings.customPhotoDirectory !== "" ? folderName(Settings.customPhotoDirectory) : "Default"
+        description: folderDescription(Settings.customPhotoDirectory,
+                                       Settings.customPhotoDirectoryAvailable, Settings.photoDirectory)
+        enabled: AccessPolicy.cameraEnabled
+        currentIndex: Settings.customPhotoDirectory !== "" ? 1 : 0
+        menu: ContextMenu {
+            MenuItem {
+                text: "Default"
+                onClicked: Settings.customPhotoDirectory = ""
+            }
+            MenuItem {
+                text: "Choose folder..."
+                onClicked: pickFolder(false)
+            }
+        }
+    }
+
+    ComboBox {
+        label: "Videos folder"
+        value: Settings.customVideoDirectory !== "" ? folderName(Settings.customVideoDirectory) : "Default"
+        description: folderDescription(Settings.customVideoDirectory,
+                                       Settings.customVideoDirectoryAvailable, Settings.videoDirectory)
+        enabled: AccessPolicy.cameraEnabled
+        currentIndex: Settings.customVideoDirectory !== "" ? 1 : 0
+        menu: ContextMenu {
+            MenuItem {
+                text: "Default"
+                onClicked: Settings.customVideoDirectory = ""
+            }
+            MenuItem {
+                text: "Choose folder..."
+                onClicked: pickFolder(true)
+            }
+        }
+    }
+
+    Label {
+        text: "ProCam can save only in Pictures, Videos or on a memory card. Choose a folder there; create new folders with the File Browser."
+        visible: folderRefused
+        x: Theme.horizontalPageMargin
+        width: parent.width - x*2
+        color: Theme.highlightColor
         font.pixelSize: Theme.fontSizeExtraSmall
         wrapMode: Text.Wrap
     }

@@ -74,5 +74,17 @@ CameraPage {
             page.returnToCaptureMode()
             window.activate()
         }
+
+        // Developer smoke test (tools/device-smoke-test.sh): the shutter
+        // button, only while the script has enabled it and the viewfinder is
+        // on screen, so no photo is ever taken unseen.
+        function capture() {
+            if (!Settings.global.smokeTestCapture || Qt.application.state !== Qt.ApplicationActive
+                    || !page.captureModeActive) {
+                return false
+            }
+            page.triggerCapture()
+            return true
+        }
     }
 }

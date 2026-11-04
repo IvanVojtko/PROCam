@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 RAWfish Contributors
 // SPDX-License-Identifier: BSD-3-Clause
 #include "rawpipeline.h"
+#include "rawframecheck.h"
 #include "rawpipelinemath.h"
 #include "raisr.h"
 #include "dnglensshading.h"
@@ -374,17 +375,33 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             return renderYuvImage(metadataPaths, settings, image, info);
         QElapsedTimer timer;
         timer.start();
-        int count = metadataPaths.size();
         std::vector<std::unique_ptr<BayerFrame>> frames;
         std::vector<QJsonObject> metadata;
+        // Partly written frames are left out (rawframecheck.h); if none is
+        // left, the camera's RAW output is unusable and the caller is told.
+        int damagedFrames = 0;
+        QString damage;
         for (const QString &path : metadataPaths) {
             frames.emplace_back(new BayerFrame);
-            metadata.push_back(loadFrame(path, frames.back().get()));
-            const BayerFrame &f = *frames.back(), &first = *frames.front();
+            const QJsonObject m = loadFrame(path, frames.back().get());
+            const BayerFrame &f = *frames.back();
+            const QString why = rawFrameDamage(f.pixels.data(), f.width, f.height, f.black.data());
+            if (!why.isEmpty()) {
+                qWarning() << "rawpipeline damaged frame" << path << why;
+                damage = why;
+                ++damagedFrames;
+                frames.pop_back();
+                continue;
+            }
+            metadata.push_back(m);
+            const BayerFrame &first = *frames.front();
             if (f.width != first.width || f.height != first.height || f.cfa != first.cfa
                     || metadata.back().value(QStringLiteral("camera_id")) != metadata.front().value(QStringLiteral("camera_id")))
                 throw std::runtime_error("Burst frames differ in camera or geometry");
         }
+        if (frames.empty())
+            throw std::runtime_error(rawFramesDamagedError(damage).toStdString());
+        int count = int(frames.size());
         const qint64 loadMs = timer.restart();
 
         // Exposure of each frame (time x gain); bursts are nominally equal.
@@ -582,6 +599,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             QJsonObject p;
             p.insert(QStringLiteral("frames"), count);
             if (exposureOutliers) p.insert(QStringLiteral("exposure_outliers"), exposureOutliers);
+            if (damagedFrames) p.insert(QStringLiteral("damaged_frames"), damagedFrames);
             p.insert(QStringLiteral("reference_frame"), reference);
             p.insert(QStringLiteral("noise_model_source"), noiseSource);
             QJsonArray scale, offset;
@@ -628,7 +646,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             p.insert(QStringLiteral("threads"), int(std::thread::hardware_concurrency()));
             *info = p;
         }
-        qDebug() << "rawpipeline frames" << count << "outliers" << exposureOutliers << "reference" << reference << "noise" << noiseSource
+        qDebug() << "rawpipeline frames" << count << "outliers" << exposureOutliers << "damaged" << damagedFrames << "reference" << reference << "noise" << noiseSource
                  << "rejection" << mergeStats.rejection << "gains" << finishStats.shortGain << finishStats.longGain
                  << "ms load" << loadMs << "align" << alignMs << "merge" << mergeMs << "finish" << finishMs;
         return true;
@@ -658,6 +676,16 @@ void cropToAspect(QImage *image, const QString &aspect)
 
 } // namespace
 
+QString rawFramesDamagedError(const QString &detail)
+{
+    return QStringLiteral("RAW frames from this camera are damaged (%1)").arg(detail);
+}
+
+bool isRawFramesDamagedError(const QString &error)
+{
+    return error.startsWith(QLatin1String("RAW frames from this camera are damaged"));
+}
+
 bool renderImage(const QStringList &metadataPaths, const RenderSettings &settings, QImage *image,
                  QJsonObject *info, QString *error)
 {
@@ -686,6 +714,8 @@ bool renderBurst(const QString &target, const QStringList &metadataPaths, int qu
     if (!renderImage(metadataPaths, settings, &image, &info, error)) return false;
     const int rotation = m.value(QStringLiteral("bracket_rotation")).toInt();
     if (rotation) image = image.transformed(QTransform().rotate(rotation));
+    // A selfie kept as the viewfinder showed it.
+    if (m.value(QStringLiteral("bracket_mirror")).toBool()) image = image.mirrored(true, false);
     ImageAdjustments::apply(&image, 1.0, m.value(QStringLiteral("color_temperature_requested_kelvin")).toInt(),
                             m.value(QStringLiteral("color_tint_requested")).toInt());
 

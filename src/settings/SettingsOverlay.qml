@@ -923,6 +923,26 @@ PinchArea {
                 }
             }
 
+            // Selfies saved mirrored, as the viewfinder shows them (lit), or
+            // as others see the scene. Front camera only.
+            FloatingChip {
+                height: parent.height
+                visible: !camera2BottomDeck.video && captureView._camera2ViewfinderActive
+                         && captureView.camera2Viewfinder !== null
+                         && captureView.camera2Viewfinder.selfieCamera
+                checked: Settings.global.mirrorSelfies
+                menuDots: false
+                onClicked: Settings.global.mirrorSelfies = !Settings.global.mirrorSelfies
+
+                Image {
+                    anchors.centerIn: parent
+                    width: Theme.iconSizeSmallPlus
+                    height: width
+                    sourceSize: Qt.size(width, height)
+                    source: "../capture/mirror.svg"
+                }
+            }
+
             FloatingChip {
                 height: parent.height
                 visible: floatingTopBar.burstAvailable && !camera2BottomDeck.video

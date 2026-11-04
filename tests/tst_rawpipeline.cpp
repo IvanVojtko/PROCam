@@ -8,6 +8,7 @@
 #include <thread>
 #include "../src/rawpipelinemath.h"
 #include "../src/rawpipeline.h"
+#include "../src/rawframecheck.h"
 #include "../src/raisr.h"
 #include <QFile>
 #include <QJsonArray>
@@ -634,6 +635,39 @@ private slots:
         QCOMPARE(info.value("noise_model_source").toString(), QStringLiteral("profile"));
         QVERIFY(!m.contains("raw_path"));
 
+        // "Mirror selfies": bracket_mirror flips the upright photo
+        // left-right and changes nothing else.
+        {
+            QStringList mirrored;
+            for (int i = 0; i < paths.size(); ++i) {
+                QFile in(paths[i]);
+                QVERIFY(in.open(QIODevice::ReadOnly));
+                QJsonObject frame = QJsonDocument::fromJson(in.readAll()).object();
+                frame.insert("bracket_mirror", true);
+                QFile out(dir.path() + QStringLiteral("/mirror%1.json").arg(i));
+                QVERIFY(out.open(QIODevice::WriteOnly));
+                out.write(QJsonDocument(frame).toJson());
+                mirrored << out.fileName();
+            }
+            const QString mirrorTarget = dir.path() + QStringLiteral("/merged-mirror.jpg");
+            QVERIFY2(renderBurst(mirrorTarget, mirrored, 95, settings, &error), qPrintable(error));
+            const QImage flipped = QImage(mirrorTarget).convertToFormat(QImage::Format_RGB888);
+            const QImage normal = image.convertToFormat(QImage::Format_RGB888);
+            QCOMPARE(flipped.size(), normal.size());
+            auto meanDifference = [](const QImage &a, const QImage &b) {
+                double sum = 0;
+                for (int y = 0; y < a.height(); ++y) {
+                    const uchar *pa = a.constScanLine(y), *pb = b.constScanLine(y);
+                    for (int x = 0; x < a.width() * 3; ++x) sum += std::abs(int(pa[x]) - int(pb[x]));
+                }
+                return sum / (a.width() * a.height() * 3.0);
+            };
+            const double asMirror = meanDifference(flipped, normal.mirrored(true, false));
+            const double asNormal = meanDifference(flipped, normal);
+            QVERIFY2(asMirror < 2.0 && asNormal > 4.0 * asMirror,
+                     qPrintable(QStringLiteral("mirror %1 normal %2").arg(asMirror).arg(asNormal)));
+        }
+
         // Single frame through the same entry point.
         QImage single;
         QJsonObject singleInfo;
@@ -690,6 +724,69 @@ private slots:
         badFile.close();
         QVERIFY(!renderBurst(dir.path() + "/bad.jpg", {paths[0], badFile.fileName()}, 90, settings, &error));
         QVERIFY(!QFile::exists(dir.path() + "/bad.jpg"));
+
+        // Partly written frames (the Xperia 10 III's RAW: data in the first
+        // quarter of the buffer, the rest never written) are left out; when
+        // all are, the error says the camera's RAW output is damaged.
+        auto damaged = [&](int index) {
+            QFile in(paths[index]);
+            if (!in.open(QIODevice::ReadOnly)) return QString();
+            QJsonObject m = QJsonDocument::fromJson(in.readAll()).object();
+            QFile source(m.value("raw_path").toString());
+            if (!source.open(QIODevice::ReadOnly)) return QString();
+            QByteArray bytes = source.readAll();
+            const int stride = m.value("row_stride").toInt(), height = m.value("height").toInt();
+            std::fill(bytes.begin() + qint64(stride) * (height / 4), bytes.end(), char(0));
+            QFile raw(dir.path() + QStringLiteral("/damaged%1.raw").arg(index));
+            if (!raw.open(QIODevice::WriteOnly)) return QString();
+            raw.write(bytes);
+            m.insert("raw_path", raw.fileName());
+            QFile out(dir.path() + QStringLiteral("/damaged%1.json").arg(index));
+            if (!out.open(QIODevice::WriteOnly)) return QString();
+            out.write(QJsonDocument(m).toJson());
+            return out.fileName();
+        };
+        QImage partly;
+        QJsonObject partlyInfo;
+        QVERIFY2(renderImage({paths[0], damaged(1), paths[2]}, settings, &partly, &partlyInfo, &error),
+                 qPrintable(error));
+        QCOMPARE(partlyInfo.value("frames").toInt(), 2);
+        QCOMPARE(partlyInfo.value("damaged_frames").toInt(), 1);
+        QVERIFY(!renderBurst(dir.path() + "/damaged.jpg", {damaged(0), damaged(1), damaged(2)}, 90, settings, &error));
+        QVERIFY2(isRawFramesDamagedError(error), qPrintable(error));
+        QVERIFY(!QFile::exists(dir.path() + "/damaged.jpg"));
+        QVERIFY(!renderImage({damaged(0)}, settings, &partly, &partlyInfo, &error));
+        QVERIFY2(isRawFramesDamagedError(error), qPrintable(error));
+    }
+
+    void damagedFrameCheck()
+    {
+        const int width = 64, height = 48;
+        const double black[4] = {64, 64, 64, 64};
+        std::vector<uint16_t> pixels(std::size_t(width) * height);
+        // A dark frame: noise around the black level, some below it.
+        unsigned seed = 1;
+        for (uint16_t &v : pixels) {
+            seed = seed * 1103515245u + 12345u;
+            v = uint16_t(60 + (seed >> 16) % 9);
+        }
+        QVERIFY(rawFrameDamage(pixels.data(), width, height, black).isEmpty());
+        // A few unwritten rows (under an eighth) are tolerated...
+        std::fill(pixels.end() - 5 * width, pixels.end(), uint16_t(0));
+        QVERIFY(rawFrameDamage(pixels.data(), width, height, black).isEmpty());
+        // ...an eighth is not, nor three quarters.
+        std::fill(pixels.end() - 6 * width, pixels.end(), uint16_t(0));
+        QCOMPARE(rawFrameDamage(pixels.data(), width, height, black), QStringLiteral("6 of 48 rows unwritten"));
+        std::fill(pixels.begin() + 12 * width, pixels.end(), uint16_t(0));
+        QVERIFY(!rawFrameDamage(pixels.data(), width, height, black).isEmpty());
+        // A row with one written pixel is written.
+        for (int y = 12; y < height; ++y) pixels[std::size_t(y) * width + width - 1] = 64;
+        QVERIFY(rawFrameDamage(pixels.data(), width, height, black).isEmpty());
+        // A camera reporting black 0 is not judged: its dark rows can be 0.
+        std::fill(pixels.begin(), pixels.end(), uint16_t(0));
+        const double zero[4] = {0, 0, 0, 0};
+        QVERIFY(rawFrameDamage(pixels.data(), width, height, zero).isEmpty());
+        QVERIFY(!rawFrameDamage(pixels.data(), width, height, black).isEmpty());
     }
 
     void renderCapturedFile()

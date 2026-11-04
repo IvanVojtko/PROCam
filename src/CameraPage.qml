@@ -36,6 +36,11 @@ Page {
         switcherView.returnToCaptureMode()
     }
 
+    // The shutter button's action: a photo, or starting/stopping a recording.
+    function triggerCapture() {
+        captureView._triggerCapture()
+    }
+
     palette.colorScheme: Theme.LightOnDark
 
     _opaqueBackground: true

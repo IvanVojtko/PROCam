@@ -9,9 +9,14 @@
 #include <QElapsedTimer>
 #include <QDebug>
 
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QProcess>
 #include <QQmlEngine>
 #include <QQmlContext>
+#include <QStandardPaths>
+#include <QTimer>
 
 static bool cameraStartupLoggingEnabled()
 {
@@ -33,6 +38,37 @@ static bool cameraStartupLoggingEnabled()
 #include <MDeclarativeCache>
 #endif
 
+// Starts the Camera2 preview helper with the last run's arguments, paused,
+// before the interface loads: opening the camera (about 1.4 s) then runs
+// alongside QML instead of after it. Camera2Preview adopts the process when
+// its arguments match; unclaimed, it is stopped after 8 s.
+static void prelaunchPreviewHelper(QGuiApplication *app)
+{
+    if (!qEnvironmentVariableIsEmpty("PROCAM_NO_PRELAUNCH"))
+        return;
+    QFile file(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+               + QStringLiteral("/preview-launch.args"));
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    QStringList arguments = QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'));
+    if (arguments.size() < 2 || arguments.at(1) != QLatin1String("--preview"))
+        return;
+    const QString program = arguments.takeFirst();
+    if (!QFileInfo(program).isExecutable())
+        return;
+    QProcess *helper = new QProcess(app);
+    helper->start(program, arguments << QStringLiteral("--start-paused"));
+    app->setProperty("procamPreviewPrelaunch", QVariant::fromValue<QObject *>(helper));
+    QTimer::singleShot(8000, app, [app, helper]() {
+        if (app->property("procamPreviewPrelaunch").value<QObject *>() != helper)
+            return;
+        app->setProperty("procamPreviewPrelaunch", QVariant());
+        helper->kill();
+        helper->waitForFinished(1000);
+        helper->deleteLater();
+    });
+}
+
 Q_DECL_EXPORT int main(int argc, char *argv[])
 {
     QElapsedTimer startupTimer;
@@ -50,6 +86,7 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
 #endif
     app->setOrganizationName(QStringLiteral("com.procam"));
     app->setApplicationName(QStringLiteral("procam"));
+    prelaunchPreviewHelper(app.data());
 
     QString path(QLatin1String(DEPLOYMENT_PATH));
 

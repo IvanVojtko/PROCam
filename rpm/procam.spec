@@ -61,6 +61,7 @@ Requires:  sailfish-components-gallery-qt5 >= 1.1.10
 Requires:  sailfish-policy >= 0.2.59
 Requires:  jolla-settings-system >= 1.0.70
 Requires:  qml(Nemo.Ngf)
+Requires:  qml(Sailfish.Pickers)
 Requires:  qr-filter-qml-plugin
 Requires:  sailfish-content-graphics >= 1.2.2
 Requires:  gstreamer1.0-plugins-good

@@ -29,6 +29,12 @@ class DeclarativeSettings : public QObject
     Q_PROPERTY(QString storagePath READ storagePath WRITE setStoragePath NOTIFY storagePathChanged)
     Q_PROPERTY(qint64 storageMaxFileSize READ storageMaxFileSize NOTIFY storageMaxFileSizeChanged)
     Q_PROPERTY(StoragePathStatus storagePathStatus READ storagePathStatus NOTIFY storagePathStatusChanged)
+    // Folders the user picked; empty means the default ProCam folder of the
+    // storage above. One that cannot be used falls back to the default.
+    Q_PROPERTY(QString customPhotoDirectory READ customPhotoDirectory WRITE setCustomPhotoDirectory NOTIFY customPhotoDirectoryChanged)
+    Q_PROPERTY(QString customVideoDirectory READ customVideoDirectory WRITE setCustomVideoDirectory NOTIFY customVideoDirectoryChanged)
+    Q_PROPERTY(bool customPhotoDirectoryAvailable READ customPhotoDirectoryAvailable NOTIFY photoDirectoryChanged)
+    Q_PROPERTY(bool customVideoDirectoryAvailable READ customVideoDirectoryAvailable NOTIFY videoDirectoryChanged)
     Q_ENUMS(StoragePathStatus)
 
 public:
@@ -54,6 +60,15 @@ public:
     qint64 storageMaxFileSize() const;
     Q_INVOKABLE void refreshMaxFileSize();
 
+    QString customPhotoDirectory() const;
+    void setCustomPhotoDirectory(const QString &path);
+    QString customVideoDirectory() const;
+    void setCustomVideoDirectory(const QString &path);
+    bool customPhotoDirectoryAvailable() const;
+    bool customVideoDirectoryAvailable() const;
+    // Whether ProCam's sandbox lets it write there (see storagefolders.h).
+    Q_INVOKABLE bool folderAllowed(const QString &path) const;
+
     Q_INVOKABLE QString photoCapturePath(const QString &extension);
     Q_INVOKABLE QString videoCapturePath(const QString &extension);
 
@@ -66,6 +81,8 @@ signals:
     void storagePathChanged();
     void storagePathStatusChanged();
     void storageMaxFileSizeChanged();
+    void customPhotoDirectoryChanged();
+    void customVideoDirectoryChanged();
 
 private slots:
     void verifyStoragePath();
@@ -75,14 +92,20 @@ private:
     bool verifyWritable(const QString &path);
     void verifyCapturePrefix();
     QString capturePath(const QString &format);
+    bool customDirectoryUsable(const QString &path);
+    qint64 maxFileSizeIn(const QString &directory) const;
 
     PartitionManager *m_partitionManager;
     MDConfItem m_storagePath;
     MDConfItem m_minSpaceForRecording;
+    MDConfItem m_customPhotoDirectory;
+    MDConfItem m_customVideoDirectory;
 
     QString m_prefix;
     QString m_photoDirectory;
     QString m_videoDirectory;
+    bool m_customPhotoDirectoryAvailable;
+    bool m_customVideoDirectoryAvailable;
     QDateTime m_prefixDate;
 
     StoragePathStatus m_storagePathStatus;

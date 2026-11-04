@@ -30,6 +30,9 @@ namespace RawPipeline { struct RenderSettings; }
 class DeclarativeCameraExtensions : public QObject
 {
     Q_OBJECT
+    // Photos saved flipped left-right, as the mirrored viewfinder shows
+    // them (front camera with "Mirror selfies").
+    Q_PROPERTY(bool captureMirror MEMBER m_captureMirror NOTIFY captureMirrorChanged)
     Q_PROPERTY(bool rawImageCaptureAvailable READ rawImageCaptureAvailable CONSTANT)
     // Bursts captured but still being merged (queued renders).
     Q_PROPERTY(int pendingRenders READ pendingRenders NOTIFY pendingRendersChanged)
@@ -49,7 +52,10 @@ public:
     Q_INVOKABLE QStringList camera2RawSizeModel(const QString &cameraId,
                                                 const QString &rawFormat);
     Q_INVOKABLE QStringList camera2JpegSizeModel(const QString &cameraId);
-    Q_INVOKABLE QSize camera2PreferredPreviewSize(const QString &cameraId);
+    // 1920x1440 where offered (large), else 1440x1080: the large size is
+    // beyond Camera2's guaranteed PREVIEW next to RAW, so the app asks for
+    // the smaller one once a camera refused RAW with it.
+    Q_INVOKABLE QSize camera2PreferredPreviewSize(const QString &cameraId, bool large = true);
     // A 16:9 viewfinder for video recorded from the Camera2 preview.
     Q_INVOKABLE QSize camera2VideoPreviewSize(const QString &cameraId);
     // Video sizes ("1080p", "1440p", "2160p") that both the camera (at
@@ -83,6 +89,8 @@ public:
     // Adds a line to Pictures/ProCam/procam-capture.log (capture diagnostics
     // from QML: refused or stalled shutter presses).
     Q_INVOKABLE void logCaptureEvent(const QString &message);
+    // "timing <name> since_app_start_ms=N" in the capture log.
+    Q_INVOKABLE void logStartupTiming(const QString &name);
     // True when gst-droid's quirk file turns on Android video stabilization
     // (/etc/gst-droid/gstdroidcamsrcquirks.conf, see README).
     Q_INVOKABLE bool videoStabilizationConfigured() const;
@@ -174,6 +182,7 @@ public:
                                      const QVariantList &sourcePaths,
                                      int jpegQuality, qreal targetGain);
 signals:
+    void captureMirrorChanged();
     void rawBracketFrameReady(const QString &path);
     // The sensor capture of a cold single RAW finished; rendering follows.
     void rawImageExposed();
@@ -182,6 +191,9 @@ signals:
     // Queued burst merges finish after their capture has completed.
     void burstRendered(const QString &path);
     void burstRenderFailed(const QString &error);
+    // The camera's RAW frames were found damaged: it now takes its photos
+    // from YUV frames, so bindings on its capabilities must be re-read.
+    void camera2RawDamaged(const QString &cameraId);
     void pendingRendersChanged();
     void keepBurstFramesChanged();
 
@@ -196,9 +208,11 @@ private:
         int quality = 92;
         RawPipeline::RenderSettings settings;
         QSharedPointer<QTemporaryDir> directory;
+        QElapsedTimer queued; // since its frames were staged
     };
     QList<BurstJob> m_burstJobs; // the first one is rendering while m_burstWatcher is set
     QScopedPointer<QFutureWatcher<QString> > m_burstWatcher;
+    qint64 m_burstRenderStart = 0; // the first job's queued time when it started
     // One background thread for merges, at a lower priority than the UI.
     QThreadPool m_burstPool;
     void startNextBurstRender();
@@ -249,6 +263,10 @@ private:
     bool m_rawCaptureProgressiveJpeg = false;
     int m_rawCaptureJpegQuality = 92;
     int m_rawCaptureRotationDegrees = 0;
+    // The "Mirror selfies" setting for the current camera, and its value
+    // when the running capture started.
+    bool m_captureMirror = false;
+    bool m_rawCaptureMirror = false;
     int m_rawCaptureColorTemperature = 0;
     int m_rawCaptureColorTint = 0;
     int m_bracketIndex = -1;
@@ -283,6 +301,7 @@ private:
     QByteArray m_camera2ProbeErrors;
     QJsonObject m_camera2SelectedCamera;
     qint64 m_camera2OverrideProfileMtime = 0;
+    int m_camera2RawDamageRevision = -1;
 };
 
 #endif

@@ -124,6 +124,7 @@ bool render(const QString &target, const QStringList &paths, int quality, QStrin
         }
         const int rotation=lm["bracket_rotation"].toInt();
         if (rotation) image=image.transformed(QTransform().rotate(rotation));
+        if (lm["bracket_mirror"].toBool()) image=image.mirrored(true,false);
         ImageAdjustments::apply(&image,1.0,lm["color_temperature_requested_kelvin"].toInt(),lm["color_tint_requested"].toInt());
         QJsonArray frames;
         for (QJsonObject m : {lm,sm}) {

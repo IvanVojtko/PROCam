@@ -38,8 +38,8 @@ SOURCES += rawbracket.cpp \
         cameraconfigs.cpp
 
 HEADERS += rawbracket.h rawbracketmath.h \
-        rawpipeline.h rawpipelinemath.h raisr.h \
-        previewsize.h previewaids.h videoencoderlimits.h \
+        rawpipeline.h rawpipelinemath.h rawframecheck.h raisr.h \
+        previewsize.h previewaids.h videoencoderlimits.h storagefolders.h \
         camera2preview.h \
         previewnode.h \
         capturemodel.h \

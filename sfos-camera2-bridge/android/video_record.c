@@ -20,6 +20,7 @@
 #include <camera/NdkCameraMetadataTags.h>
 #include <camera/NdkCaptureRequest.h>
 
+#include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -106,6 +107,42 @@ static void video_sequence_aborted(void *opaque, ACameraCaptureSession *session,
 {
     video_sequence_ended(opaque, session, sequence_id, -1);
 }
+
+/* Diagnostics for vendor video modes (MediaTek high-fps / slow motion):
+ * int32 vendor settings applied as session parameters and on every
+ * request, and a frame rate used even when the standard ranges stop below
+ * it. Set before sfos_camera2_record_video(); reset after it. */
+#define VIDEO_MAX_VENDOR 8
+static int32_t g_vendor_tags[VIDEO_MAX_VENDOR];
+static int32_t g_vendor_values[VIDEO_MAX_VENDOR];
+static int g_vendor_count;
+static int g_force_fps;
+
+SFOS_CAMERA2_EXPORT void sfos_camera2_record_set_vendor(const int32_t *tags,
+                                                        const int32_t *values, int count,
+                                                        int force_fps)
+{
+    g_vendor_count = 0;
+    for (int i = 0; tags && values && i < count && i < VIDEO_MAX_VENDOR; ++i) {
+        g_vendor_tags[i] = tags[i];
+        g_vendor_values[i] = values[i];
+        ++g_vendor_count;
+    }
+    g_force_fps = force_fps;
+}
+
+int sfos_camera2_vendor_video_settings(const int32_t **tags, const int32_t **values,
+                                       bool *force_fps)
+{
+    *tags = g_vendor_tags;
+    *values = g_vendor_values;
+    *force_fps = g_force_fps != 0;
+    return g_vendor_count;
+}
+
+typedef camera_status_t (*create_session_with_parameters_fn)(
+    ACameraDevice *, const ACaptureSessionOutputContainer *, const ACaptureRequest *,
+    const ACameraCaptureSession_stateCallbacks *, ACameraCaptureSession **);
 
 bool sfos_camera2_video_fps_range(const ACameraMetadata *metadata, int fps, int32_t range[2])
 {
@@ -223,9 +260,12 @@ int sfos_camera2_record_video(const char *camera_id, int width, int height,
         goto cleanup;
     }
     if (!sfos_camera2_video_fps_range(characteristics, fps, fps_range)) {
-        result_code = VIDEO_INVALID_ARGUMENT;
-        stage = "fps_range";
-        goto cleanup;
+        if (!g_force_fps) {
+            result_code = VIDEO_INVALID_ARGUMENT;
+            stage = "fps_range";
+            goto cleanup;
+        }
+        fps_range[0] = fps_range[1] = fps;
     }
     stabilization_supported = sfos_camera2_metadata_has_u8(
         characteristics, ACAMERA_CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES,
@@ -274,14 +314,30 @@ int sfos_camera2_record_video(const char *camera_id, int width, int height,
         sfos_camera2_set_request_u8(request, ACAMERA_CONTROL_AF_MODE,
                                     ACAMERA_CONTROL_AF_MODE_CONTINUOUS_VIDEO);
     }
+    for (int i = 0; i < g_vendor_count; ++i) {
+        const camera_status_t set = ACaptureRequest_setEntry_i32(
+            request, (uint32_t)g_vendor_tags[i], 1, &g_vendor_values[i]);
+        fprintf(stderr, "vendor setting 0x%08x=%d status=%d\n", (uint32_t)g_vendor_tags[i],
+                g_vendor_values[i], set);
+    }
     ACameraCaptureSession_stateCallbacks session_callbacks = {
         .context = &context,
         .onClosed = NULL,
         .onReady = NULL,
         .onActive = NULL,
     };
-    camera_status = ACameraDevice_createCaptureSession(device, container, &session_callbacks,
-                                                       &session);
+    create_session_with_parameters_fn create_with_parameters =
+        (create_session_with_parameters_fn)dlsym(
+            RTLD_DEFAULT, "ACameraDevice_createCaptureSessionWithSessionParameters");
+    if (g_vendor_count > 0 && create_with_parameters) {
+        // The request doubles as the session parameters (Android 9+).
+        camera_status = create_with_parameters(device, container, request, &session_callbacks,
+                                               &session);
+        fprintf(stderr, "session with vendor parameters status=%d\n", camera_status);
+    } else {
+        camera_status = ACameraDevice_createCaptureSession(device, container, &session_callbacks,
+                                                           &session);
+    }
     atomic_store(&context.status.last_camera_status, camera_status);
     if (camera_status != ACAMERA_OK || !session) {
         result_code = VIDEO_CONFIGURATION_ERROR;

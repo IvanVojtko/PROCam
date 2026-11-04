@@ -19,6 +19,7 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -137,6 +138,9 @@ struct preview_context {
     int raw_yuv;
     // Preview frames go out as SF2Y (I420) instead of SF2P (RGB888).
     int preview_yuv;
+    // Started early, before the app is ready: frames are dropped until the
+    // app sends "resume".
+    atomic_int paused;
     // Face detection on preview requests (0 when the camera has none), and
     // the last faces sent, so unchanged results are not repeated.
     uint8_t face_detect_mode;
@@ -205,8 +209,24 @@ struct preview_context {
     struct preview_result_raw_metadata raw_bracket_result[PREVIEW_MAX_RAW_BRACKET];
     struct preview_raw_image_metadata raw_image;
     struct preview_raw_image_metadata raw_bracket_image[PREVIEW_MAX_RAW_BRACKET];
+    // The RAW capture generation whose first exposure has been reported.
+    atomic_int capture_started_generation;
     // Video mode: requests use the record template and video autofocus.
     int video;
+    // preview_ppm entry, for the start-up timing lines.
+    int64_t started_ms;
+    // Viewfinder latency, sensor timestamp to the frame written to the
+    // app (image callback thread only), logged every few seconds.
+    int64_t latency_sum_ms;
+    int64_t latency_max_ms;
+    int latency_frames;
+    int64_t latency_logged_ms;
+    // Time spent handing frames to the app (pipe writes), the same period.
+    int64_t write_sum_ms;
+    int64_t write_max_ms;
+    // Noise reduction and edge modes of the latest viewfinder result.
+    atomic_int live_nr_mode;
+    atomic_int live_edge_mode;
     // Sequence id of the latest repeating request, and the newest sequence
     // whose captures have all completed (-1: none yet).
     int repeat_sequence;
@@ -1396,9 +1416,54 @@ static void preview_image_available(void *opaque, AImageReader *reader)
     if (status != AMEDIA_OK || !image) {
         return;
     }
+    if (atomic_load_explicit(&context->paused, memory_order_acquire)) {
+        AImage_delete(image);
+        return;
+    }
+    int64_t sensor_ns = 0;
+    AImage_getTimestamp(image, &sensor_ns);
+    const int64_t write_started_ms = sfos_camera2_now_ms();
     if (preview_write_rgb_frame(context, image) == 0) {
-        atomic_fetch_add_explicit(&context->frames_written, 1,
-                                  memory_order_release);
+        const int64_t write_ms = sfos_camera2_now_ms() - write_started_ms;
+        context->write_sum_ms += write_ms;
+        if (write_ms > context->write_max_ms) context->write_max_ms = write_ms;
+        // Sensor timestamps are the start of exposure on CLOCK_BOOTTIME
+        // here; a value off by hours means another clock: not counted.
+        struct timespec now;
+        clock_gettime(CLOCK_BOOTTIME, &now);
+        const int64_t latency_ms = ((int64_t)now.tv_sec * 1000000000LL + now.tv_nsec
+                                    - sensor_ns) / 1000000;
+        if (sensor_ns > 0 && latency_ms >= 0 && latency_ms < 10000) {
+            context->latency_sum_ms += latency_ms;
+            if (latency_ms > context->latency_max_ms) context->latency_max_ms = latency_ms;
+            ++context->latency_frames;
+        }
+        const int64_t wall_ms = sfos_camera2_now_ms();
+        if (context->latency_frames > 0 && wall_ms - context->latency_logged_ms >= 15000) {
+            fprintf(stderr, "timing preview-latency camera=%s avg_ms=%lld max_ms=%lld frames=%d "
+                            "exposure_ms=%.1f iso=%d nr=%d edge=%d write_avg_ms=%lld write_max_ms=%lld\n",
+                    context->camera_id,
+                    (long long)(context->latency_sum_ms / context->latency_frames),
+                    (long long)context->latency_max_ms, context->latency_frames,
+                    atomic_load_explicit(&context->live_exposure_time_ns,
+                                         memory_order_acquire) / 1e6,
+                    atomic_load_explicit(&context->live_sensor_sensitivity, memory_order_acquire),
+                    atomic_load_explicit(&context->live_nr_mode, memory_order_acquire),
+                    atomic_load_explicit(&context->live_edge_mode, memory_order_acquire),
+                    (long long)(context->write_sum_ms / context->latency_frames),
+                    (long long)context->write_max_ms);
+            context->latency_sum_ms = 0;
+            context->latency_max_ms = 0;
+            context->latency_frames = 0;
+            context->write_sum_ms = 0;
+            context->write_max_ms = 0;
+            context->latency_logged_ms = wall_ms;
+        }
+        if (atomic_fetch_add_explicit(&context->frames_written, 1,
+                                      memory_order_release) == 0) {
+            fprintf(stderr, "timing bridge first-frame ms=%lld\n",
+                    (long long)(sfos_camera2_now_ms() - context->started_ms));
+        }
     } else {
         atomic_store_explicit(&context->status.image_status, -1,
                               memory_order_release);
@@ -1488,6 +1553,12 @@ static void preview_capture_completed(void *opaque,
         result, ACAMERA_SENSOR_SENSITIVITY, 0);
     int64_t exposure_time = sfos_camera2_first_i64(
         result, ACAMERA_SENSOR_EXPOSURE_TIME, 0);
+    atomic_store_explicit(&context->live_nr_mode,
+                          sfos_camera2_first_u8(result, ACAMERA_NOISE_REDUCTION_MODE, -1),
+                          memory_order_release);
+    atomic_store_explicit(&context->live_edge_mode,
+                          sfos_camera2_first_u8(result, ACAMERA_EDGE_MODE, -1),
+                          memory_order_release);
     int32_t af_state = sfos_camera2_first_u8(
         result, ACAMERA_CONTROL_AF_STATE, -1);
     float focus_distance = sfos_camera2_first_float(
@@ -2093,6 +2164,30 @@ static void preview_raw_image_available(void *opaque, AImageReader *reader)
                                  raw_status > 0 ? 0 : PREVIEW_WRITE_ERROR);
 }
 
+static void preview_write_message(struct preview_context *context, const char *payload,
+                                  int payload_size);
+
+// The first frame of a RAW capture starts exposing: the app gives its
+// shutter feedback, once per capture (generation).
+static void preview_report_capture_started(struct preview_context *context, int generation)
+{
+    if (atomic_exchange_explicit(&context->capture_started_generation, generation,
+                                 memory_order_acq_rel) == generation) {
+        return;
+    }
+    static const char payload[] = "capture-started=1\n";
+    preview_write_message(context, payload, (int)sizeof(payload) - 1);
+}
+
+static void preview_raw_capture_started(void *opaque, ACameraCaptureSession *session,
+                                        const ACaptureRequest *request, int64_t timestamp)
+{
+    (void)session; (void)request; (void)timestamp;
+    struct preview_context *context = opaque;
+    preview_report_capture_started(
+        context, atomic_load_explicit(&context->raw_bracket_generation, memory_order_acquire));
+}
+
 static void preview_raw_capture_completed(void *opaque,
                                           ACameraCaptureSession *session,
                                           ACaptureRequest *request,
@@ -2166,13 +2261,33 @@ static void preview_raw_capture_completed(void *opaque,
     destination->dynamic_black_level_count = sfos_camera2_copy_float_array(
         result, ACAMERA_SENSOR_DYNAMIC_BLACK_LEVEL,
         destination->dynamic_black_level, 4);
+    int exposed = 0;
     if (bracket_index >= 0) {
         atomic_store_explicit(
             &context->raw_bracket_result_status[bracket_index], 1,
             memory_order_release);
+        exposed = 1;
+        for (int index = 0; index < context->raw_bracket_count; ++index) {
+            if (atomic_load_explicit(&context->raw_bracket_result_status[index],
+                                     memory_order_acquire) != 1) {
+                exposed = 0;
+                break;
+            }
+        }
     } else {
         atomic_store_explicit(&context->raw_result_status, 1,
                               memory_order_release);
+        exposed = 1;
+    }
+    if (exposed) {
+        // Every frame is exposed (results come after the exposure): the
+        // phone may move. The files follow once written, which for a burst
+        // of 25 MB RAW frames takes far longer; the app gives its shutter
+        // feedback now rather than then.
+        char payload[64];
+        const int size = snprintf(payload, sizeof(payload), "capture-exposed=1 frames=%d\n",
+                                  bracket_index >= 0 ? context->raw_bracket_count : 1);
+        preview_write_message(context, payload, size);
     }
 }
 
@@ -2191,6 +2306,16 @@ static void preview_bracket_completed(void *opaque, ACameraCaptureSession *sessi
     if (capture->generation != atomic_load_explicit(&capture->owner->raw_bracket_generation,
                                                     memory_order_acquire)) return;
     preview_raw_capture_completed(capture->owner, session, request, result);
+}
+
+static void preview_bracket_started(void *opaque, ACameraCaptureSession *session,
+                                    const ACaptureRequest *request, int64_t timestamp)
+{
+    (void)session; (void)request; (void)timestamp;
+    struct preview_bracket_capture *capture = opaque;
+    if (capture->generation != atomic_load_explicit(&capture->owner->raw_bracket_generation,
+                                                    memory_order_acquire)) return;
+    preview_report_capture_started(capture->owner, capture->generation);
 }
 
 static void preview_bracket_failed(void *opaque, ACameraCaptureSession *session,
@@ -2624,6 +2749,10 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     atomic_init(&context.live_sensor_sensitivity, -1);
     atomic_init(&context.live_exposure_time_ns, -1);
     atomic_init(&context.ended_sequence, -1);
+    atomic_init(&context.capture_started_generation, -1);
+    atomic_init(&context.live_nr_mode, -1);
+    atomic_init(&context.live_edge_mode, -1);
+    context.started_ms = sfos_camera2_now_ms();
     context.repeat_sequence = -1;
     context.width = width;
     context.height = height;
@@ -2636,8 +2765,13 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     context.jpeg_orientation = jpeg_orientation_degrees;
     context.raw_width = raw_width;
     context.raw_height = raw_height;
-    context.raw_yuv = (raw_format & 0xff) == 1;
+    // 1: YUV burst frames; 2: the same frames as maximum-quality JPEG from
+    // the start (the fallback when YUV is refused, and lighter for the
+    // processing of front cameras that lag with a second YUV stream).
+    context.raw_yuv = (raw_format & 0xff) == 1 || (raw_format & 0xff) == 2;
+    context.raw_jpeg = (raw_format & 0xff) == 2;
     context.preview_yuv = (raw_format & SFOS_CAMERA2_PREVIEW_YUV_FRAMES) != 0;
+    atomic_init(&context.paused, (raw_format & SFOS_CAMERA2_PREVIEW_START_PAUSED) != 0);
     snprintf(context.camera_id, sizeof(context.camera_id), "%s",
              camera_id ? camera_id : "");
     context.zoom_ratio = zoom_ratio < 1.0f ? 1.0f : zoom_ratio;
@@ -2720,6 +2854,10 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         context.raw_width = 0;
         context.raw_height = 0;
     }
+    const int32_t *vendor_tags = NULL, *vendor_values = NULL;
+    bool vendor_force_fps = false;
+    const int vendor_count = sfos_camera2_vendor_video_settings(&vendor_tags, &vendor_values,
+                                                                &vendor_force_fps);
     if (g_preview_video.width > 0 && g_preview_video.height > 0) {
         // Only the viewfinder and the encoder, the pair every camera records
         // with: no still streams next to them.
@@ -2744,7 +2882,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                                           video.config.width, video.config.height)) {
             video_error = "video_size";
         } else if (!sfos_camera2_video_fps_range(characteristics, video.config.fps,
-                                                 video.fps_range)) {
+                                                 video.fps_range) && !vendor_force_fps) {
             video_error = "fps_range";
         } else if (!(video.surface = recorder_surface_create())) {
             video_error = "persistent_surface";
@@ -2872,8 +3010,13 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         .onDisconnected = preview_device_disconnected,
         .onError = preview_device_error,
     };
+    const int64_t open_started_ms = sfos_camera2_now_ms();
+    fprintf(stderr, "timing bridge before-open ms=%lld\n",
+            (long long)(open_started_ms - context.started_ms));
     camera_status = ACameraManager_openCamera(
         manager, camera_id, &device_callbacks, &device);
+    fprintf(stderr, "timing bridge camera-open ms=%lld\n",
+            (long long)(sfos_camera2_now_ms() - context.started_ms));
     atomic_store_explicit(&context.status.last_camera_status, camera_status,
                           memory_order_release);
     if (camera_status != ACAMERA_OK || !device) {
@@ -2937,12 +3080,33 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         stage = "raw_configure";
         goto cleanup;
     }
+    // Diagnostics from the command line (the app sets its own mode with
+    // the settings command): the viewfinder's noise reduction mode.
+    const char *noise_reduction_override = getenv("PROCAM_PREVIEW_NR");
+    if (noise_reduction_override && *noise_reduction_override) {
+        context.noise_reduction = atoi(noise_reduction_override);
+    }
+    fprintf(stderr, "timing bridge preview-template nr=%d edge=%d eis=%d tnr_request=%d\n",
+            preview_request_u8(request, ACAMERA_NOISE_REDUCTION_MODE),
+            preview_request_u8(request, ACAMERA_EDGE_MODE),
+            preview_request_u8(request, ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE),
+            context.noise_reduction);
     preview_configure_request(request, &context, characteristics, 0);
     preview_configure_request(focus_request, &context, characteristics, 0);
     preview_configure_focus_request(focus_request, &context, context.focus_x,
                                     context.focus_y, 1);
+    if (context.video && vendor_force_fps && video.fps_range[1] < video.config.fps) {
+        video.fps_range[0] = video.fps_range[1] = video.config.fps;
+    }
     preview_video_configure_request(request, &video);
     preview_video_configure_request(focus_request, &video);
+    for (int i = 0; context.video && i < vendor_count; ++i) {
+        const camera_status_t set = ACaptureRequest_setEntry_i32(
+            request, (uint32_t)vendor_tags[i], 1, &vendor_values[i]);
+        ACaptureRequest_setEntry_i32(focus_request, (uint32_t)vendor_tags[i], 1, &vendor_values[i]);
+        fprintf(stderr, "vendor setting 0x%08x=%d status=%d\n", (uint32_t)vendor_tags[i],
+                vendor_values[i], set);
+    }
     if (context.video) {
         fprintf(stderr, "video-template nr=%d edge=%d\n",
                 preview_request_u8(request, ACAMERA_NOISE_REDUCTION_MODE),
@@ -2971,8 +3135,21 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         .onCaptureSequenceAborted = preview_sequence_aborted,
         .onCaptureBufferLost = NULL,
     };
-    camera_status = ACameraDevice_createCaptureSession(
-        device, container, &session_callbacks, &session);
+    typedef camera_status_t (*create_with_parameters_fn)(
+        ACameraDevice *, const ACaptureSessionOutputContainer *, const ACaptureRequest *,
+        const ACameraCaptureSession_stateCallbacks *, ACameraCaptureSession **);
+    create_with_parameters_fn create_with_parameters = (create_with_parameters_fn)dlsym(
+        RTLD_DEFAULT, "ACameraDevice_createCaptureSessionWithSessionParameters");
+    if (context.video && vendor_count > 0 && create_with_parameters) {
+        // Diagnostics: the request (with the vendor settings) doubles as the
+        // session parameters.
+        camera_status = create_with_parameters(device, container, request,
+                                               &session_callbacks, &session);
+        fprintf(stderr, "session with vendor parameters status=%d\n", camera_status);
+    } else {
+        camera_status = ACameraDevice_createCaptureSession(
+            device, container, &session_callbacks, &session);
+    }
     if ((camera_status != ACAMERA_OK || !session) && raw_output &&
             context.raw_yuv && !context.raw_jpeg) {
         // A second YUV stream refused: the same frames as JPEG, the stream
@@ -3076,6 +3253,8 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         goto cleanup;
     }
 
+    fprintf(stderr, "timing bridge session ms=%lld\n",
+            (long long)(sfos_camera2_now_ms() - context.started_ms));
     preview_write_stream_status(&context, raw_target && raw_request,
                                 jpeg_target && jpeg_request, raw_error,
                                 requested_raw_width, requested_raw_height);
@@ -3142,6 +3321,12 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
             if (command.type == PREVIEW_COMMAND_QUIT) {
                 quit = true;
                 break;
+            }
+            if (command.type == PREVIEW_COMMAND_RESUME) {
+                atomic_store_explicit(&context.paused, 0, memory_order_release);
+                fprintf(stderr, "timing bridge resumed ms=%lld\n",
+                        (long long)(sfos_camera2_now_ms() - context.started_ms));
+                continue;
             }
             if (command.type == PREVIEW_COMMAND_RECORD_START) {
                 preview_video_start(&video, &context, session, &preview_callbacks,
@@ -3376,7 +3561,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 ACaptureRequest *raw_requests[] = { raw_request };
                 ACameraCaptureSession_captureCallbacks raw_callbacks = {
                     .context = &context,
-                    .onCaptureStarted = NULL,
+                    .onCaptureStarted = preview_raw_capture_started,
                     .onCaptureProgressed = NULL,
                     .onCaptureCompleted = preview_raw_capture_completed,
                     .onCaptureFailed = NULL,
@@ -3493,7 +3678,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                     capture->generation = generation;
                     ACameraCaptureSession_captureCallbacks raw_callbacks = {
                         .context = capture,
-                        .onCaptureStarted = NULL,
+                        .onCaptureStarted = preview_bracket_started,
                         .onCaptureProgressed = NULL,
                         .onCaptureCompleted = preview_bracket_completed,
                         .onCaptureFailed = preview_bracket_failed,

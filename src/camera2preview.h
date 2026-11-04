@@ -65,6 +65,9 @@ class Camera2Preview : public QQuickItem
     // Front camera: a dark centre against bright light counts as the face
     // when the camera detects none (backlit selfie).
     Q_PROPERTY(bool selfieCamera MEMBER m_selfieCamera NOTIFY sceneChanged)
+    // Photos saved flipped left-right, as the (mirrored) viewfinder shows
+    // them: the "Mirror selfies" setting on a front camera.
+    Q_PROPERTY(bool captureMirror MEMBER m_captureMirror NOTIFY captureMirrorChanged)
     // Where the frame is drawn, in item coordinates (larger than the item when
     // fill crops it).
     Q_PROPERTY(QRectF contentRect READ contentRect NOTIFY contentRectChanged)
@@ -316,8 +319,11 @@ signals:
     void histogramChanged();
     void sceneChanged();
     void contentRectChanged();
-    // A warm JPEG was captured; the final file follows with imageCaptured.
+    // A warm capture is exposed (the JPEG, or a RAW capture's last frame);
+    // the files follow with imageCaptured / rawImageReady / rawBracketReady.
     void captureExposed();
+    // A warm RAW capture's first frame starts exposing.
+    void captureStarted();
     void exposureSample(const QVariantMap &sample);
     void errorStringChanged();
     void imageCaptured(const QString &path, const QString &mimeType);
@@ -326,6 +332,7 @@ signals:
                          const QVariantList &metadataPaths);
     void imageCaptureFailed(const QString &error);
     void videoSizeChanged();
+    void captureMirrorChanged();
     void videoFrameRateChanged();
     void videoBitrateChanged();
     void videoStabilizationChanged();
@@ -444,6 +451,7 @@ private:
     std::vector<std::array<float, 4>> m_lastFaces, m_subjectFaces;
     QElapsedTimer m_faceSeen;
     bool m_selfieCamera = false;
+    bool m_captureMirror = false;
     std::vector<std::array<float, 4>> effectiveFaces(QString *source = nullptr) const;
     PreviewAnalysis::FaceExposure m_faceExposure;
     // Preview rate diagnostics, logged every 15 s.
@@ -482,6 +490,11 @@ private:
     QString m_recordingPath;
     // A stop that the helper never answers still ends the recording.
     QTimer m_recordingStopTimer;
+    // Timing for the log: since the helper started (first frame) and since
+    // a capture command went out (exposed, files ready).
+    QElapsedTimer m_helperClock;
+    bool m_firstFrameLogged = false;
+    QElapsedTimer m_captureClock;
 };
 
 #endif

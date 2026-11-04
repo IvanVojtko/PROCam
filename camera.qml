@@ -15,7 +15,10 @@ ApplicationWindow {
     id: window
 
     // Check once per launch, in ProCam's application identity (not system Settings).
-    Component.onCompleted: Settings.camera2Capabilities.ensureCamera2GeneratedHalConfig(Settings.deviceId)
+    Component.onCompleted: {
+        Settings.camera2Capabilities.logStartupTiming("qml-window-created")
+        Settings.camera2Capabilities.ensureCamera2GeneratedHalConfig(Settings.deviceId)
+    }
 
     property var captureModel: null
     property bool galleryActive
@@ -23,12 +26,28 @@ ApplicationWindow {
     property int galleryIndex
     property bool camera2CaptureBusy
     readonly property bool _applicationActive: Qt.application.state === Qt.ApplicationActive
+    // Launching: the camera starts while the window is still being shown
+    // instead of after it became active (about a second later). Ends at the
+    // first activation, or after 5 s for a launch that never became active.
+    property bool _launching: true
+    Timer {
+        running: window._launching
+        interval: 5000
+        onTriggered: window._launching = false
+    }
     // The viewfinder fills the window; controls float on top of it.
     readonly property real camera2TopStripHeight: 0
 
     on_ApplicationActiveChanged: {
         if (_applicationActive) {
-            camera2Preview.restartPreview()
+            if (_launching) {
+                _launching = false
+                Settings.camera2Capabilities.logStartupTiming("app-active")
+            }
+            // Recovers a viewfinder that stopped in the background; one
+            // already running (started during the launch) is kept.
+            if (!camera2Preview.running)
+                camera2Preview.restartPreview()
         }
     }
 
@@ -91,6 +110,22 @@ ApplicationWindow {
         // Cameras that refused the encoder stream this session: their video
         // is recorded through gst-droid instead.
         property var videoFailedCameras: []
+        // Cameras that dropped (or degraded) the RAW stream next to the
+        // 1920x1440 viewfinder this session: they get 1440x1080, the size
+        // Camera2 guarantees next to RAW.
+        property var largePreviewRefused: []
+
+        onRawCaptureReadyChanged: {
+            if (!rawCaptureEnabled || videoMode || previewSize.width <= 1440
+                    || largePreviewRefused.indexOf(cameraId) >= 0
+                    || rawStreamStatus.indexOf("raw_error=") < 0
+                    || rawStreamStatus.indexOf("raw_error=none") >= 0)
+                return
+            Settings.camera2Capabilities.logCaptureEvent("preview " + previewSize.width + "x"
+                    + previewSize.height + " refused next to RAW (" + rawStreamStatus
+                    + "); using 1440x1080")
+            largePreviewRefused = largePreviewRefused.concat([cameraId])
+        }
 
         onVideoStreamUnavailable: {
             if (videoFailedCameras.indexOf(cameraId) < 0)
@@ -100,14 +135,15 @@ ApplicationWindow {
                 && !window.camera2CaptureBusy
                 // A recording continues in the background (CaptureView stops
                 // it after a minute) instead of losing the file.
-                && (window._applicationActive || recording)
+                && (window._applicationActive || recording || window._launching)
                 && pageStack.depth < 2
                 && !galleryActive
         visible: pageStack.depth < 2 && !galleryActive
                  && (active || window.camera2CaptureBusy)
         cameraId: Settings.deviceId || (Settings.global.position === Camera.FrontFace ? "1" : "0")
         previewSize: videoMode ? Settings.camera2VideoPreviewSize(cameraId)
-                               : Settings.camera2PreferredPreviewSize(cameraId)
+                               : Settings.camera2PreferredPreviewSize(
+                                     cameraId, largePreviewRefused.indexOf(cameraId) < 0)
         readonly property string videoResolution:
             Settings.camera2VideoResolutions(cameraId).indexOf(Settings.global.camera2VideoResolution) >= 0
             ? Settings.global.camera2VideoResolution : "1080p"
@@ -147,6 +183,7 @@ ApplicationWindow {
                          cameraId, frontFacing ? 270 : 90)
         mirror: Settings.camera2PreviewMirror(cameraId, frontFacing)
         selfieCamera: frontFacing
+        captureMirror: frontFacing && Settings.global.mirrorSelfies
         fill: Settings.global.viewfinderFill
         photoAspect: videoMode ? "16:9" : Settings.photoAspect
 

@@ -18,6 +18,10 @@ SettingsBase {
     property string deviceId: global.deviceId
     onDeviceIdChanged: normalizeCamera2Settings()
     property CameraExtensions camera2Capabilities: CameraExtensions {}
+    // Bumped when a camera's RAW frames turn out damaged and it falls back to
+    // YUV (CameraExtensions.camera2RawDamaged): the wrappers below that depend
+    // on RAW output read it, so their bindings are evaluated again.
+    property int camera2RawRevision
 
     readonly property int aspectRatio: mode.aspectRatio
     // Photo shape for ProCam's renderer and viewfinder: the sensor's "4:3" or
@@ -154,6 +158,13 @@ SettingsBase {
         // Video from ProCam's own recorder (the Camera2 viewfinder session);
         // off falls back to gst-droid.
         property bool camera2Video: true
+        // Front-camera photos saved flipped, as the viewfinder shows them,
+        // instead of as others see the scene (the flip chip on the front
+        // camera's top bar).
+        property bool mirrorSelfies: false
+        // Lets tools/device-smoke-test.sh press the shutter over D-Bus
+        // (com.procam.camera.ui.capture). Off unless the script runs.
+        property bool smokeTestCapture: false
         // Electronic stabilization for camera2Video recordings.
         property bool videoStabilization: true
         // camera2Video codec: "avc" (H.264, plays everywhere) or "hevc".
@@ -398,6 +409,7 @@ SettingsBase {
     }
 
     function camera2SizeModel(format, rawFormat) {
+        void camera2RawRevision
         if (format === "raw") {
             var rawSizes = camera2Capabilities.camera2RawSizeModel(
                         deviceId, rawFormat || modeSettings.rawCaptureRawFormat)
@@ -409,11 +421,13 @@ SettingsBase {
     }
 
     function camera2PreferredCaptureSize(format) {
+        void camera2RawRevision
         return camera2Capabilities.camera2PreferredCaptureSize(
                     deviceId, format || modeSettings.camera2CaptureFormat)
     }
 
     function camera2WarmCaptureSize() {
+        void camera2RawRevision
         return camera2Capabilities.camera2WarmCaptureSize(deviceId)
     }
 
@@ -422,6 +436,7 @@ SettingsBase {
     }
 
     function camera2WarmRawCaptureSupported(size) {
+        void camera2RawRevision
         return camera2Capabilities.camera2WarmRawCaptureSupported(deviceId, size)
     }
 
@@ -429,27 +444,31 @@ SettingsBase {
     // ProCam's own pipeline, like HDR and RAW mode (the HAL's JPEG is far
     // softer); the HAL's JPEG is only the fallback without a RAW16 stream.
     function camera2JpegFromRaw(cameraId) {
+        void camera2RawRevision
         return modeSettings.camera2CaptureFormat === "jpeg"
                 && camera2Capabilities.camera2BurstRawSize(cameraId !== undefined ? cameraId : deviceId, "") !== ""
     }
 
     // HDR burst input: "raw16", or "yuv" for cameras without RAW output.
     function camera2BurstFormat(cameraId) {
+        void camera2RawRevision
         return camera2Capabilities.camera2BurstFormat(cameraId !== undefined ? cameraId : deviceId)
     }
 
     // Pass the camera id from bindings so they re-evaluate on camera changes.
     function camera2BurstSupported(cameraId) {
+        void camera2RawRevision
         return camera2Capabilities.camera2BurstSupported(cameraId !== undefined ? cameraId : deviceId)
     }
 
     function camera2BurstRawSize() {
+        void camera2RawRevision
         return camera2Capabilities.camera2BurstRawSize(
                     deviceId, modeSettings.camera2CaptureFormat === "raw" ? modeSettings.rawCaptureSize : "")
     }
 
-    function camera2PreferredPreviewSize(cameraId) {
-        return camera2Capabilities.camera2PreferredPreviewSize(cameraId)
+    function camera2PreferredPreviewSize(cameraId, large) {
+        return camera2Capabilities.camera2PreferredPreviewSize(cameraId, large !== false)
     }
 
     function camera2VideoPreviewSize(cameraId) {
@@ -484,6 +503,7 @@ SettingsBase {
     }
 
     function camera2BracketModel() {
+        void camera2RawRevision
         return mode.camera2CaptureFormat === "jpeg" ? ["off"]
                 : camera2Capabilities.camera2BracketModel(deviceId)
     }
@@ -611,6 +631,7 @@ SettingsBase {
     }
 
     function camera2CaptureFormatModel() {
+        void camera2RawRevision
         return camera2Capabilities.camera2CaptureFormatModel(deviceId)
     }
 

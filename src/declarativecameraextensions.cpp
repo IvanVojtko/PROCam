@@ -14,6 +14,9 @@
 #include "videoencoderlimits.h"
 
 #include <QDir>
+#include <QElapsedTimer>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
@@ -126,6 +129,174 @@ static QString rawCaptureProbePath()
     return override.isEmpty()
             ? QStringLiteral("/usr/libexec/procam/sfos-camera2-probe")
             : override;
+}
+
+// The probe's JSON (camera list and capabilities) is the same for every
+// launch until the helper, the bridge or the Android vendor image changes,
+// yet running it costs a full libhybris and camera service start-up on the
+// GUI thread. One result per process, kept on disk under a fingerprint of
+// those files; only a probe that found a usable camera is kept.
+struct Camera2ProbeResult
+{
+    bool ok = false;
+    QByteArray json;
+    QByteArray errors;
+};
+
+static QString camera2ProbeFingerprint()
+{
+    QStringList parts;
+    const QStringList files {
+        rawCaptureProbePath(),
+        QStringLiteral("/usr/libexec/droid-hybris/system/lib64/libprocamcamera2.so"),
+        QStringLiteral("/vendor/build.prop"),
+        QStringLiteral("/odm/build.prop"),
+        QStringLiteral("/system/build.prop"),
+    };
+    for (const QString &file : files) {
+        const QFileInfo info(file);
+        parts << QStringLiteral("%1:%2:%3").arg(file).arg(info.exists() ? info.size() : -1)
+                 .arg(info.exists() ? info.lastModified().toMSecsSinceEpoch() : 0);
+    }
+    return parts.join(QLatin1Char('|'));
+}
+
+static bool camera2ProbeUsable(const QByteArray &json)
+{
+    const QJsonDocument document = QJsonDocument::fromJson(json);
+    for (const QJsonValue &value : document.object().value(QStringLiteral("cameras")).toArray()) {
+        if (value.toObject().value(QStringLiteral("status")).toString() == QLatin1String("ok"))
+            return true;
+    }
+    return false;
+}
+
+static void appendRawCaptureLog(const QString &message);
+qint64 procamMsSinceProcessStart(); // camera2preview.cpp
+
+// Cameras whose RAW frames came out damaged (rawframecheck.h): the HAL fills
+// only part of its RAW buffer. They are then treated as cameras without RAW,
+// so their photos come from YUV bursts. The verdict is kept until the Android
+// vendor image changes (an update may fix the HAL) or the check does.
+static const int Camera2RawDamageCheckVersion = 1;
+static int camera2RawDamageRevision = 0;
+
+static QString camera2RawDamagePath()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+            + QStringLiteral("/camera2-raw-damaged.json");
+}
+
+static QString camera2RawDamageFingerprint()
+{
+    QStringList parts { QStringLiteral("check:%1").arg(Camera2RawDamageCheckVersion) };
+    const QStringList files {
+        QStringLiteral("/vendor/build.prop"),
+        QStringLiteral("/odm/build.prop"),
+        QStringLiteral("/system/build.prop"),
+    };
+    for (const QString &file : files) {
+        const QFileInfo info(file);
+        parts << QStringLiteral("%1:%2:%3").arg(file).arg(info.exists() ? info.size() : -1)
+                 .arg(info.exists() ? info.lastModified().toMSecsSinceEpoch() : 0);
+    }
+    return parts.join(QLatin1Char('|'));
+}
+
+// Camera id -> why its RAW output was found damaged.
+static QJsonObject &camera2RawDamagedCameras()
+{
+    static QJsonObject cameras;
+    static bool loaded = false;
+    if (!loaded) {
+        loaded = true;
+        QFile file(camera2RawDamagePath());
+        const QJsonObject stored = file.open(QIODevice::ReadOnly)
+                ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject();
+        if (stored.value(QStringLiteral("fingerprint")).toString() == camera2RawDamageFingerprint())
+            cameras = stored.value(QStringLiteral("cameras")).toObject();
+    }
+    return cameras;
+}
+
+static void markCamera2RawDamaged(const QString &cameraId, const QString &reason)
+{
+    QJsonObject &cameras = camera2RawDamagedCameras();
+    if (cameraId.isEmpty() || cameras.contains(cameraId))
+        return;
+    cameras.insert(cameraId, reason);
+    ++camera2RawDamageRevision;
+    appendRawCaptureLog(QStringLiteral("raw-damaged camera=%1 reason=\"%2\" photos now from YUV frames")
+                        .arg(cameraId, reason));
+    QJsonObject stored;
+    stored.insert(QStringLiteral("fingerprint"), camera2RawDamageFingerprint());
+    stored.insert(QStringLiteral("cameras"), cameras);
+    QDir().mkpath(QFileInfo(camera2RawDamagePath()).absolutePath());
+    QSaveFile save(camera2RawDamagePath());
+    if (save.open(QIODevice::WriteOnly)) {
+        save.write(QJsonDocument(stored).toJson(QJsonDocument::Compact));
+        save.commit();
+    }
+}
+
+static QString frameCameraId(const QString &metadataPath)
+{
+    QFile file(metadataPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return QString();
+    return QJsonDocument::fromJson(file.readAll()).object()
+            .value(QStringLiteral("camera_id")).toString();
+}
+
+static const char *const Camera2RawDamagedMessage =
+        "This camera delivered damaged RAW frames. ProCam now takes its photos from "
+        "YUV frames instead; please take the photo again.";
+
+static const Camera2ProbeResult &camera2Probe()
+{
+    static Camera2ProbeResult result;
+    static bool done = false;
+    static QMutex mutex;
+    QMutexLocker locker(&mutex);
+    if (done)
+        return result;
+    done = true;
+    QElapsedTimer timer;
+    timer.start();
+    const QString cachePath = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+            + QStringLiteral("/camera2-probe.json");
+    const QString fingerprint = camera2ProbeFingerprint();
+    QFile cache(cachePath);
+    if (!qEnvironmentVariableIsSet("SFOS_CAMERA2_PROBE") && cache.open(QIODevice::ReadOnly)) {
+        const QByteArray stored = cache.readLine().trimmed();
+        const QByteArray json = cache.readAll();
+        if (stored == fingerprint.toUtf8() && camera2ProbeUsable(json)) {
+            result.ok = true;
+            result.json = json;
+            appendRawCaptureLog(QStringLiteral("timing probe cached ms=%1 since_app_start_ms=%2")
+                                .arg(timer.elapsed()).arg(procamMsSinceProcessStart()));
+            return result;
+        }
+    }
+    QProcess probe;
+    probe.start(rawCaptureProbePath());
+    result.ok = probe.waitForStarted(3000) && probe.waitForFinished(5000)
+            && probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0;
+    result.json = probe.readAllStandardOutput();
+    result.errors = probe.readAllStandardError();
+    appendRawCaptureLog(QStringLiteral("timing probe ran ms=%1 ok=%2 since_app_start_ms=%3")
+                        .arg(timer.elapsed()).arg(result.ok ? 1 : 0)
+                        .arg(procamMsSinceProcessStart()));
+    if (result.ok && camera2ProbeUsable(result.json)
+            && QDir().mkpath(QFileInfo(cachePath).absolutePath())) {
+        QSaveFile save(cachePath);
+        if (save.open(QIODevice::WriteOnly)) {
+            save.write(fingerprint.toUtf8() + '\n');
+            save.write(result.json);
+            save.commit();
+        }
+    }
+    return result;
 }
 
 static QString rawFastJpegConverterPath()
@@ -946,17 +1117,13 @@ QString DeclarativeCameraExtensions::ensureCamera2GeneratedHalConfig(
         if (!rawImageCaptureAvailable()) {
             return fail(QStringLiteral("Camera2 helper is not installed"));
         }
-        QProcess probe;
-        probe.start(rawCaptureProbePath());
-        if (!probe.waitForStarted(3000)) {
-            return fail(QStringLiteral("Camera2 helper did not start"));
-        }
-        if (!probe.waitForFinished(5000) || probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
+        const Camera2ProbeResult &probe = camera2Probe();
+        if (!probe.ok) {
             const QString helperError = filterCamera2HelperErrors(
-                        QString::fromLocal8Bit(probe.readAllStandardError()));
+                        QString::fromLocal8Bit(probe.errors));
             return fail(QStringLiteral("Camera2 probe failed: %1").arg(helperError));
         }
-        document = QJsonDocument::fromJson(probe.readAllStandardOutput(), &parseError);
+        document = QJsonDocument::fromJson(probe.json, &parseError);
     }
     if (!validProbe(document)) {
         return fail(QStringLiteral("Invalid or empty Camera2 probe JSON"));
@@ -978,7 +1145,8 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
     const qint64 overrideProfileMtime = procamOverrideHalProfileMtime();
     if (m_camera2CapabilitiesLoaded &&
             m_camera2CapabilitiesCameraId == effectiveCameraId &&
-            m_camera2OverrideProfileMtime == overrideProfileMtime) {
+            m_camera2OverrideProfileMtime == overrideProfileMtime &&
+            m_camera2RawDamageRevision == camera2RawDamageRevision) {
         return m_camera2CapabilitiesValid;
     }
 
@@ -986,6 +1154,7 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
     m_camera2CapabilitiesValid = false;
     m_camera2CapabilitiesCameraId = effectiveCameraId;
     m_camera2OverrideProfileMtime = overrideProfileMtime;
+    m_camera2RawDamageRevision = camera2RawDamageRevision;
     m_camera2Raw16Sizes.clear();
     m_camera2Raw10Sizes.clear();
     m_camera2JpegSizes.clear();
@@ -1009,18 +1178,12 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
         return false;
     }
 
-    QProcess probe;
-    probe.start(rawCaptureProbePath());
-    if (!probe.waitForStarted(3000) || !probe.waitForFinished(5000) ||
-            probe.exitStatus() != QProcess::NormalExit ||
-            probe.exitCode() != 0) {
-        m_camera2ProbeJson = probe.readAllStandardOutput();
-        m_camera2ProbeErrors = probe.readAllStandardError();
+    const Camera2ProbeResult &probe = camera2Probe();
+    m_camera2ProbeJson = probe.json;
+    m_camera2ProbeErrors = probe.errors;
+    if (!probe.ok) {
         return false;
     }
-
-    m_camera2ProbeJson = probe.readAllStandardOutput();
-    m_camera2ProbeErrors = probe.readAllStandardError();
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(m_camera2ProbeJson,
                                                            &parseError);
@@ -1161,6 +1324,15 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
     if (!overrides.value(QStringLiteral("raw10_enabled")).toBool(true)) {
         m_camera2Raw10Sizes.clear();
     }
+    const QString rawDamage = camera2RawDamagedCameras()
+            .value(selectedCamera.value(QStringLiteral("id")).toString()).toString();
+    if (!rawDamage.isEmpty()) {
+        m_camera2Raw16Sizes.clear();
+        m_camera2Raw10Sizes.clear();
+        qDebug() << "raw-damaged"
+                 << "camera=" + selectedCamera.value(QStringLiteral("id")).toString()
+                 << "reason=" + rawDamage << "bursts=yuv";
+    }
     const qint64 observedMaxShutterNs = qint64(overrides.value(
                 QStringLiteral("observed_shutter_max_ns")).toDouble());
     if (observedMaxShutterNs > 0 &&
@@ -1203,7 +1375,7 @@ QStringList DeclarativeCameraExtensions::camera2RawSizeModel(
     return QStringList();
 }
 
-QSize DeclarativeCameraExtensions::camera2PreferredPreviewSize(const QString &cameraId)
+QSize DeclarativeCameraExtensions::camera2PreferredPreviewSize(const QString &cameraId, bool large)
 {
     const QString id = cameraId.isEmpty() ? QStringLiteral("0") : cameraId;
     if (!loadCamera2Capabilities(id))
@@ -1215,8 +1387,11 @@ QSize DeclarativeCameraExtensions::camera2PreferredPreviewSize(const QString &ca
     // 1440x1080: sharper than 1280x960 now that preview frames travel as
     // YUV, and still within Camera2's guaranteed PREVIEW size, so the HAL
     // keeps the RAW stream alongside it.
+    // 1920x1440: "Full" on a 20:9 screen stretches the frame 1.25x instead
+    // of 1.67x (1440x1080), still I420 over the pipe at ~120 MB/s.
     return preferredPreviewSize(camera2OutputSizes(camera, QStringLiteral("preview_outputs")),
-                                m_camera2PreviewSizes, QSize(1440, 1080));
+                                m_camera2PreviewSizes,
+                                large ? QSize(1920, 1440) : QSize(1440, 1080));
 }
 
 QSize DeclarativeCameraExtensions::camera2VideoPreviewSize(const QString &cameraId)
@@ -1712,6 +1887,12 @@ void DeclarativeCameraExtensions::logCaptureEvent(const QString &message)
     appendRawCaptureLog(QStringLiteral("qml ") + message);
 }
 
+void DeclarativeCameraExtensions::logStartupTiming(const QString &name)
+{
+    appendRawCaptureLog(QStringLiteral("timing %1 since_app_start_ms=%2")
+                        .arg(name).arg(procamMsSinceProcessStart()));
+}
+
 QVariantMap DeclarativeCameraExtensions::camera2BurstPlan(
         const QString &cameraId, const QString &meteredShutterNs, int meteredIso,
         const QVariantList &histogram, bool night, const QVariantMap &scene)
@@ -2198,6 +2379,7 @@ bool DeclarativeCameraExtensions::captureRawImage(const QString &targetPath, con
     m_rawCaptureProgressiveJpeg = progressiveJpeg;
     m_rawCaptureJpegQuality = qBound(1, jpegQuality, 100);
     m_rawCaptureRotationDegrees = ((rotationDegrees % 360) + 360) % 360;
+    m_rawCaptureMirror = m_captureMirror;
     m_rawCaptureColorTemperature = qBound(0, colorTemperature, 50000);
     m_rawCaptureColorTint = qBound(-1000, colorTint, 1000);
     m_rawCaptureTimer.restart();
@@ -2322,6 +2504,7 @@ bool DeclarativeCameraExtensions::captureJpegImage(const QString &targetPath, co
     m_rawCaptureExposure = exposure.isEmpty() ? QStringLiteral("1.0") : exposure;
     m_rawCaptureJpegQuality = qBound(1, jpegQuality, 100);
     m_rawCaptureRotationDegrees = ((rotationDegrees % 360) + 360) % 360;
+    m_rawCaptureMirror = m_captureMirror;
     m_rawCaptureColorTemperature = 0;
     m_rawCaptureColorTint = 0;
     m_rawCaptureTimer.restart();
@@ -2434,6 +2617,7 @@ bool DeclarativeCameraExtensions::processRawImage(
     m_rawCaptureProgressiveJpeg = progressiveJpeg;
     m_rawCaptureJpegQuality = qBound(1, jpegQuality, 100);
     m_rawCaptureRotationDegrees = ((rotationDegrees % 360) + 360) % 360;
+    m_rawCaptureMirror = m_captureMirror;
     m_rawCaptureColorTemperature = qBound(0, colorTemperature, 50000);
     m_rawCaptureColorTint = qBound(-1000, colorTint, 1000);
     m_rawCaptureTimer.restart();
@@ -2545,6 +2729,7 @@ bool DeclarativeCameraExtensions::combineRawBurst(
     job.settings = rawPipelineSettings();
     job.settings.targetGain = std::isfinite(targetGain) && targetGain > 0 ? targetGain : 1.0;
     job.directory = QSharedPointer<QTemporaryDir>(m_rawBracketDirectory.take());
+    job.queued.start();
     m_burstJobs.append(job);
     emit pendingRendersChanged();
     startNextBurstRender();
@@ -2560,6 +2745,7 @@ void DeclarativeCameraExtensions::startNextBurstRender()
 {
     if (m_burstWatcher || m_burstJobs.isEmpty()) return;
     const BurstJob job = m_burstJobs.first();
+    m_burstRenderStart = job.queued.elapsed();
     m_burstWatcher.reset(new QFutureWatcher<QString>);
     connect(m_burstWatcher.data(), &QFutureWatcher<QString>::finished,
             this, &DeclarativeCameraExtensions::finishBurstRender);
@@ -2586,8 +2772,20 @@ void DeclarativeCameraExtensions::finishBurstRender()
     if (m_burstJobs.isEmpty()) return;
     const BurstJob job = m_burstJobs.takeFirst(); // releasing it removes the staged frames
     emit pendingRendersChanged();
+    // From the staged frames to the photo: waiting behind earlier bursts,
+    // then the merge itself (tools/device-smoke-test.sh reads this).
+    appendRawCaptureLog(QStringLiteral("timing burst-render frames=%1 wait_ms=%2 render_ms=%3 ok=%4")
+                        .arg(job.sources.size()).arg(m_burstRenderStart)
+                        .arg(job.queued.elapsed() - m_burstRenderStart).arg(error.isEmpty() ? 1 : 0));
     if (error.isEmpty()) {
         emit burstRendered(job.target);
+    } else if (RawPipeline::isRawFramesDamagedError(error)) {
+        QFile::remove(job.target);
+        QFile::remove(jsonSidecarPath(job.target));
+        const QString cameraId = frameCameraId(job.sources.first());
+        markCamera2RawDamaged(cameraId, error);
+        emit camera2RawDamaged(cameraId);
+        emit burstRenderFailed(QString::fromLatin1(Camera2RawDamagedMessage));
     } else {
         QFile::remove(job.target);
         QFile::remove(jsonSidecarPath(job.target));
@@ -2668,13 +2866,14 @@ void DeclarativeCameraExtensions::finishRawImageCapture(int exitCode, QProcess::
             exposure = 1.0;
         }
         const int rotation = m_rawCaptureRotationDegrees;
+        const bool mirror = m_rawCaptureMirror;
         const int temperature = m_rawCaptureColorTemperature, tint = m_rawCaptureColorTint;
         const int quality = m_rawCaptureJpegQuality;
         m_rawRenderWatcher.reset(new QFutureWatcher<bool>);
         connect(m_rawRenderWatcher.data(), &QFutureWatcher<bool>::finished,
                 this, &DeclarativeCameraExtensions::finishJpegRewrite);
         m_rawRenderWatcher->setFuture(QtConcurrent::run([=]() {
-            if (rotation != 0 || ImageAdjustments::requested(exposure, temperature, tint)) {
+            if (rotation != 0 || mirror || ImageAdjustments::requested(exposure, temperature, tint)) {
                 QImage image(targetPath);
                 if (image.isNull()) {
                     m_rawCaptureErrors = QStringLiteral("Could not load Camera2 JPEG for adjustment");
@@ -2682,6 +2881,9 @@ void DeclarativeCameraExtensions::finishRawImageCapture(int exitCode, QProcess::
                 }
                 if (rotation != 0) {
                     image = image.transformed(QTransform().rotate(rotation));
+                }
+                if (mirror) {
+                    image = image.mirrored(true, false);
                 }
                 ImageAdjustments::apply(&image, exposure, temperature, tint);
                 QImageWriter writer(targetPath, "JPG");
@@ -2768,9 +2970,15 @@ void DeclarativeCameraExtensions::finishRawImageRender()
         watcher->deleteLater();
     }
     if (!renderOk) {
-        const QString error = m_rawCaptureErrors.isEmpty()
+        QString error = m_rawCaptureErrors.isEmpty()
                 ? QStringLiteral("RAW image conversion failed")
                 : m_rawCaptureErrors;
+        if (RawPipeline::isRawFramesDamagedError(error)) {
+            const QString cameraId = frameCameraId(m_rawCapturePrefix + QLatin1String(".json"));
+            markCamera2RawDamaged(cameraId, error);
+            emit camera2RawDamaged(cameraId);
+            error = QString::fromLatin1(Camera2RawDamagedMessage);
+        }
         clearRawImageCapture();
         emit rawImageCaptureFailed(error);
         return;
@@ -2779,6 +2987,8 @@ void DeclarativeCameraExtensions::finishRawImageRender()
     qDebug() << "capture-timing app raw render"
              << "start" << m_rawRenderStart
              << "end" << m_rawCaptureTimer.elapsed();
+    appendRawCaptureLog(QStringLiteral("timing raw-render render_ms=%1")
+                        .arg(m_rawCaptureTimer.elapsed() - m_rawRenderStart));
     const QString targetPath = m_rawCaptureTargetPath;
     QString imageError;
     if (!readableImageExists(targetPath, &imageError)) {
@@ -3488,6 +3698,9 @@ bool DeclarativeCameraExtensions::renderRawImage()
     if (m_rawCaptureRotationDegrees != 0) {
         image = image.transformed(QTransform().rotate(m_rawCaptureRotationDegrees));
     }
+    if (m_rawCaptureMirror) {
+        image = image.mirrored(true, false);
+    }
     ImageAdjustments::apply(&image, 1.0, m_rawCaptureColorTemperature,
                             m_rawCaptureColorTint);
 
@@ -3526,6 +3739,9 @@ bool DeclarativeCameraExtensions::renderRawImageEnhanced(const RawPipeline::Rend
     }
     if (m_rawCaptureRotationDegrees != 0) {
         image = image.transformed(QTransform().rotate(m_rawCaptureRotationDegrees));
+    }
+    if (m_rawCaptureMirror) {
+        image = image.mirrored(true, false);
     }
     ImageAdjustments::apply(&image, 1.0, m_rawCaptureColorTemperature,
                             m_rawCaptureColorTint);
@@ -3668,6 +3884,9 @@ bool DeclarativeCameraExtensions::renderRawImageWithFastJpegConverter()
         if (!helperHandlesRotation && m_rawCaptureRotationDegrees != 0) {
             image = image.transformed(QTransform().rotate(m_rawCaptureRotationDegrees));
         }
+        if (m_rawCaptureMirror) {
+            image = image.mirrored(true, false);
+        }
         ImageAdjustments::apply(&image, 1.0, 5500, m_rawCaptureColorTint);
 
         QImageWriter writer(m_rawCaptureTargetPath, "JPG");
@@ -3795,6 +4014,7 @@ bool DeclarativeCameraExtensions::stageRawBracketFrame()
     }
     QJsonObject context;
     context.insert(QStringLiteral("bracket_rotation"), m_rawCaptureRotationDegrees);
+    context.insert(QStringLiteral("bracket_mirror"), m_rawCaptureMirror);
     if (!ExifUtils::enrichSidecar(metadata, context, &error)) {
         clearRawImageCapture();
         m_rawBracketDirectory.reset();
@@ -3832,6 +4052,7 @@ void DeclarativeCameraExtensions::clearRawImageCapture()
     m_rawCaptureProgressiveJpeg = false;
     m_rawCaptureJpegQuality = 92;
     m_rawCaptureRotationDegrees = 0;
+    m_rawCaptureMirror = false;
     m_rawCaptureColorTemperature = 0;
     m_rawCaptureColorTint = 0;
     m_bracketIndex = -1;

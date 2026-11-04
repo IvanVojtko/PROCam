@@ -35,6 +35,12 @@ struct RenderSettings {
     bool toneRefinements = true;
 };
 
+// Every RAW frame of a render was only partly written by the HAL
+// (rawframecheck.h): the camera's RAW output cannot be used. The error text
+// of renderImage() and renderBurst() then starts with this.
+QString rawFramesDamagedError(const QString &detail);
+bool isRawFramesDamagedError(const QString &error);
+
 // Renders RAW frames described by JSON sidecars (with raw_path) to an RGB
 // image. More than one frame is merged as a burst of equal exposures.
 // *info receives pipeline details for the output sidecar.

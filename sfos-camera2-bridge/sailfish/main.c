@@ -61,6 +61,9 @@ typedef void (*preview_set_video_fn)(int width, int height, int fps,
                                      int bitrate, int stabilization, int hevc,
                                      int audio_sample_rate,
                                      int audio_channels);
+typedef int (*probe_vendor_tags_fn)(char *out, size_t out_size);
+typedef void (*record_set_vendor_fn)(const int32_t *tags, const int32_t *values,
+                                     int count, int force_fps);
 typedef const char *(*version_fn)(void);
 typedef void (*droid_media_init_fn)(void);
 typedef void (*droid_media_deinit_fn)(void);
@@ -364,16 +367,19 @@ static void usage(FILE *stream, const char *program)
             "     [--frames N] [--timeout SECONDS] [--output PATH]\n"
             "     [--jpeg-size WIDTHxHEIGHT] [--quality N]\n"
             "     [--orientation DEGREES] [--zoom R]\n"
-            "     [--raw-size WIDTHxHEIGHT] [--raw-format raw16|yuv]\n"
+            "     [--raw-size WIDTHxHEIGHT] [--raw-format raw16|yuv|jpeg]\n"
             "     [--preview-format rgb|yuv] [--focus-x X --focus-y Y]\n"
+            "     [--start-paused]\n"
             "     [--video-size WIDTHxHEIGHT [--video-fps N]\n"
             "      [--video-bitrate BPS] [--stabilization on|off]\n"
             "      [--codec avc|hevc] [--audio on|off] [--audio-channels 1|2]]\n"
+            "  %s --vendor-tags   (vendor characteristics by id, diagnostics)\n"
             "  %s --record-video --output PATH.mp4 [--camera ID]\n"
             "     [--size WIDTHxHEIGHT] [--fps N] [--seconds N]\n"
             "     [--bitrate BPS] [--stabilization on|off] [--codec avc|hevc]\n"
             "     [--orientation DEGREES] [--audio on|off]\n"
             "     [--audio-channels 1|2] [--repeat N] [--force]\n"
+            "     [--vendor TAG=VALUE]... [--force-fps]\n"
             "  %s --capture-jpeg --output PATH [--camera ID]\n"
             "     [--size WIDTHxHEIGHT] [--timeout SECONDS]\n"
             "     [--quality N] [--orientation DEGREES]\n"
@@ -392,7 +398,7 @@ static void usage(FILE *stream, const char *program)
             "Preview mode writes consecutive binary RGB888 frames. With\n"
             "--video-size it also takes record-start DEGREES PATH.mp4 and\n"
             "record-stop on standard input.\n",
-            program, program, program, program, program, program);
+            program, program, program, program, program, program, program);
 }
 
 static long long absolute_i64(long long value)
@@ -665,6 +671,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    const long long started_ms = monotonic_ms();
+    const int timing = argc > 1 && !strcmp(argv[1], "--preview");
     const char *hybris_name = NULL;
     void *hybris = open_libhybris(&hybris_name);
     if (!hybris) {
@@ -682,6 +690,9 @@ int main(int argc, char **argv)
         return 11;
     }
 
+    if (timing) {
+        fprintf(stderr, "timing helper libhybris ms=%lld\n", monotonic_ms() - started_ms);
+    }
     /* Match the initialization used by normal gst-droid clients. */
     void *droidmedia = android_dlopen("libdroidmedia.so", RTLD_NOW);
     if (droidmedia) {
@@ -708,7 +719,13 @@ int main(int argc, char **argv)
         bridge_name = "libprocamcamera2.so";
     }
 
+    if (timing) {
+        fprintf(stderr, "timing helper droidmedia ms=%lld\n", monotonic_ms() - started_ms);
+    }
     void *bridge = android_dlopen(bridge_name, RTLD_NOW);
+    if (timing) {
+        fprintf(stderr, "timing helper bridge ms=%lld\n", monotonic_ms() - started_ms);
+    }
     if (!bridge) {
         fprintf(stderr,
                 "Android linker could not load %s. Install it under "
@@ -743,6 +760,23 @@ int main(int argc, char **argv)
     char json[131072] = {0};
     int result;
 
+    if (argc == 2 && !strcmp(argv[1], "--vendor-tags")) {
+        /* Diagnostics: vendor characteristics (MediaTek high-fps modes and
+         * the like) by id; can exceed the normal probe's buffer. */
+        probe_vendor_tags_fn vendor_tags = (probe_vendor_tags_fn)android_dlsym(
+            bridge, "sfos_camera2_probe_vendor_tags");
+        if (!vendor_tags) {
+            fprintf(stderr, "The installed bridge cannot list vendor tags.\n");
+            return 14;
+        }
+        const size_t size = 4 * 1024 * 1024;
+        char *buffer = calloc(1, size);
+        if (!buffer) return 3;
+        result = vendor_tags(buffer, size);
+        printf("%s\n", buffer);
+        free(buffer);
+        return result == 0 ? 0 : 1;
+    }
     if (argc == 1) {
         result = probe(json, sizeof(json));
     } else if (!strcmp(argv[1], "--preview")) {
@@ -760,11 +794,16 @@ int main(int argc, char **argv)
         int raw_height = 0;
         int raw_format = 0;
         int preview_yuv = 0;
+        int start_paused = 0;
         float zoom_ratio = 1.0f;
         float focus_x = -1.0f;
         float focus_y = -1.0f;
         int video_width = 0;
         int video_height = 0;
+        int32_t preview_vendor_tags[8];
+        int32_t preview_vendor_values[8];
+        int preview_vendor_count = 0;
+        int preview_force_fps = 0;
         int video_fps = 30;
         int video_bitrate = 20000000;
         int stabilization = 1;
@@ -811,6 +850,8 @@ int main(int argc, char **argv)
                     raw_format = 0;
                 } else if (!strcmp(format, "yuv")) {
                     raw_format = 1;
+                } else if (!strcmp(format, "jpeg")) {
+                    raw_format = 2;
                 } else {
                     fprintf(stderr, "Invalid --raw-format value\n");
                     return 2;
@@ -858,6 +899,24 @@ int main(int argc, char **argv)
                     fprintf(stderr, "Invalid --focus-y value\n");
                     return 2;
                 }
+            } else if (!strcmp(argv[index], "--start-paused")) {
+                start_paused = 1;
+            } else if (!strcmp(argv[index], "--force-fps")) {
+                preview_force_fps = 1;
+            } else if (!strcmp(argv[index], "--vendor") && index + 1 < argc) {
+                /* Diagnostics for video mode: TAG=VALUE int32 vendor settings. */
+                char *end = NULL;
+                const char *text = argv[++index];
+                const unsigned long tag = strtoul(text, &end, 0);
+                long value = 0;
+                if (end && *end == '=') value = strtol(end + 1, &end, 0);
+                if (!end || *end || preview_vendor_count >= 8) {
+                    fprintf(stderr, "--vendor is TAG=VALUE (at most 8)\n");
+                    return 2;
+                }
+                preview_vendor_tags[preview_vendor_count] = (int32_t)tag;
+                preview_vendor_values[preview_vendor_count] = (int32_t)value;
+                ++preview_vendor_count;
             } else if (!strcmp(argv[index], "--video-size") && index + 1 < argc) {
                 if (parse_size(argv[++index], &video_width, &video_height) != 0) {
                     fprintf(stderr, "Invalid --video-size value\n");
@@ -960,6 +1019,12 @@ int main(int argc, char **argv)
             signal(SIGTERM, relay_quit_signal);
             signal(SIGINT, relay_quit_signal);
             signal(SIGPIPE, SIG_IGN);
+            record_set_vendor_fn set_vendor = (record_set_vendor_fn)android_dlsym(
+                bridge, "sfos_camera2_record_set_vendor");
+            if (set_vendor) {
+                set_vendor(preview_vendor_tags, preview_vendor_values, preview_vendor_count,
+                           preview_force_fps);
+            }
             preview_set_video(video_width, video_height, video_fps,
                               video_bitrate, stabilization, hevc,
                               relay.capture.sample_rate,
@@ -969,7 +1034,8 @@ int main(int argc, char **argv)
                              timeout_seconds * 1000, output_fd, control_fd,
                              jpeg_width, jpeg_height, jpeg_quality,
                              jpeg_orientation, raw_width, raw_height,
-                             raw_format | (preview_yuv ? SFOS_CAMERA2_PREVIEW_YUV_FRAMES : 0),
+                             raw_format | (preview_yuv ? SFOS_CAMERA2_PREVIEW_YUV_FRAMES : 0)
+                                 | (start_paused ? SFOS_CAMERA2_PREVIEW_START_PAUSED : 0),
                              zoom_ratio, focus_x, focus_y,
                              json, sizeof(json));
         if (video_width > 0) {
@@ -1273,6 +1339,10 @@ int main(int argc, char **argv)
         int audio_channels = 1;
         int repeat = 1;
         int force = 0;
+        int32_t vendor_tags[8];
+        int32_t vendor_values[8];
+        int vendor_count = 0;
+        int force_fps = 0;
 
         if (!record_video || !record_audio_push) {
             fprintf(stderr, "The installed bridge does not support video "
@@ -1359,6 +1429,26 @@ int main(int argc, char **argv)
                 }
             } else if (!strcmp(argv[index], "--force")) {
                 force = 1;
+            } else if (!strcmp(argv[index], "--force-fps")) {
+                force_fps = 1;
+            } else if (!strcmp(argv[index], "--vendor") && index + 1 < argc) {
+                /* TAG=VALUE, both decimal or 0x hex: an int32 vendor setting
+                 * for the session and every request (diagnostics). */
+                char *end = NULL;
+                const char *text = argv[++index];
+                const unsigned long tag = strtoul(text, &end, 0);
+                if (!end || *end != '=' || vendor_count >= 8) {
+                    fprintf(stderr, "--vendor is TAG=VALUE (at most 8)\n");
+                    return 2;
+                }
+                const long value = strtol(end + 1, &end, 0);
+                if (*end) {
+                    fprintf(stderr, "--vendor is TAG=VALUE (at most 8)\n");
+                    return 2;
+                }
+                vendor_tags[vendor_count] = (int32_t)tag;
+                vendor_values[vendor_count] = (int32_t)value;
+                ++vendor_count;
             } else {
                 fprintf(stderr, "Unknown or incomplete option: %s\n",
                         argv[index]);
@@ -1390,6 +1480,15 @@ int main(int argc, char **argv)
                 pa_simple_free(capture.stream);
                 capture.stream = NULL;
             }
+        }
+        record_set_vendor_fn set_vendor = (record_set_vendor_fn)android_dlsym(
+            bridge, "sfos_camera2_record_set_vendor");
+        if ((vendor_count || force_fps) && !set_vendor) {
+            fprintf(stderr, "The installed bridge has no vendor video settings.\n");
+            return 14;
+        }
+        if (set_vendor) {
+            set_vendor(vendor_tags, vendor_values, vendor_count, force_fps);
         }
         result = record_video(camera_id, width, height, fps, bitrate,
                               seconds * 1000, stabilization, hevc, orientation,

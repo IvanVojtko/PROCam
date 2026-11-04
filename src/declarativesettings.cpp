@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "declarativesettings.h"
+#include "storagefolders.h"
 
 #include <QDebug>
 #include <QDir>
@@ -13,10 +14,12 @@
 #include <QQmlEngine>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStorageInfo>
 #include <QLocale>
 #include <QTemporaryFile>
 #include <partitionmanager.h>
 
+#include <pwd.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <limits>
@@ -26,10 +29,18 @@ DeclarativeSettings::DeclarativeSettings(QObject *parent)
     , m_partitionManager(new PartitionManager(this))
     , m_storagePath(QStringLiteral("/apps/procam/storagePath"))
     , m_minSpaceForRecording(QStringLiteral("/apps/procam/minSpaceForRecording"))
+    , m_customPhotoDirectory(QStringLiteral("/apps/procam/photoDirectory"))
+    , m_customVideoDirectory(QStringLiteral("/apps/procam/videoDirectory"))
+    , m_customPhotoDirectoryAvailable(false)
+    , m_customVideoDirectoryAvailable(false)
     , m_storagePathStatus(NotSet)
     , m_storageMaxFileSize(0)
 {
     connect(&m_storagePath, SIGNAL(valueChanged()), this, SLOT(verifyStoragePath()));
+    connect(&m_customPhotoDirectory, SIGNAL(valueChanged()), this, SIGNAL(customPhotoDirectoryChanged()));
+    connect(&m_customPhotoDirectory, SIGNAL(valueChanged()), this, SLOT(verifyStoragePath()));
+    connect(&m_customVideoDirectory, SIGNAL(valueChanged()), this, SIGNAL(customVideoDirectoryChanged()));
+    connect(&m_customVideoDirectory, SIGNAL(valueChanged()), this, SLOT(verifyStoragePath()));
     connect(m_partitionManager, SIGNAL(partitionRemoved(const Partition&)), this, SLOT(verifyStoragePath()));
     connect(m_partitionManager, SIGNAL(partitionAdded(const Partition&)), this, SLOT(verifyStoragePath()));
     connect(m_partitionManager, SIGNAL(partitionChanged(const Partition&)), this, SLOT(verifyStoragePath()));
@@ -102,6 +113,66 @@ qint64 DeclarativeSettings::storageMaxFileSize() const
     return m_storageMaxFileSize;
 }
 
+QString DeclarativeSettings::customPhotoDirectory() const
+{
+    return m_customPhotoDirectory.value().toString();
+}
+
+void DeclarativeSettings::setCustomPhotoDirectory(const QString &path)
+{
+    if (path == customPhotoDirectory())
+        return;
+
+    if (path.isEmpty())
+        m_customPhotoDirectory.unset();
+    else
+        m_customPhotoDirectory.set(QDir::cleanPath(path));
+}
+
+QString DeclarativeSettings::customVideoDirectory() const
+{
+    return m_customVideoDirectory.value().toString();
+}
+
+void DeclarativeSettings::setCustomVideoDirectory(const QString &path)
+{
+    if (path == customVideoDirectory())
+        return;
+
+    if (path.isEmpty())
+        m_customVideoDirectory.unset();
+    else
+        m_customVideoDirectory.set(QDir::cleanPath(path));
+}
+
+bool DeclarativeSettings::customPhotoDirectoryAvailable() const
+{
+    return m_customPhotoDirectoryAvailable;
+}
+
+bool DeclarativeSettings::customVideoDirectoryAvailable() const
+{
+    return m_customVideoDirectoryAvailable;
+}
+
+bool DeclarativeSettings::folderAllowed(const QString &path) const
+{
+    const struct passwd *account = getpwuid(getuid());
+    const QStringList roots = procamFolderRoots(
+                QStandardPaths::writableLocation(QStandardPaths::PicturesLocation),
+                QStandardPaths::writableLocation(QStandardPaths::MoviesLocation),
+                account ? QString::fromLocal8Bit(account->pw_name) : QString());
+    return procamFolderAllowed(path, roots);
+}
+
+// A picked folder is used only while it exists and can be written to: a
+// memory card that is out, or a folder deleted in the meantime, falls back to
+// the default folder instead of recreating the path somewhere unexpected.
+bool DeclarativeSettings::customDirectoryUsable(const QString &path)
+{
+    return folderAllowed(path) && QFileInfo(path).isDir() && verifyWritable(path);
+}
+
 void DeclarativeSettings::fixupPermissions(const QString &targetPath)
 {
     const QByteArray path = targetPath.toUtf8();
@@ -126,10 +197,28 @@ static qint64 getMaxBytes(Partition partition)
     return realMaxBytes;
 }
 
+// The recording limit for a picked video folder, as for the storage choice:
+// a memory card may be filled, device memory keeps minSpaceForRecording free.
+qint64 DeclarativeSettings::maxFileSizeIn(const QString &directory) const
+{
+    const QString rootPath = QStorageInfo(directory).rootPath();
+    const QVector<Partition> partitions = m_partitionManager->partitions();
+    auto it = std::find_if(partitions.begin(), partitions.end(), [rootPath](const Partition &partition) {
+        return partition.mountPath() == rootPath; });
+    if (it == partitions.end())
+        return 0;
+
+    if (it->storageType() == Partition::External)
+        return getMaxBytes(*it);
+    return qMax((qint64)0, getMaxBytes(*it) - (m_minSpaceForRecording.value(100).toLongLong() << 20));
+}
+
 void DeclarativeSettings::verifyStoragePath()
 {
     const QString prevPhotoPath = m_photoDirectory;
     const QString prevVideoPath = m_videoDirectory;
+    const bool prevPhotoAvailable = m_customPhotoDirectoryAvailable;
+    const bool prevVideoAvailable = m_customVideoDirectoryAvailable;
 
     QString path = storagePath();
     StoragePathStatus oldStatus = m_storagePathStatus;
@@ -176,13 +265,25 @@ void DeclarativeSettings::verifyStoragePath()
         }
     }
 
+    const QString customPhotoPath = customPhotoDirectory();
+    m_customPhotoDirectoryAvailable = !customPhotoPath.isEmpty() && customDirectoryUsable(customPhotoPath);
+    if (m_customPhotoDirectoryAvailable)
+        m_photoDirectory = customPhotoPath;
+
+    const QString customVideoPath = customVideoDirectory();
+    m_customVideoDirectoryAvailable = !customVideoPath.isEmpty() && customDirectoryUsable(customVideoPath);
+    if (m_customVideoDirectoryAvailable) {
+        m_videoDirectory = customVideoPath;
+        m_storageMaxFileSize = maxFileSizeIn(customVideoPath);
+    }
+
     QDir(m_photoDirectory).mkpath(QLatin1String("."));
     QDir(m_videoDirectory).mkpath(QLatin1String(".recording"));
 
-    if (prevPhotoPath != m_photoDirectory) {
+    if (prevPhotoPath != m_photoDirectory || prevPhotoAvailable != m_customPhotoDirectoryAvailable) {
         emit photoDirectoryChanged();
     }
-    if (prevVideoPath != m_videoDirectory) {
+    if (prevVideoPath != m_videoDirectory || prevVideoAvailable != m_customVideoDirectoryAvailable) {
         emit videoDirectoryChanged();
     }
 

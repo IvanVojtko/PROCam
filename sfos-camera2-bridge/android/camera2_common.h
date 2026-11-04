@@ -286,6 +286,10 @@ bool sfos_camera2_set_zoom_ratio(const ACameraMetadata *metadata,
  *
  * @return false when no range reaches fps.
  */
+/* The diagnostic vendor video settings (sfos_camera2_record_set_vendor):
+ * returns their count; force_fps allows a rate the standard ranges lack. */
+int sfos_camera2_vendor_video_settings(const int32_t **tags, const int32_t **values,
+                                       bool *force_fps);
 bool sfos_camera2_video_fps_range(const ACameraMetadata *metadata, int fps,
                                   int32_t range[2]);
 

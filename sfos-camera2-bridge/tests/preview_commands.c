@@ -26,6 +26,9 @@ int main(void) {
     assert(command.type == PREVIEW_COMMAND_RECORD_STOP);
     assert(preview_parse_record_command(" quit \r", &command));
     assert(command.type == PREVIEW_COMMAND_QUIT);
+    assert(preview_parse_record_command("resume", &command));
+    assert(command.type == PREVIEW_COMMAND_RESUME);
+    assert(!preview_parse_record_command("resumes", &command));
     assert(!preview_parse_record_command("record-stopper", &command));
     assert(!preview_parse_record_command("record-starts 0 /a.mp4", &command));
     assert(!preview_parse_record_command("focus 0.5 0.5", &command));

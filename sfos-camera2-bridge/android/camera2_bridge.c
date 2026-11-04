@@ -718,3 +718,103 @@ int sfos_camera2_probe(char *out, size_t out_size)
 
     return writer.truncated ? -4 : 0;
 }
+
+/* Vendor-specific characteristics (tag ids from 0x80000000), for finding
+ * features such as MediaTek's high-fps and slow-motion video modes. Names
+ * are not available through the NDK, only ids, types and values. Separate
+ * from sfos_camera2_probe(): the app parses that one, and vendor metadata
+ * can be large. */
+static void append_tag_list(struct json_writer *writer, const ACameraMetadata *metadata,
+                            uint32_t tag, bool vendor_only)
+{
+    ACameraMetadata_const_entry entry;
+    json_appendf(writer, "[");
+    bool first = true;
+    if (ACameraMetadata_getConstEntry(metadata, tag, &entry) == ACAMERA_OK) {
+        for (uint32_t i = 0; i < entry.count; ++i) {
+            const uint32_t key = (uint32_t)entry.data.i32[i];
+            if (vendor_only && key < 0x80000000u) continue;
+            json_appendf(writer, "%s\"0x%08x\"", first ? "" : ",", key);
+            first = false;
+        }
+    }
+    json_appendf(writer, "]");
+}
+
+static void append_vendor_entry(struct json_writer *writer, const ACameraMetadata_const_entry *entry)
+{
+    static const char *const types[] = { "u8", "i32", "f", "i64", "d", "r" };
+    const uint32_t shown = entry->count < 96 ? entry->count : 96;
+    json_appendf(writer, "{\"tag\":\"0x%08x\",\"type\":\"%s\",\"count\":%u,\"values\":[",
+                 entry->tag, entry->type < 6 ? types[entry->type] : "?", entry->count);
+    for (uint32_t i = 0; i < shown && !writer->truncated; ++i) {
+        const char *comma = i ? "," : "";
+        switch (entry->type) {
+        case ACAMERA_TYPE_BYTE: json_appendf(writer, "%s%u", comma, entry->data.u8[i]); break;
+        case ACAMERA_TYPE_INT32: json_appendf(writer, "%s%d", comma, entry->data.i32[i]); break;
+        case ACAMERA_TYPE_FLOAT: json_appendf(writer, "%s%g", comma, entry->data.f[i]); break;
+        case ACAMERA_TYPE_INT64:
+            json_appendf(writer, "%s%lld", comma, (long long)entry->data.i64[i]); break;
+        case ACAMERA_TYPE_DOUBLE: json_appendf(writer, "%s%g", comma, entry->data.d[i]); break;
+        case ACAMERA_TYPE_RATIONAL:
+            json_appendf(writer, "%s\"%d/%d\"", comma, entry->data.r[i].numerator,
+                         entry->data.r[i].denominator);
+            break;
+        default: break;
+        }
+    }
+    json_appendf(writer, "]}");
+}
+
+SFOS_CAMERA2_EXPORT int sfos_camera2_probe_vendor_tags(char *out, size_t out_size)
+{
+    if (!out || out_size < 64) return -1;
+    struct json_writer writer = { out, out_size, 0, false };
+    out[0] = '\0';
+    ACameraManager *manager = ACameraManager_create();
+    ACameraIdList *camera_ids = NULL;
+    if (!manager || ACameraManager_getCameraIdList(manager, &camera_ids) != ACAMERA_OK || !camera_ids) {
+        if (manager) ACameraManager_delete(manager);
+        snprintf(out, out_size, "{\"status\":\"error\",\"stage\":\"camera_list\"}");
+        return -2;
+    }
+    json_appendf(&writer, "{\"status\":\"ok\",\"cameras\":[");
+    for (int index = 0; index < camera_ids->numCameras; ++index) {
+        const char *id = camera_ids->cameraIds[index];
+        ACameraMetadata *metadata = NULL;
+        json_appendf(&writer, "%s{\"id\":", index ? "," : "");
+        json_string(&writer, id);
+        if (ACameraManager_getCameraCharacteristics(manager, id, &metadata) != ACAMERA_OK ||
+                !metadata) {
+            json_appendf(&writer, ",\"status\":\"error\"}");
+            continue;
+        }
+        json_appendf(&writer, ",\"session_keys\":");
+        append_tag_list(&writer, metadata, ACAMERA_REQUEST_AVAILABLE_SESSION_KEYS, false);
+        json_appendf(&writer, ",\"vendor_request_keys\":");
+        append_tag_list(&writer, metadata, ACAMERA_REQUEST_AVAILABLE_REQUEST_KEYS, true);
+        json_appendf(&writer, ",\"vendor_result_keys\":");
+        append_tag_list(&writer, metadata, ACAMERA_REQUEST_AVAILABLE_RESULT_KEYS, true);
+        json_appendf(&writer, ",\"vendor_characteristics\":[");
+        int32_t count = 0;
+        const uint32_t *tags = NULL;
+        bool first = true;
+        if (ACameraMetadata_getAllTags(metadata, &count, &tags) == ACAMERA_OK) {
+            for (int32_t i = 0; i < count && !writer.truncated; ++i) {
+                ACameraMetadata_const_entry entry;
+                if (tags[i] < 0x80000000u ||
+                        ACameraMetadata_getConstEntry(metadata, tags[i], &entry) != ACAMERA_OK)
+                    continue;
+                if (!first) json_appendf(&writer, ",");
+                append_vendor_entry(&writer, &entry);
+                first = false;
+            }
+        }
+        json_appendf(&writer, "]}");
+        ACameraMetadata_free(metadata);
+    }
+    json_appendf(&writer, "]}");
+    ACameraManager_deleteCameraIdList(camera_ids);
+    ACameraManager_delete(manager);
+    return writer.truncated ? -4 : 0;
+}
