@@ -30,6 +30,9 @@ SettingsBase {
     // Night mode: offered (moon in the top bar) when the scene is too dark,
     // switched on by the user; not remembered across restarts.
     property bool nightMode: false
+    // Video torch (the flash lit while filming), from the top bar's torch
+    // chip; off again when leaving video or switching cameras.
+    property bool torch: false
     readonly property int exposureCompensationDefault: 0
     property var viewfinderGridValues: [ "none", "thirds" ]
 
@@ -149,7 +152,6 @@ SettingsBase {
         property bool focusPeaking: false
         property bool exposureZebras: false
         property bool simpleHistogramVisible: true
-        property bool experimentalExposureLayout: false
         // Full-screen viewfinder (crops the 4:3 frame) or the whole frame fitted.
         property bool viewfinderFill: true
         // HDR: every photo is a merged RAW burst rendered to JPEG, in both
@@ -162,6 +164,9 @@ SettingsBase {
         // instead of as others see the scene (the flip chip on the front
         // camera's top bar).
         property bool mirrorSelfies: false
+        // Photo flash: "off", "auto" (when the camera's exposure asks for it)
+        // or "on". Flash photos are single frames; night mode never flashes.
+        property string camera2Flash: "off"
         // Lets tools/device-smoke-test.sh press the shutter over D-Bus
         // (com.procam.camera.ui.capture). Off unless the script runs.
         property bool smokeTestCapture: false
@@ -417,7 +422,11 @@ SettingsBase {
                                        : camera2Capabilities.camera2RawSizeModel(
                                              deviceId, "raw16")
         }
-        return camera2Capabilities.camera2JpegSizeModel(deviceId)
+        // JPEG mode renders the burst stream (camera2JpegFromRaw), so only
+        // its sizes take effect; the HAL's JPEG sizes are the fallback.
+        var burstSizes = camera2Capabilities.camera2BurstSizeModel(deviceId)
+        return burstSizes.length > 0 ? burstSizes
+                                     : camera2Capabilities.camera2JpegSizeModel(deviceId)
     }
 
     function camera2PreferredCaptureSize(format) {
@@ -461,10 +470,15 @@ SettingsBase {
         return camera2Capabilities.camera2BurstSupported(cameraId !== undefined ? cameraId : deviceId)
     }
 
+    function camera2FlashSupported(cameraId) {
+        return camera2Capabilities.camera2FlashSupported(cameraId !== undefined ? cameraId : deviceId)
+    }
+
     function camera2BurstRawSize() {
         void camera2RawRevision
-        return camera2Capabilities.camera2BurstRawSize(
-                    deviceId, modeSettings.camera2CaptureFormat === "raw" ? modeSettings.rawCaptureSize : "")
+        // The size picked in RAW and JPEG mode (camera2SizeModel offers
+        // burst sizes there); the largest one if it cannot stream.
+        return camera2Capabilities.camera2BurstRawSize(deviceId, modeSettings.rawCaptureSize)
     }
 
     function camera2PreferredPreviewSize(cameraId, large) {

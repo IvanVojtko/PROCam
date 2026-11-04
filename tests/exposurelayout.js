@@ -30,8 +30,27 @@ for(const deckHeight of [240,360,720]) {
 const overlay=read('src/settings/SettingsOverlay.qml');
 assert(!overlay.includes('curvature:'));
 assert(qml.includes('property real curvature: 0'));
-assert.equal((overlay.match(/selectionAtTop: camera2ControlGrid.experimentalLayout/g)||[]).length,2);
-assert(overlay.includes('centerWidth + speedWidth + isoWidth + 2 * columnGap'));
-assert(overlay.includes('shutterZoomArea.y + bottomShutterAnchor.y + bottomShutterAnchor.height / 2'));
-assert(read('src/settings.qml').includes('property bool experimentalExposureLayout: false'));
-console.log('Experimental layout alignment, straight lower values and selection-preserving toggle checks passed.');
+// Pro mode: Auto's deck plus ProControls' chips and one dial, no own grid.
+assert(!overlay.includes('camera2ControlGrid'));
+assert(overlay.includes('ProControls {'));
+assert(overlay.includes('? simpleBottomShutterAnchor'));
+assert(!read('src/settings.qml').includes('experimentalExposureLayout'));
+const pro=read('src/settings/ProControls.qml');
+const p={Settings:{mode:{rawCaptureFocusMode:'auto',rawCaptureFocusDistance:'0'},
+ camera2SelectableFocusModeModel:()=>['auto','continuous','manual','infinity'],
+ camera2ManualFocusDistanceModel:()=>['0.5','10','2'],
+ rawCaptureFocusDistanceLabel:d=>d+'D'}};
+p.root=p;vm.createContext(p);
+for(const name of ['evText','focusValues','focusValue','selectFocus'])
+ vm.runInContext(pro.match(new RegExp('    function '+name+'\\([^)]*\\) \\{[\\s\\S]*?\\n    \\}'))[0],p);
+assert.deepEqual([0,1,-1,2/3,-8].map(p.evText),['±0 EV','+0.5 EV','−0.5 EV','+0.3 EV','−4 EV']);
+// Near to far: modes, distances by falling diopters, then infinity.
+p.focusModel=p.focusValues();
+assert.deepEqual(p.focusModel,['auto','continuous','10','2','0.5','infinity']);
+p.selectFocus('2');
+assert.deepEqual([p.Settings.mode.rawCaptureFocusMode,p.focusValue()],['manual','2']);
+p.selectFocus('infinity');
+assert.deepEqual([p.Settings.mode.rawCaptureFocusMode,p.focusValue()],['infinity','infinity']);
+p.Settings.camera2SelectableFocusModeModel=()=>['auto'];
+assert.deepEqual(p.focusValues(),['auto']);
+console.log('Straight lower values, selection-preserving toggles and Pro chip labels and focus dial checks passed.');

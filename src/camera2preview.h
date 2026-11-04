@@ -51,6 +51,10 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(int noiseReduction READ noiseReduction WRITE setNoiseReduction NOTIFY noiseReductionChanged)
     Q_PROPERTY(bool focusPeaking READ focusPeaking WRITE setFocusPeaking NOTIFY focusPeakingChanged)
     Q_PROPERTY(bool exposureZebras READ exposureZebras WRITE setExposureZebras NOTIFY exposureZebrasChanged)
+    // "off", "auto" (the preview's AE then reports when the flash is needed),
+    // "on" or "torch" (lit continuously, for video). Photos fire the flash
+    // only when captureRaw() is asked to.
+    Q_PROPERTY(QString flashMode READ flashMode WRITE setFlashMode NOTIFY flashModeChanged)
     Q_PROPERTY(qreal renderExposure READ renderExposure WRITE setRenderExposure NOTIFY renderExposureChanged)
     Q_PROPERTY(QString sceneMode READ sceneMode WRITE setSceneMode NOTIFY sceneModeChanged)
     Q_PROPERTY(int colorTemperature READ colorTemperature WRITE setColorTemperature NOTIFY colorTemperatureChanged)
@@ -173,6 +177,8 @@ public:
     void setFocusPeaking(bool enabled);
     bool exposureZebras() const { return m_exposureZebras; }
     void setExposureZebras(bool enabled);
+    QString flashMode() const { return m_flashMode; }
+    void setFlashMode(const QString &flashMode);
     qreal renderExposure() const;
     void setRenderExposure(qreal renderExposure);
 
@@ -247,11 +253,13 @@ public:
                                              int sensorSensitivity,
                                              const QString &exposureTime);
     Q_INVOKABLE bool captureRaw(const QString &rawPath,
-                                const QString &metadataPath);
+                                const QString &metadataPath,
+                                bool flash = false);
     Q_INVOKABLE bool captureRawWithExposure(const QString &rawPath,
                                             const QString &metadataPath,
                                             int sensorSensitivity,
-                                            const QString &exposureTime);
+                                            const QString &exposureTime,
+                                            bool flash = false);
     Q_INVOKABLE bool captureRawBracket(const QVariantList &rawPaths,
                                        const QVariantList &metadataPaths,
                                        int sensorSensitivity,
@@ -275,6 +283,7 @@ protected:
 
 private:
     bool frameGeometry(const QSizeF &imageSize, QRectF *drawRect, QRectF *sourceRect) const;
+    qreal frameCropZoom() const;
     bool startRawFrameSet(const QByteArray &command, const QVariantList &rawPaths,
                           const QVariantList &metadataPaths);
     void finishJpegCapture(const QString &path);
@@ -309,6 +318,7 @@ signals:
     void noiseReductionChanged();
     void focusPeakingChanged();
     void exposureZebrasChanged();
+    void flashModeChanged();
     void renderExposureChanged();
     void sceneModeChanged();
     void colorTemperatureChanged();
@@ -380,6 +390,7 @@ private:
     bool frameMirror() const;
     void sendSettings();
     void sendSettings(bool captureExposure);
+    void sendFlashMode();
     void sendExposureSettings(bool captureExposure);
     void restorePreviewSettingsAfterCapture();
     void setErrorString(const QString &errorString);
@@ -407,6 +418,9 @@ private:
     bool m_fill = false;
     QString m_photoAspect = QStringLiteral("4:3");
     qreal m_zoom = 1.0;
+    // Zoom the camera already cropped the preview frames with (the bridge's
+    // "zoom=" metadata); the viewfinder crops only what is left of m_zoom.
+    qreal m_frameZoom = 1.0;
     qreal m_focusX = -1.0;
     qreal m_focusY = -1.0;
     QString m_focusMode = QStringLiteral("continuous");
@@ -418,6 +432,7 @@ private:
     int m_noiseReduction = 0;
     bool m_focusPeaking = false;
     bool m_exposureZebras = false;
+    QString m_flashMode = QStringLiteral("off");
     qreal m_renderExposure = 1.0;
     QString m_sceneMode = QStringLiteral("manual");
     int m_colorTemperature = 0;

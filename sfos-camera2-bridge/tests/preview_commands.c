@@ -43,6 +43,20 @@ int main(void) {
     assert(command.type == PREVIEW_COMMAND_CAPTURE_RAW);
     assert(!strcmp(command.path, "/tmp/a.raw"));
     assert(!strcmp(command.metadata_path, "/tmp/a.json"));
+    assert(!command.flash);
+    assert(preview_parse_capture_command("capture-raw /tmp/a.raw /tmp/a.json flash", &command));
+    assert(command.type == PREVIEW_COMMAND_CAPTURE_RAW && command.flash);
+    assert(!strcmp(command.metadata_path, "/tmp/a.json"));
+    for (int mode = 0; mode < 4; ++mode) {
+        static const char *const lines[] = { "flash off", "flash auto\n", "flash on", "flash torch" };
+        memset(&command, 0, sizeof(command));
+        assert(preview_parse_flash_command(lines[mode], &command));
+        assert(command.type == PREVIEW_COMMAND_FLASH && command.flash_mode == mode);
+    }
+    assert(!preview_parse_flash_command("flash strobe", &command));
+    assert(!preview_parse_flash_command("flash on extra", &command));
+    assert(!preview_parse_flash_command("flash", &command));
+    assert(!preview_parse_flash_command("flashes on", &command));
     assert(preview_parse_capture_command("capture-jpeg /tmp/a.jpg", &command));
     assert(command.type == PREVIEW_COMMAND_CAPTURE_JPEG);
     // Regression: previously sscanf(capture-raw ...) consumed this as
@@ -103,6 +117,7 @@ int main(void) {
     invalid("capture-raw");
     invalid("capture-raw a");
     invalid("capture-raw a b extra");
+    invalid("capture-raw a b flash extra");
     invalid("capture-raw-suffix a b");
     invalid("capture-jpeg-suffix a");
     invalid("capture-jpeg a extra");

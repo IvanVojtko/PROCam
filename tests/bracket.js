@@ -64,7 +64,8 @@ assert(cameraSource.includes('&& (hdrCapture || jpegFromRaw'));
 // Camera switching: flip + ultra-wide icons from Camera2 roles, preview from sensor orientation.
 const overlaySource=read('src/settings/SettingsOverlay.qml');
 assert(!overlaySource.includes('CameraLensSelector {'));
-assert.equal(overlaySource.split('CameraSwitchButtons {').length - 1, 2);
+// One deck for Auto and Pro: a single camera switch.
+assert.equal(overlaySource.split('CameraSwitchButtons {').length - 1, 1);
 assert(read('src/settings/CameraSwitchButtons.qml').includes('Settings.camera2CameraRoles()'));
 assert(extensions.includes('QVariantMap DeclarativeCameraExtensions::camera2CameraRoles()'));
 assert(extensions.includes('.value(QStringLiteral("sensor_orientation")).toInt(-1)'));

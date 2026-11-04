@@ -86,6 +86,7 @@ struct preview_result_raw_metadata {
     int32_t af_state;
     int32_t lens_state;
     float lens_focus_distance;
+    int32_t flash_state;
 };
 
 struct preview_raw_image_metadata {
@@ -158,7 +159,13 @@ struct preview_context {
     int focus_hold_active;
     float focus_hold_distance;
     atomic_int live_af_state;
+    atomic_int live_ae_state;
     atomic_int live_focus_distance_micros;
+    // CONTROL_ZOOM_RATIO the preview frames were cropped with (x1000).
+    atomic_int live_zoom_milli;
+    // enum preview_flash_mode; raw_flash: the pending capture-raw fires it.
+    int flash_mode;
+    int raw_flash;
     int exposure_compensation;
     int original_scene_mode;
     int scene_mode;
@@ -581,6 +588,23 @@ static void preview_configure_request(ACaptureRequest *request,
     sfos_camera2_set_manual_sensor(metadata, request,
                                    context->sensor_sensitivity,
                                    context->exposure_time_ns);
+    // Auto flash: the preview's AE then reports FLASH_REQUIRED, which the app
+    // reads from the meter lines. Stills fire the flash per photo instead.
+    // Torch: the flash stays lit (video); otherwise preview frames keep it
+    // off, also after a torch (precapture switches the AE mode instead).
+    if (!still && metadata && sfos_camera2_metadata_has_u8(metadata, ACAMERA_CONTROL_AE_AVAILABLE_MODES,
+                                                           ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH)) {
+        sfos_camera2_set_request_u8(request, ACAMERA_FLASH_MODE,
+                                    context->flash_mode == PREVIEW_FLASH_TORCH
+                                    ? ACAMERA_FLASH_MODE_TORCH : ACAMERA_FLASH_MODE_OFF);
+    }
+    if (!still && context->flash_mode == PREVIEW_FLASH_AUTO &&
+            context->sensor_sensitivity == 0 && context->exposure_time_ns == 0 &&
+            metadata && sfos_camera2_metadata_has_u8(metadata, ACAMERA_CONTROL_AE_AVAILABLE_MODES,
+                                                     ACAMERA_CONTROL_AE_MODE_ON_AUTO_FLASH)) {
+        sfos_camera2_set_request_u8(request, ACAMERA_CONTROL_AE_MODE,
+                                    ACAMERA_CONTROL_AE_MODE_ON_AUTO_FLASH);
+    }
     if (context->sensor_sensitivity == 0 && context->exposure_time_ns == 0) {
         sfos_camera2_set_request_u8(request, ACAMERA_CONTROL_CAPTURE_INTENT,
             still ? ACAMERA_CONTROL_CAPTURE_INTENT_STILL_CAPTURE
@@ -717,6 +741,89 @@ static void preview_unlock_focus(ACameraCaptureSession *session,
     ACameraCaptureSession_capture(session, callbacks, 1, requests, NULL);
     sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AF_TRIGGER,
                                 ACAMERA_CONTROL_AF_TRIGGER_IDLE);
+}
+
+// Flash for a single RAW frame. With auto exposure, Android's precapture
+// sequence first meters with a pre-flash, then the frame's AE mode fires the
+// main flash; with manual shutter and ISO (AE off) the flash fires during the
+// frame. Returns true when the preview was switched for the precapture.
+static bool preview_prepare_flash(struct preview_context *context,
+                                  ACameraCaptureSession *session,
+                                  ACaptureRequest *preview_request,
+                                  ACaptureRequest *still_request,
+                                  ACameraCaptureSession_captureCallbacks *callbacks)
+{
+    if (context->sensor_sensitivity > 0 && context->exposure_time_ns > 0) {
+        sfos_camera2_set_request_u8(still_request, ACAMERA_FLASH_MODE,
+                                    ACAMERA_FLASH_MODE_SINGLE);
+        fprintf(stderr, "capture-flash manual iso=%d shutter=%lld\n",
+                context->sensor_sensitivity, (long long)context->exposure_time_ns);
+        return false;
+    }
+    const int64_t started = sfos_camera2_now_ms();
+    atomic_store_explicit(&context->live_ae_state, -1, memory_order_release);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AE_MODE,
+                                ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER,
+                                ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER_START);
+    ACaptureRequest *requests[] = { preview_request };
+    camera_status_t status = ACameraCaptureSession_capture(session, callbacks, 1,
+                                                           requests, NULL);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER,
+                                ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER_IDLE);
+    ACameraCaptureSession_setRepeatingRequest(session, callbacks, 1, requests,
+                                              &context->repeat_sequence);
+    sfos_camera2_set_request_u8(still_request, ACAMERA_CONTROL_AE_MODE,
+                                ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH);
+    if (status != ACAMERA_OK) {
+        fprintf(stderr, "capture-flash precapture not submitted (status %d)\n", status);
+        return true;
+    }
+    // The pre-flash runs while AE reports PRECAPTURE; a HAL that skips that
+    // state is given half a second.
+    int state = -1;
+    bool metering = false;
+    while (sfos_camera2_now_ms() - started < 2000) {
+        state = atomic_load_explicit(&context->live_ae_state, memory_order_acquire);
+        if (state == ACAMERA_CONTROL_AE_STATE_PRECAPTURE) {
+            metering = true;
+        } else if ((metering || sfos_camera2_now_ms() - started > 500) &&
+                   (state == ACAMERA_CONTROL_AE_STATE_CONVERGED ||
+                    state == ACAMERA_CONTROL_AE_STATE_FLASH_REQUIRED ||
+                    state == ACAMERA_CONTROL_AE_STATE_LOCKED)) {
+            break;
+        }
+        sfos_camera2_sleep_10_ms();
+    }
+    fprintf(stderr, "capture-flash precapture ae_state=%d metered=%d waited_ms=%lld\n",
+            state, metering, (long long)(sfos_camera2_now_ms() - started));
+    return true;
+}
+
+// Queued after the flash frame: the still request and the preview go back
+// to their own exposure settings.
+static void preview_finish_flash(struct preview_context *context,
+                                 ACameraCaptureSession *session,
+                                 ACaptureRequest *preview_request,
+                                 ACaptureRequest *still_request,
+                                 const ACameraMetadata *metadata,
+                                 ACameraCaptureSession_captureCallbacks *callbacks,
+                                 bool precapture)
+{
+    sfos_camera2_set_request_u8(still_request, ACAMERA_FLASH_MODE, ACAMERA_FLASH_MODE_OFF);
+    preview_configure_request(still_request, context, metadata, 1);
+    if (!precapture) {
+        return;
+    }
+    ACaptureRequest *requests[] = { preview_request };
+    preview_configure_request(preview_request, context, metadata, 0);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER,
+                                ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL);
+    ACameraCaptureSession_capture(session, callbacks, 1, requests, NULL);
+    sfos_camera2_set_request_u8(preview_request, ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER,
+                                ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER_IDLE);
+    ACameraCaptureSession_setRepeatingRequest(session, callbacks, 1, requests,
+                                              &context->repeat_sequence);
 }
 
 static void preview_configure_raw_bracket_request(
@@ -859,7 +966,8 @@ static bool preview_parse_command_line(const char *line,
         return true;
     }
 
-    if (preview_parse_record_command(line, command)) {
+    if (preview_parse_record_command(line, command) ||
+            preview_parse_flash_command(line, command)) {
         return true;
     }
     return preview_parse_capture_command(line, command);
@@ -1274,7 +1382,8 @@ static void preview_write_metadata(struct preview_context *context,
                                    int32_t sensor_sensitivity,
                                    int64_t exposure_time_ns,
                                    int32_t af_state,
-                                   float focus_distance)
+                                   float focus_distance,
+                                   float zoom)
 {
     if (!context || context->output_fd < 0) {
         return;
@@ -1293,20 +1402,25 @@ static void preview_write_metadata(struct preview_context *context,
     int previous_focus_distance_micros = atomic_exchange_explicit(
         &context->live_focus_distance_micros, focus_distance_micros,
         memory_order_acq_rel);
+    const int zoom_milli = (int)(zoom * 1000.0f + 0.5f);
+    int previous_zoom_milli = atomic_exchange_explicit(
+        &context->live_zoom_milli, zoom_milli, memory_order_acq_rel);
     if (previous_sensitivity == sensor_sensitivity &&
             previous_exposure == (long long)exposure_time_ns &&
             previous_af_state == af_state &&
-            previous_focus_distance_micros == focus_distance_micros) {
+            previous_focus_distance_micros == focus_distance_micros &&
+            previous_zoom_milli == zoom_milli) {
         return;
     }
 
-    char payload[192];
+    // zoom: the frames' hardware crop; the app crops only the rest.
+    char payload[224];
     int payload_size = snprintf(payload, sizeof(payload),
                                 "focal=%.3f iso=%d shutter=%lld "
-                                "af_state=%d focus_distance=%.6f\n",
+                                "af_state=%d focus_distance=%.6f zoom=%.3f\n",
                                 context->focal_length, sensor_sensitivity,
                                 (long long)exposure_time_ns,
-                                af_state, focus_distance);
+                                af_state, focus_distance, zoom_milli / 1000.0f);
     if (payload_size <= 0 || payload_size >= (int)sizeof(payload)) {
         return;
     }
@@ -1561,12 +1675,17 @@ static void preview_capture_completed(void *opaque,
                           memory_order_release);
     int32_t af_state = sfos_camera2_first_u8(
         result, ACAMERA_CONTROL_AF_STATE, -1);
+    atomic_store_explicit(&context->live_ae_state,
+                          sfos_camera2_first_u8(result, ACAMERA_CONTROL_AE_STATE, -1),
+                          memory_order_release);
     float focus_distance = sfos_camera2_first_float(
         result, ACAMERA_LENS_FOCUS_DISTANCE, -1.0f);
+    // A HAL without zoom ratio results leaves the frames uncropped.
+    float zoom = sfos_camera2_first_float(result, ACAMERA_CONTROL_ZOOM_RATIO, 1.0f);
     if (sensitivity > 0 || exposure_time > 0 ||
             af_state >= 0 || focus_distance >= 0.0f) {
         preview_write_metadata(context, sensitivity, exposure_time,
-                               af_state, focus_distance);
+                               af_state, focus_distance, zoom > 0.0f ? zoom : 1.0f);
     }
     preview_write_faces(context, result);
 }
@@ -1828,6 +1947,14 @@ static bool preview_write_raw_metadata(const char *camera_id,
             (long long)(context->raw_metadata_written_ms -
                         context->raw_command_ms),
             (long long)(sfos_camera2_now_ms() - context->raw_command_ms));
+    // EXIF Flash: fired (1), did not fire (0), no flash unit (0x20).
+    fprintf(file, ",\n  \"flash_requested\":%s,\n  \"flash_state\":%d",
+            context->raw_flash ? "true" : "false", result->flash_state);
+    if (result->flash_state >= 0) {
+        fprintf(file, ",\n  \"exif_flash\":%d",
+                result->flash_state == ACAMERA_FLASH_STATE_FIRED ? 1
+                : result->flash_state == ACAMERA_FLASH_STATE_UNAVAILABLE ? 0x20 : 0);
+    }
     fputs(",\n  \"color_correction_gains\":", file);
     preview_print_float_array(file, result->color_gains,
                               result->color_gains_count);
@@ -2238,6 +2365,7 @@ static void preview_raw_capture_completed(void *opaque,
     destination->lens_state = sfos_camera2_first_u8(result, ACAMERA_LENS_STATE, -1);
     destination->lens_focus_distance = sfos_camera2_first_float(
         result, ACAMERA_LENS_FOCUS_DISTANCE, -1.0f);
+    destination->flash_state = sfos_camera2_first_u8(result, ACAMERA_FLASH_STATE, -1);
     fprintf(stderr,
             "capture-exposure warm-raw requested_iso=%d "
             "requested_shutter=%lld actual_iso=%d actual_shutter=%lld "
@@ -2906,6 +3034,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     context.focal_length = sfos_camera2_first_float(
         characteristics, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, 0.0f);
     atomic_store_explicit(&context.live_af_state, -1, memory_order_release);
+    atomic_store_explicit(&context.live_ae_state, -1, memory_order_release);
     atomic_store_explicit(&context.live_focus_distance_micros, -1,
                           memory_order_release);
 	    context.vendor_awb_value_supported = sfos_camera2_metadata_has_i32(
@@ -3418,6 +3547,13 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 ACaptureRequest *requests[] = { request };
                 ACameraCaptureSession_setRepeatingRequest(
                     session, &preview_callbacks, 1, requests, &context.repeat_sequence);
+            } else if (command.type == PREVIEW_COMMAND_FLASH) {
+                context.flash_mode = command.flash_mode;
+                preview_configure_request(request, &context, characteristics, 0);
+                preview_configure_request(focus_request, &context, characteristics, 0);
+                ACaptureRequest *requests[] = { request };
+                ACameraCaptureSession_setRepeatingRequest(
+                    session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_EXPOSURE_SETTINGS) {
                 context.sensor_sensitivity = command.sensor_sensitivity;
                 context.exposure_time_ns = command.exposure_time_ns;
@@ -3571,8 +3707,19 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 };
                 const bool focus_locked = preview_lock_focus(
                     &context, session, request, characteristics, &preview_callbacks);
+                context.raw_flash = command.flash && sfos_camera2_metadata_has_u8(
+                    characteristics, ACAMERA_CONTROL_AE_AVAILABLE_MODES,
+                    ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH);
+                if (command.flash && !context.raw_flash)
+                    fprintf(stderr, "capture-flash skipped: camera has no flash\n");
+                const bool precapture = context.raw_flash && preview_prepare_flash(
+                    &context, session, request, raw_request, &preview_callbacks);
                 camera_status_t raw_status = ACameraCaptureSession_capture(
                     session, &raw_callbacks, 1, raw_requests, NULL);
+                if (context.raw_flash) {
+                    preview_finish_flash(&context, session, request, raw_request,
+                                         characteristics, &preview_callbacks, precapture);
+                }
                 if (focus_locked) {
                     preview_unlock_focus(session, request, &preview_callbacks);
                 }
@@ -3600,6 +3747,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 const int generation = atomic_fetch_add_explicit(
                     &context.raw_bracket_generation, 1, memory_order_acq_rel) + 1;
                 context.raw_bracket_count = command.bracket_count;
+                context.raw_flash = 0;
                 context.raw_command_ms = sfos_camera2_now_ms();
                 context.raw_submit_ms = 0;
                 context.raw_available_ms = 0;

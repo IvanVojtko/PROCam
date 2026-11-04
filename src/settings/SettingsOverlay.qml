@@ -25,7 +25,6 @@ PinchArea {
     property alias container: container
     readonly property alias settingsOpacity: grid.opacity
     property bool orientationTransitionRunning
-    property bool zoomButtonsEnabled: false
     readonly property var exposureControl: captureView ? captureView.exposureControl : null
     onDeviceRotationChanged: syncDeviceRotation()
 
@@ -35,10 +34,6 @@ PinchArea {
 
     property real currentZoom: 1
     property real maximumZoom: 1
-    signal zoomPressed(int direction)
-    signal zoomReleased()
-    signal zoomCanceled()
-    signal zoomResetRequested()
     signal zoomPresetRequested(real value)
 
     // Viewfinder swipes: up/down flips front and rear (photo mode), left/right
@@ -84,7 +79,6 @@ PinchArea {
             choices.push(2 * i * step)
         return choices.length ? choices : [0]
     }
-    function evLabel(value) { return Number((Number(value) / 2).toFixed(2)) + " EV" }
 
     Column {
         z: 20
@@ -179,6 +173,9 @@ PinchArea {
     }
 
     signal clicked(var mouse)
+    // Long-press on ProCam's viewfinder: lock focus there (used in video,
+    // where taps set brightness; photo taps lock focus already).
+    signal focusLockRequested(var mouse)
 
     function closeMenus() {
         _closing = true
@@ -240,25 +237,29 @@ PinchArea {
         id: camera2BottomDeck
 
         // Photo and video share the floating layout; video always uses the
-        // simple deck (the Pro dials are Camera2 photo controls).
+        // simple deck (the Pro controls are Camera2 photo controls).
         readonly property bool video: Settings.global.captureMode === "video"
         readonly property bool active: Settings.global.captureMode === "image" || video
         readonly property bool pro: Settings.global.advancedMode && !video
-        // Floats over the full-screen viewfinder; Simple needs less room.
-        readonly property real controlFraction: pro ? 0.40 : 0.19
+        // Floats over the full-screen viewfinder: the last photo, the shutter
+        // and the lens, the same in Auto and Pro; Pro adds its value chips
+        // (and an open dial) above, or to the left in landscape.
+        readonly property real controlFraction: 0.19
         readonly property real controlHeight: Math.round(parent.height * controlFraction)
         readonly property real controlWidth: Math.round(parent.width * controlFraction)
-        readonly property real headerHeight: pro
-                                             ? Theme.fontSizeTiny + Theme.paddingSmall
-                                             : 0
+        readonly property real sideMargin: Math.max(Theme.paddingMedium, width * 0.015)
+        readonly property real proExtent: pro ? (overlay.isPortrait ? proControls.implicitHeight
+                                                                    : proControls.implicitWidth)
+                                                + Theme.paddingMedium
+                                              : 0
 
         anchors {
             right: parent.right
             bottom: parent.bottom
         }
         z: 2
-        width: active ? (overlay.isPortrait ? parent.width : controlWidth) : 0
-        height: active ? (overlay.isPortrait ? controlHeight : parent.height) : 0
+        width: active ? (overlay.isPortrait ? parent.width : controlWidth + proExtent) : 0
+        height: active ? (overlay.isPortrait ? controlHeight + proExtent : parent.height) : 0
         visible: active
 
         // Taps between the controls must not refocus the viewfinder underneath.
@@ -277,479 +278,47 @@ PinchArea {
             }
         }
         Rectangle {
-            anchors.fill: parent
+            anchors.fill: simpleCamera2Deck
             visible: !overlay.isPortrait
             color: Theme.rgba("black", 0.45)
         }
 
-        Row {
-            id: camera2HeaderRow
+        ProControls {
+            id: proControls
 
-            anchors {
-                left: parent.left
-                right: parent.right
-                top: parent.top
-                leftMargin: camera2ControlGrid.sideMargin
-                rightMargin: camera2ControlGrid.sideMargin
-                topMargin: Theme.paddingSmall
-            }
-            height: Theme.fontSizeTiny
-            spacing: camera2ControlGrid.columnGap
-            z: 3
+            x: overlay.isPortrait ? camera2BottomDeck.sideMargin : Theme.paddingMedium
+            y: overlay.isPortrait ? Theme.paddingMedium : 0
+            width: overlay.isPortrait ? camera2BottomDeck.width - 2 * camera2BottomDeck.sideMargin
+                                      : implicitWidth
+            height: overlay.isPortrait ? implicitHeight : camera2BottomDeck.height
             visible: camera2BottomDeck.pro
-
-            Label {
-                width: camera2ControlGrid.leftWidth
-                height: parent.height
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
-                color: _highlightColor
-                opacity: Theme.opacityHigh
-                font.pixelSize: Theme.fontSizeTiny
-                font.bold: true
-                text: "CAM"
-            }
-
-            Label {
-                width: camera2ControlGrid.experimentalLayout ? camera2ControlGrid.exposureWidth : camera2ControlGrid.centerWidth
-                height: parent.height
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
-                color: _highlightColor
-                opacity: Theme.opacityHigh
-                font.pixelSize: Theme.fontSizeTiny
-                font.bold: true
-                text: "EV"
-            }
-
-            Label {
-                width: camera2ControlGrid.speedWidth
-                height: parent.height
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
-                color: _highlightColor
-                opacity: Theme.opacityHigh
-                font.pixelSize: Theme.fontSizeTiny
-                font.bold: true
-                text: "SPEED"
-                visible: !camera2ControlGrid.experimentalLayout
-            }
-
-            Label {
-                width: camera2ControlGrid.isoWidth
-                height: parent.height
-                verticalAlignment: Text.AlignVCenter
-                horizontalAlignment: Text.AlignHCenter
-                color: _highlightColor
-                opacity: Theme.opacityHigh
-                font.pixelSize: Theme.fontSizeTiny
-                font.bold: true
-                text: "ISO"
-                visible: !camera2ControlGrid.experimentalLayout
-            }
-        }
-
-        Grid {
-            id: camera2ControlGrid
-
-            readonly property bool experimentalLayout: Settings.global.experimentalExposureLayout && Settings.global.advancedMode
-            readonly property real exposureWidth: centerWidth + speedWidth + isoWidth + 2 * columnGap
-            readonly property real wheelRowHeight: Math.max(Theme.fontSizeLarge * 1.6, Math.round(height / 7))
-            readonly property real wheelCenterY: shutterZoomArea.y + bottomShutterAnchor.y + bottomShutterAnchor.height / 2
-            readonly property real wheelTop: Math.max(0, wheelCenterY - wheelRowHeight / 2)
-            readonly property real sideMargin: Math.max(Theme.paddingMedium,
-                                                        camera2BottomDeck.width * 0.015)
-            readonly property real columnGap: Math.max(1, Math.round(Theme.pixelRatio))
-            readonly property real usableWidth: camera2BottomDeck.width
-                                                - 2 * sideMargin - 3 * columnGap
-            readonly property real leftWidth: Math.round(usableWidth * 0.20)
-            readonly property real centerWidth: Math.round(usableWidth * 0.41)
-            readonly property real speedWidth: Math.round(usableWidth * 0.19)
-            readonly property real isoWidth: usableWidth - leftWidth
-                                             - centerWidth - speedWidth
-            readonly property var camera2Viewfinder: captureView ? captureView.camera2Viewfinder : null
-            visible: camera2BottomDeck.pro
-            enabled: visible
-
-            function focalLengthText() {
-                var focal = camera2Viewfinder && camera2Viewfinder.focalLength
-                        ? camera2Viewfinder.focalLength : 0
-                if (focal <= 0) {
-                    return "--"
-                }
-                return focal < 10 ? focal.toFixed(1) : Math.round(focal)
-            }
-
-            function liveShutterValue() {
-                if (Settings.global.advancedMode && Settings.mode.rawCaptureShutterNs !== "0")
-                    return Settings.mode.rawCaptureShutterNs
-                return overlay.exposureControl && overlay.exposureControl.fresh
-                        ? String(overlay.exposureControl.actualTime) : "—"
-            }
-
-            function liveIsoValue() {
-                if (Settings.global.advancedMode && Settings.mode.rawCaptureIso > 0)
-                    return Settings.mode.rawCaptureIso
-                return overlay.exposureControl && overlay.exposureControl.fresh
-                        ? overlay.exposureControl.actualIso : "—"
-            }
-
-            function drawHistogram(context, width, height, values) {
-                context.clearRect(0, 0, width, height)
-                if (!values || values.length === 0) {
-                    return
-                }
-
-                var peak = 1
-                for (var index = 0; index < values.length; ++index) {
-                    peak = Math.max(peak, values[index].r,
-                                    values[index].g, values[index].b)
-                }
-
-                function drawChannel(key, color) {
-                    context.beginPath()
-                    context.moveTo(0, height)
-                    for (var i = 0; i < values.length; ++i) {
-                        var x = values.length === 1 ? 0
-                                : i * width / (values.length - 1)
-                        var y = height - values[i][key] / peak * height
-                        context.lineTo(x, y)
-                    }
-                    context.lineTo(width, height)
-                    context.closePath()
-                    context.fillStyle = color
-                    context.fill()
-                }
-
-                drawChannel("r", Qt.rgba(1.0, 0.2, 0.15, 0.32))
-                drawChannel("g", Qt.rgba(0.2, 1.0, 0.35, 0.28))
-                drawChannel("b", Qt.rgba(0.25, 0.55, 1.0, 0.32))
-            }
-
-            anchors {
-                fill: parent
-                leftMargin: sideMargin
-                rightMargin: sideMargin
-                topMargin: camera2BottomDeck.headerHeight
-            }
-            columns: 4
-            columnSpacing: columnGap
-
-            Column {
-                width: camera2ControlGrid.leftWidth
-                height: camera2ControlGrid.height
-
-                Item {
-                    width: parent.width
-                    height: Settings.global.advancedMode
-                            ? parent.height / 3
-                            : parent.height
-
-                    CameraSwitchButtons {
-                        anchors.centerIn: parent
-                        availableWidth: parent.width
-                        availableHeight: parent.height
-                        captureBusy: captureView.captureBusy || !overlay.deviceToggleEnabled
-                        onSwitched: captureView.resetZoom()
-                    }
-                }
-
-                CycleValueButton {
-                    width: parent.width
-                    height: Settings.global.advancedMode ? parent.height / 3 : 0
-                    visible: Settings.global.advancedMode
-                    enabled: visible
-                    caption: "FORMAT"
-                    settings: Settings.mode
-                    settingProperty: "camera2CaptureFormat"
-                    currentValue: Settings.mode.camera2CaptureFormat
-                    model: Settings.camera2CaptureFormatModel()
-                    valueLabel: function(value) { return value === "raw" ? "RAW" : "JPG" }
-                }
-
-                CycleValueButton {
-                    width: parent.width
-                    height: Settings.global.advancedMode ? parent.height / 3 : 0
-                    visible: Settings.global.advancedMode && model.length > 0
-                    enabled: visible
-                    caption: "FOCUS"
-                    settings: Settings.mode
-                    settingProperty: "rawCaptureFocusMode"
-                    currentValue: Settings.mode.rawCaptureFocusMode
-                    model: Settings.camera2SelectableFocusModeModel()
-                    valueLabel: function(value) {
-                        if (value === "manual") {
-                            return Settings.rawCaptureFocusDistanceLabel(
-                                        Settings.mode.rawCaptureFocusDistance)
-                        }
-                        switch (value) {
-                        case "continuous": return "CONT"
-                        case "manual": return "MAN"
-                        case "infinity": return "INF"
-                        case "none": return "OFF"
-                        default: return "AUTO"
-                        }
-                    }
-                }
-            }
-
-            Column {
-                width: camera2ControlGrid.centerWidth
-                height: camera2ControlGrid.height
-                z: 1
-
-                Item {
-                    width: camera2ControlGrid.experimentalLayout ? camera2ControlGrid.exposureWidth : parent.width
-                    height: parent.height * 0.34
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: Theme.paddingSmall
-                        color: Theme.rgba("black", 0.35)
-                    }
-
-                    Canvas {
-                        id: exposureHistogram
-
-                        anchors.fill: parent
-                        opacity: 0.85
-
-                        onPaint: {
-                            camera2ControlGrid.drawHistogram(
-                                        getContext("2d"), width, height,
-                                        camera2ControlGrid.camera2Viewfinder
-                                        ? camera2ControlGrid.camera2Viewfinder.histogram : [])
-                        }
-
-                        Connections {
-                            target: camera2ControlGrid.camera2Viewfinder
-                            onHistogramChanged: exposureHistogram.requestPaint()
-                        }
-                    }
-
-                    ValueCarousel {
-                        anchors.fill: parent
-                        visible: !overlay.exposureControl || !overlay.exposureControl.fullyManual
-                        enabled: visible && overlay.exposureControl && !captureView.captureBusy
-                                 && (overlay.exposureControl.partial || overlay.exposureControl.capabilities.compensation_step_ev > 0)
-                        orientation: ListView.Horizontal
-                        settings: Settings.global
-                        writeThrough: false
-                        onValueSelected: Settings.global.exposureCompensation = value
-                        settingProperty: "exposureCompensation"
-                        currentValue: Settings.global.exposureCompensation
-                        displayValue: overlay.exposureControl ? overlay.exposureControl.effectiveEv * 2 : currentValue
-                        model: overlay.evChoices()
-                        valueLabel: function(value) { return overlay.evLabel(value) }
-                    }
-                    Label {
-                        anchors.centerIn: parent
-                        width: parent.width
-                        horizontalAlignment: Text.AlignHCenter
-                        wrapMode: Text.Wrap
-                        font.pixelSize: Theme.fontSizeSmall
-                        visible: Settings.global.estimatedExposureMetering && overlay.exposureControl && overlay.exposureControl.fullyManual
-                        text: overlay.exposureControl && overlay.exposureControl.meterValid && overlay.exposureControl.fresh
-                              ? "≈ " + overlay.exposureControl.meterEv.toFixed(1) + " EV"
-                              : "—"
-                    }
-                }
-
-                Item {
-                    id: shutterZoomArea
-                    width: parent.width
-                    height: parent.height * 0.66
-
-                    Item {
-                        id: bottomShutterAnchor
-
-                        width: Math.min(parent.width, Theme.itemSizeExtraLarge * 1.18,
-                                        Math.max(0, parent.height - 2 * Theme.itemSizeSmall))
-                        height: width
-                        anchors.centerIn: parent
-                    }
-
-                    Repeater {
-                        model: [1, -1]
-
-                        MouseArea {
-                            readonly property int direction: modelData
-                            width: parent.width
-                            height: (shutterZoomArea.height - bottomShutterAnchor.height) / 2
-                            y: direction > 0 ? 0 : bottomShutterAnchor.y + bottomShutterAnchor.height
-                            enabled: overlay.zoomButtonsEnabled
-                                     && (direction > 0 ? overlay.currentZoom < overlay.maximumZoom
-                                                       : overlay.currentZoom > 1)
-                            onPressed: overlay.zoomPressed(direction)
-                            onDoubleClicked: if (direction < 0) overlay.zoomResetRequested()
-                            onReleased: overlay.zoomReleased()
-                            onCanceled: overlay.zoomCanceled()
-                            onExited: if (pressed) overlay.zoomCanceled()
-
-                            Label {
-                                anchors.centerIn: parent
-                                text: direction > 0 ? "+" : "−"
-                                font.pixelSize: Theme.fontSizeLarge
-                                color: parent.pressed ? Theme.highlightColor : Theme.primaryColor
-                                opacity: parent.enabled ? 1 : Theme.opacityLow
-                            }
-                        }
-                    }
-                }
-            }
-
-            Item {
-                width: camera2ControlGrid.speedWidth
-                height: camera2ControlGrid.height
-
-                ValueCarousel {
-                    id: speedWheel
-                    width: parent.width
-                    y: camera2ControlGrid.experimentalLayout ? camera2ControlGrid.wheelTop : 0
-                    height: parent.height - y
-                    selectionAtTop: camera2ControlGrid.experimentalLayout
-                    rowHeight: camera2ControlGrid.wheelRowHeight
-                    visible: Settings.global.advancedMode
-                    enabled: visible && overlay.exposureControl && overlay.exposureControl.active && !overlay.exposureControl.busy
-                    orientation: ListView.Vertical
-                    caption: ""
-                    writeThrough: false
-                    onValueSelected: { if (!overlay.exposureControl.setLock("shutter", value)) rejectSelection() }
-                    settings: Settings.mode
-                    settingProperty: "rawCaptureShutterNs"
-                    currentValue: Settings.mode.rawCaptureShutterNs
-                    displayValue: camera2ControlGrid.liveShutterValue()
-                    model: Settings.camera2ShutterModel()
-                    valueLabel: function(value) { return value === "—" ? value : Settings.rawCaptureShutterLabel(value) }
-                    selectedFontSize: Theme.fontSizeExtraLarge
-                    tapered: true
-                    wrap: true
-                }
-
-                PreviewAidToggle {
-                    anchors { bottom: speedWheelHeader.top; horizontalCenter: parent.horizontalCenter; bottomMargin: Theme.paddingSmall }
-                    width: parent.width
-                    visible: camera2ControlGrid.experimentalLayout
-                    enabled: visible && camera2ControlGrid.camera2Viewfinder && camera2ControlGrid.camera2Viewfinder.running
-                    text: "PEAK"
-                    checked: Settings.global.focusPeaking
-                    onClicked: Settings.global.focusPeaking = !Settings.global.focusPeaking
-                }
-
-                Label {
-                    id: speedWheelHeader
-                    visible: camera2ControlGrid.experimentalLayout
-                    anchors { bottom: speedWheel.top; horizontalCenter: parent.horizontalCenter; bottomMargin: Theme.paddingSmall }
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    font.pixelSize: Theme.fontSizeTiny
-                    font.bold: true
-                    color: _highlightColor
-                    text: "SPEED"
-                }
-
-
-                Label {
-                    anchors.centerIn: parent
-                    width: parent.width - 2 * Theme.paddingSmall
-                    visible: !Settings.global.advancedMode
-                    horizontalAlignment: Text.AlignHCenter
-                    truncationMode: TruncationMode.Fade
-                    color: Theme.lightPrimaryColor
-                    font.pixelSize: Theme.fontSizeLarge
-                    font.bold: true
-                    text: Settings.rawCaptureShutterLabel(
-                              camera2ControlGrid.liveShutterValue())
-                }
-            }
-
-            Item {
-                width: camera2ControlGrid.isoWidth
-                height: camera2ControlGrid.height
-
-                ValueCarousel {
-                    id: isoWheel
-                    width: parent.width
-                    y: camera2ControlGrid.experimentalLayout ? camera2ControlGrid.wheelTop : 0
-                    height: parent.height - y
-                    selectionAtTop: camera2ControlGrid.experimentalLayout
-                    rowHeight: camera2ControlGrid.wheelRowHeight
-                    visible: Settings.global.advancedMode
-                    enabled: visible && overlay.exposureControl && overlay.exposureControl.active && !overlay.exposureControl.busy
-                    orientation: ListView.Vertical
-                    caption: ""
-                    writeThrough: false
-                    onValueSelected: { if (!overlay.exposureControl.setLock("iso", value)) rejectSelection() }
-                    settings: Settings.mode
-                    settingProperty: "rawCaptureIso"
-                    currentValue: Settings.mode.rawCaptureIso
-                    displayValue: camera2ControlGrid.liveIsoValue()
-                    model: Settings.camera2IsoModel()
-                    valueLabel: function(value) { return value === "—" ? value : value > 0 ? value : "Auto" }
-                    selectedFontSize: Theme.fontSizeExtraLarge
-                    tapered: true
-                    wrap: true
-                }
-
-                PreviewAidToggle {
-                    anchors { bottom: isoWheelHeader.top; horizontalCenter: parent.horizontalCenter; bottomMargin: Theme.paddingSmall }
-                    width: parent.width
-                    visible: camera2ControlGrid.experimentalLayout
-                    enabled: visible && camera2ControlGrid.camera2Viewfinder && camera2ControlGrid.camera2Viewfinder.running
-                    text: "ZEBRA"
-                    checked: Settings.global.exposureZebras
-                    onClicked: Settings.global.exposureZebras = !Settings.global.exposureZebras
-                }
-
-                Label {
-                    id: isoWheelHeader
-                    visible: camera2ControlGrid.experimentalLayout
-                    anchors { bottom: isoWheel.top; horizontalCenter: parent.horizontalCenter; bottomMargin: Theme.paddingSmall }
-                    width: parent.width
-                    horizontalAlignment: Text.AlignHCenter
-                    font.pixelSize: Theme.fontSizeTiny
-                    font.bold: true
-                    color: _highlightColor
-                    text: "ISO"
-                }
-
-
-                Label {
-                    anchors.centerIn: parent
-                    width: parent.width - 2 * Theme.paddingSmall
-                    visible: !Settings.global.advancedMode
-                    horizontalAlignment: Text.AlignHCenter
-                    truncationMode: TruncationMode.Fade
-                    color: Theme.lightPrimaryColor
-                    font.pixelSize: Theme.fontSizeLarge
-                    font.bold: true
-                    text: {
-                        var iso = camera2ControlGrid.liveIsoValue()
-                        return iso > 0 ? iso : "Auto"
-                    }
-                }
-            }
+            vertical: !overlay.isPortrait
+            exposureControl: overlay.exposureControl
+            camera2Viewfinder: captureView ? captureView.camera2Viewfinder : null
+            captureBusy: !!captureView && captureView.captureBusy
+            evChoices: overlay.evChoices()
         }
 
         Item {
             id: simpleCamera2Deck
 
-            // Normal mode: no histogram, exposure readouts or EV, just the
-            // last photo, the shutter and the lens.
-            anchors {
-                fill: parent
-                leftMargin: camera2ControlGrid.sideMargin
-                rightMargin: camera2ControlGrid.sideMargin
-                topMargin: Theme.paddingSmall
-                bottomMargin: Theme.paddingSmall
-            }
-            visible: !camera2BottomDeck.pro
-            enabled: visible
-
             // Pixel-style row: last capture, shutter, lens.
+            readonly property real shutterWidth: Math.round((width - 2 * camera2BottomDeck.sideMargin) * 0.41)
+
+            x: camera2BottomDeck.width - width
+            y: camera2BottomDeck.height - height
+            width: overlay.isPortrait ? camera2BottomDeck.width : camera2BottomDeck.controlWidth
+            height: overlay.isPortrait ? camera2BottomDeck.controlHeight : camera2BottomDeck.height
+
             Row {
-                anchors.fill: parent
-                readonly property real sideWidth: (width - camera2ControlGrid.centerWidth) / 2
+                anchors {
+                    fill: parent
+                    leftMargin: camera2BottomDeck.sideMargin
+                    rightMargin: camera2BottomDeck.sideMargin
+                    topMargin: Theme.paddingSmall
+                    bottomMargin: Theme.paddingSmall
+                }
+                readonly property real sideWidth: (width - simpleCamera2Deck.shutterWidth) / 2
 
                 Item {
                     width: parent.sideWidth
@@ -770,13 +339,12 @@ PinchArea {
                 }
 
                 Item {
-                    width: camera2ControlGrid.centerWidth
+                    width: simpleCamera2Deck.shutterWidth
                     height: parent.height
 
                     Item {
                         id: simpleBottomShutterAnchor
 
-                        // Same size as the Advanced shutter.
                         width: Math.min(parent.width, parent.height, Theme.itemSizeExtraLarge * 1.18)
                         height: width
                         anchors.centerIn: parent
@@ -803,6 +371,19 @@ PinchArea {
 
     }
 
+    // The live histogram, Pro photo mode only: below the top bar.
+    Histogram {
+        x: Theme.horizontalPageMargin
+        y: floatingTopBar.y + floatingTopBar.height + Theme.paddingMedium
+        z: 2
+        width: Theme.itemSizeHuge
+        height: Theme.itemSizeExtraSmall
+        visible: camera2BottomDeck.pro && floatingTopBar.visible
+        opacity: floatingTopBar.opacity
+        values: visible && captureView && captureView.camera2Viewfinder
+                ? captureView.camera2Viewfinder.histogram : []
+    }
+
     // 1x / 2x presets just above the shutter deck (left of it in landscape).
     // Positioned with x/y: anchors toggled per orientation can briefly
     // combine right and horizontalCenter, which QML rejects, stranding the
@@ -820,16 +401,18 @@ PinchArea {
                  && overlay.maximumZoom >= 2 && overlay.settingsOpacity < 0.5
         enabled: !!captureView && !captureView.captureBusy
         zoom: overlay.currentZoom
+        presets: overlay.maximumZoom >= 4 ? [1, 2, 4] : [1, 2]
         onSelected: overlay.zoomPresetRequested(value)
     }
 
-    // PHOTO | VIDEO: above the shutter deck in photo mode (inside its top in
-    // landscape), near the bottom edge in video mode.
+    // PHOTO | VIDEO: above the shutter deck and Pro's chips in photo mode
+    // (inside the shutter column's top in landscape), near the bottom edge
+    // in video mode.
     CaptureModeTabs {
         id: captureModeTabs
 
         x: camera2BottomDeck.active
-           ? camera2BottomDeck.x + (camera2BottomDeck.width - width) / 2
+           ? camera2BottomDeck.x + simpleCamera2Deck.x + (simpleCamera2Deck.width - width) / 2
            : (overlay.width - width) / 2
         y: camera2BottomDeck.active
            ? (overlay.isPortrait ? camera2BottomDeck.y - height - Theme.paddingSmall
@@ -873,15 +456,20 @@ PinchArea {
                          + (overlay.isPortrait || !camera2BottomDeck.active ? 0 : camera2BottomDeck.width)
         }
         height: Theme.itemSizeExtraSmall
-        opacity: overlay._exposed ? 0.0 : _commonControlOpacity
-        // Recording shows its timer up here instead.
-        visible: camera2BottomDeck.active && opacity > 0.0 && !(captureView && captureView.recording)
+        readonly property bool recording: !!captureView && captureView.recording
+        // Recording shows its timer up here instead, and only the torch chip
+        // stays, to light up dark places mid-clip.
+        readonly property bool torchAvailable: camera2BottomDeck.video && captureView._camera2VideoActive
+                                               && Settings.camera2FlashSupported(Settings.deviceId)
+        opacity: overlay._exposed ? 0.0 : recording && torchAvailable ? 1.0 : _commonControlOpacity
+        visible: camera2BottomDeck.active && opacity > 0.0 && (!recording || torchAvailable)
         Behavior on opacity { FadeAnimation {} }
 
         Row {
             anchors.left: parent.left
             height: parent.height
             spacing: Theme.paddingMedium
+            visible: !floatingTopBar.recording
 
             // Opens the settings panel (formerly a tap on the strip above the viewfinder).
             FloatingChip {
@@ -904,6 +492,24 @@ PinchArea {
             anchors.right: parent.right
             height: parent.height
             spacing: Theme.paddingMedium
+
+            // Photo flash: off, auto or on. Dimmed while night mode is on,
+            // which never flashes.
+            FloatingChip {
+                readonly property var modes: ["off", "auto", "on"]
+
+                height: parent.height
+                visible: !camera2BottomDeck.video && captureView._camera2ViewfinderActive
+                         && Settings.camera2FlashSupported(Settings.deviceId)
+                enabled: !captureView.captureBusy
+                opacity: !enabled || Settings.nightMode ? Theme.opacityLow : 1.0
+                checked: Settings.global.camera2Flash !== "off" && !Settings.nightMode
+                iconSource: Settings.global.camera2Flash === "on" ? "image://theme/icon-camera-flash-on"
+                          : Settings.global.camera2Flash === "auto" ? "image://theme/icon-camera-flash-automatic"
+                                                                     : "image://theme/icon-camera-flash-off"
+                onClicked: Settings.global.camera2Flash =
+                           modes[(modes.indexOf(Settings.global.camera2Flash) + 1) % modes.length]
+            }
 
             // Night mode: offered when the scene is too dark, on by a tap.
             FloatingChip {
@@ -943,6 +549,19 @@ PinchArea {
                 }
             }
 
+            // Pro: the capture format, RAW or JPG.
+            FloatingChip {
+                readonly property var formats: Settings.camera2CaptureFormatModel()
+
+                height: parent.height
+                visible: camera2BottomDeck.pro && formats.length > 1
+                enabled: !captureView.captureBusy
+                text: Settings.mode.camera2CaptureFormat === "raw" ? "RAW" : "JPG"
+                checked: Settings.mode.camera2CaptureFormat === "raw"
+                onClicked: Settings.mode.camera2CaptureFormat =
+                           formats[(formats.indexOf(Settings.mode.camera2CaptureFormat) + 1) % formats.length]
+            }
+
             FloatingChip {
                 height: parent.height
                 visible: floatingTopBar.burstAvailable && !camera2BottomDeck.video
@@ -952,12 +571,23 @@ PinchArea {
                 onClicked: Settings.global.hdrBurst = !Settings.global.hdrBurst
             }
 
-            // Electronic stabilization for ProCam's own video recorder. The
-            // bar hides while recording, so it never changes mid-clip (that
+            // Video torch: the flash lit while filming, also mid-clip.
+            FloatingChip {
+                height: parent.height
+                visible: floatingTopBar.torchAvailable
+                checked: Settings.torch
+                iconSource: Settings.torch ? "image://theme/icon-camera-flash-on"
+                                           : "image://theme/icon-camera-flash-off"
+                onClicked: Settings.torch = !Settings.torch
+            }
+
+            // Electronic stabilization for ProCam's own video recorder.
+            // Hidden while recording, so it never changes mid-clip (that
             // restarts the camera session).
             FloatingChip {
                 height: parent.height
                 visible: camera2BottomDeck.video && captureView._camera2VideoActive
+                         && !floatingTopBar.recording
                 checked: Settings.global.videoStabilization
                 menuDots: false
                 onClicked: Settings.global.videoStabilization = !Settings.global.videoStabilization
@@ -974,6 +604,7 @@ PinchArea {
 
             FloatingChip {
                 height: parent.height
+                visible: !floatingTopBar.recording
                 // Fit shows exactly the photo's frame.
                 text: Settings.global.viewfinderFill ? "Full" : Settings.photoAspect
                 onClicked: Settings.global.viewfinderFill = !Settings.global.viewfinderFill
@@ -982,13 +613,26 @@ PinchArea {
         }
     }
 
+    // Shown while focus lock holds, also while filming; a tap goes back to
+    // continuous focus.
+    FloatingChip {
+        x: floatingTopBar.x + (floatingTopBar.width - width) / 2
+        y: floatingTopBar.y + floatingTopBar.height + Theme.paddingMedium
+        z: 3
+        height: Theme.itemSizeExtraSmall
+        visible: !!captureView && captureView.focusLocked && !overlay._exposed
+                 && (floatingTopBar.visible || captureView.recording)
+        checked: true
+        text: "AF locked"
+        onClicked: captureView.unlockFocus()
+    }
+
     Item {
         id: shutterContainer
 
         parent: camera2BottomDeck.active
-                ? (camera2BottomDeck.pro ? bottomShutterAnchor
-                                         : simpleBottomShutterAnchor)
-                                         : overlay._buttonAnchors[overlay._captureButtonLocation]
+                ? simpleBottomShutterAnchor
+                : overlay._buttonAnchors[overlay._captureButtonLocation]
         anchors.fill: parent
     }
 
@@ -1238,7 +882,13 @@ PinchArea {
                 if (!overlay.topMenuOpen) {
                     var dragDistance = Math.max(Math.abs(mouseX - pressX),
                                                 Math.abs(mouseY - pressY))
-                    if (dragDistance < Theme.startDragDistance) {
+                    // The photo and video deck has fixed buttons: long-press
+                    // locks focus instead of rearranging them.
+                    if (dragDistance < Theme.startDragDistance
+                            && camera2BottomDeck.active
+                            && captureView && captureView._camera2PreviewActive) {
+                        overlay.focusLockRequested(mouse)
+                    } else if (dragDistance < Theme.startDragDistance) {
                         overlay.inButtonLayout = true
                     }
                 }

@@ -5,7 +5,8 @@ import QtQuick 2.0
 import Sailfish.Silica 1.0
 
 // Pixel-style zoom presets floating over the viewfinder. The active preset
-// shows the live zoom while pinching (e.g. "1.4×").
+// shows the live zoom while pinching (e.g. "1.4×"); the others only their
+// number, which keeps three presets as small as two.
 Item {
     id: root
 
@@ -23,8 +24,8 @@ Item {
     }
 
     function label(value, active) {
-        var shown = active ? zoom : value
-        var rounded = Math.round(shown * 10) / 10
+        if (!active) return String(value)
+        var rounded = Math.round(zoom * 10) / 10
         return (rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)) + "×"
     }
 
@@ -67,7 +68,7 @@ Item {
 
                     anchors.centerIn: parent
                     text: root.label(modelData, parent.active)
-                    font.pixelSize: Theme.fontSizeSmall
+                    font.pixelSize: parent.active ? Theme.fontSizeSmall : Theme.fontSizeExtraSmall
                     font.bold: parent.active
                     color: Theme.lightPrimaryColor
                 }

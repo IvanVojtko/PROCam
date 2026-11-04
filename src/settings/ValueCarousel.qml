@@ -28,6 +28,8 @@ Item {
     property bool selectionAtTop: false
     property real rowHeight: 0
     property int selectedFontSize: Theme.fontSizeLarge
+    // Values shown at once on a horizontal wheel.
+    property int visibleItems: 3
     readonly property int recenterMargin: model ? model.length * 2 : 0
     property var currentValue: settings && settingProperty.length > 0
                                ? settings[settingProperty] : undefined
@@ -186,7 +188,7 @@ Item {
         readonly property bool vertical: root.orientation === ListView.Vertical
         readonly property real itemWidth: vertical ? width
                                                    : Math.max(Theme.itemSizeMedium,
-                                                              Math.round(root.width / 3))
+                                                              Math.round(root.width / root.visibleItems))
         readonly property real itemHeight: vertical ? (root.rowHeight > 0 ? root.rowHeight
                                                     : Math.max(Theme.fontSizeLarge * 1.6, Math.round(height / 7)))
                                                     : height

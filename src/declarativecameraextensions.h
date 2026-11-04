@@ -83,9 +83,14 @@ public:
     // iso, targetGain, underexposureEv (empty map when unsupported).
     // HDR burst needs manual ISO and shutter and a RAW16 burst size.
     Q_INVOKABLE bool camera2BurstSupported(const QString &cameraId);
+    // The camera has a flash unit: its AE offers ON_ALWAYS_FLASH.
+    Q_INVOKABLE bool camera2FlashSupported(const QString &cameraId);
     // RAW16 size for the burst stream: `preferred` if it can stream next to
     // the preview, else the largest such size (empty if none).
     Q_INVOKABLE QString camera2BurstRawSize(const QString &cameraId, const QString &preferred);
+    // Sizes camera2BurstRawSize can give: what JPEG mode and HDR photos come
+    // out at, since they are rendered from that stream, not the HAL's JPEG.
+    Q_INVOKABLE QStringList camera2BurstSizeModel(const QString &cameraId);
     // Adds a line to Pictures/ProCam/procam-capture.log (capture diagnostics
     // from QML: refused or stalled shutter presses).
     Q_INVOKABLE void logCaptureEvent(const QString &message);

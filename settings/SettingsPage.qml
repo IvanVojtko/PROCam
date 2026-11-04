@@ -117,14 +117,6 @@ ApplicationSettings {
 
     IconTextSwitch {
         automaticCheck: false
-        text: "Experimental exposure layout"
-        description: "Widen histogram and EV, with Speed and ISO aligned to the shutter and values below. Advanced photo mode only."
-        checked: Settings.global.experimentalExposureLayout
-        onClicked: Settings.global.experimentalExposureLayout = !checked
-    }
-
-    IconTextSwitch {
-        automaticCheck: false
         text: "ProCam video recorder"
         description: "Record video through ProCam's own camera session: 1080p at 30 fps with electronic stabilization, no system configuration needed. Turn off to record with the system camera service instead, if recording fails."
         enabled: AccessPolicy.cameraEnabled

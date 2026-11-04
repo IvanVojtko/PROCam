@@ -301,7 +301,7 @@ QString Camera2Preview::saveThumbnail(int captureRotation)
     if (m_captureMirror)
         image = image.mirrored(true, false);
     image = image.copy(photoAspectRect(image.size(), m_photoAspect).toRect());
-    const qreal zoom = qMax<qreal>(1.0, m_zoom);
+    const qreal zoom = frameCropZoom();
     if (zoom > 1.01) {
         const QSize size(qMax(1, int(image.width() / zoom)), qMax(1, int(image.height() / zoom)));
         image = image.copy(QRect(QPoint((image.width() - size.width()) / 2,
@@ -792,6 +792,22 @@ void Camera2Preview::setExposureZebras(bool enabled)
     update();
 }
 
+void Camera2Preview::setFlashMode(const QString &flashMode)
+{
+    const QString mode = flashMode == QLatin1String("auto") || flashMode == QLatin1String("on")
+            || flashMode == QLatin1String("torch") ? flashMode : QStringLiteral("off");
+    if (m_flashMode == mode) return;
+    m_flashMode = mode;
+    emit flashModeChanged();
+    sendFlashMode();
+}
+
+void Camera2Preview::sendFlashMode()
+{
+    if (m_process && m_process->state() == QProcess::Running)
+        m_process->write(QByteArrayLiteral("flash ") + m_flashMode.toLatin1() + '\n');
+}
+
 qreal Camera2Preview::renderExposure() const
 {
     return m_renderExposure;
@@ -971,7 +987,7 @@ bool Camera2Preview::frameGeometry(const QSizeF &imageSize, QRectF *drawRect,
         return false;
     }
     const QRectF target(0, 0, width(), height());
-    const qreal zoom = qMax<qreal>(1.0, m_zoom);
+    const qreal zoom = frameCropZoom();
     const QRectF photo = photoAspectRect(imageSize, m_photoAspect);
     const QSizeF sourceSize(photo.width() / zoom, photo.height() / zoom);
     *sourceRect = QRectF(photo.center().x() - sourceSize.width() / 2,
@@ -988,6 +1004,14 @@ bool Camera2Preview::frameGeometry(const QSizeF &imageSize, QRectF *drawRect,
                        target.center().y() - drawSize.height() / 2,
                        drawSize.width(), drawSize.height());
     return true;
+}
+
+// The zoom still to apply to a preview frame: cameras with a zoom ratio
+// deliver frames already cropped (a moment after a change, hence per frame),
+// so cropping by the whole zoom again would show 2x as 4x.
+qreal Camera2Preview::frameCropZoom() const
+{
+    return qMax<qreal>(1.0, qMax<qreal>(1.0, m_zoom) / qMax<qreal>(1.0, m_frameZoom));
 }
 
 QRectF Camera2Preview::contentRect() const
@@ -1176,7 +1200,8 @@ bool Camera2Preview::captureJpegWithExposure(const QString &path,
 }
 
 bool Camera2Preview::captureRaw(const QString &rawPath,
-                                const QString &metadataPath)
+                                const QString &metadataPath,
+                                bool flash)
 {
     if (rawPath.isEmpty() || metadataPath.isEmpty()) {
         setErrorString(QStringLiteral("Camera2 RAW capture path is empty"));
@@ -1206,7 +1231,8 @@ bool Camera2Preview::captureRaw(const QString &rawPath,
                                       / m_captureTimer.interval());
     const QByteArray command = QByteArrayLiteral("capture-raw ")
             + QFile::encodeName(rawPath) + QByteArrayLiteral(" ")
-            + QFile::encodeName(metadataPath) + QByteArrayLiteral("\n");
+            + QFile::encodeName(metadataPath)
+            + (flash ? QByteArrayLiteral(" flash\n") : QByteArrayLiteral("\n"));
     if (m_exposureOnlyCapture) {
         sendExposureSettings(true);
     } else {
@@ -1231,7 +1257,8 @@ bool Camera2Preview::captureRaw(const QString &rawPath,
 bool Camera2Preview::captureRawWithExposure(const QString &rawPath,
                                             const QString &metadataPath,
                                             int sensorSensitivity,
-                                            const QString &exposureTime)
+                                            const QString &exposureTime,
+                                            bool flash)
 {
     const int previousSensitivity = m_sensorSensitivity;
     const QString previousExposureTime = m_exposureTime;
@@ -1240,7 +1267,7 @@ bool Camera2Preview::captureRawWithExposure(const QString &rawPath,
     m_exposureTime = exposureTime.isEmpty() ? QStringLiteral("0")
                                             : exposureTime;
     m_exposureOnlyCapture = true;
-    const bool started = captureRaw(rawPath, metadataPath);
+    const bool started = captureRaw(rawPath, metadataPath, flash);
     m_sensorSensitivity = previousSensitivity;
     m_exposureTime = previousExposureTime;
     m_exposureOnlyCapture = previousExposureOnlyCapture;
@@ -1871,6 +1898,8 @@ void Camera2Preview::startPreview()
     } else {
         m_process->start();
     }
+    // A new camera session reports its frames' zoom with its first result.
+    m_frameZoom = 1.0;
     if (adopted || m_process->waitForStarted(1000)) {
         m_running = true;
         emit runningChanged();
@@ -1878,6 +1907,7 @@ void Camera2Preview::startPreview()
         emit rawCaptureReadyChanged();
         setErrorString(QString());
         sendSettings();
+        sendFlashMode();
     } else {
         setErrorString(m_process->errorString());
         m_process->deleteLater();
@@ -2336,7 +2366,15 @@ void Camera2Preview::parseMetadata(const QByteArray &payload)
         const QString key = field.left(separator);
         const QString value = field.mid(separator + 1);
         parsedFields.insert(key, value);
-        if (key == QLatin1String("focal")) {
+        if (key == QLatin1String("zoom")) {
+            bool ok = false;
+            const qreal zoom = value.toDouble(&ok);
+            if (ok && zoom > 0 && !qFuzzyCompare(m_frameZoom, zoom)) {
+                m_frameZoom = zoom;
+                emit contentRectChanged();
+                update();
+            }
+        } else if (key == QLatin1String("focal")) {
             bool ok = false;
             const qreal focal = value.toDouble(&ok);
             if (ok && !qFuzzyCompare(m_focalLength, focal)) {

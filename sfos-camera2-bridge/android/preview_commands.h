@@ -30,6 +30,17 @@ enum preview_command_type {
     PREVIEW_COMMAND_RECORD_INVALID,
     PREVIEW_COMMAND_QUIT,
     PREVIEW_COMMAND_RESUME,
+    PREVIEW_COMMAND_FLASH,
+};
+
+// "flash off|auto|on|torch": auto lets the preview's AE report
+// FLASH_REQUIRED; a capture-raw ending in "flash" fires it (the app decides
+// per photo). Torch keeps the flash lit, for video.
+enum preview_flash_mode {
+    PREVIEW_FLASH_OFF = 0,
+    PREVIEW_FLASH_AUTO,
+    PREVIEW_FLASH_ON,
+    PREVIEW_FLASH_TORCH,
 };
 
 struct preview_command {
@@ -48,6 +59,8 @@ struct preview_command {
     int aperture;
     int noise_reduction;
     int orientation;
+    int flash_mode;
+    bool flash;
     char path[4096];
     char metadata_path[4096];
     int bracket_count;
@@ -63,6 +76,23 @@ struct preview_command_buffer {
     bool discarding;
 };
 
+
+static bool preview_parse_flash_command(const char *line, struct preview_command *command)
+{
+    static const char *const modes[] = { "off", "auto", "on", "torch" };
+    if (strncmp(line, "flash ", 6)) return false;
+    const char *mode = line + 6;
+    size_t length = strcspn(mode, " \t\r\n");
+    if (mode[length + strspn(mode + length, " \t\r\n")]) return false;
+    for (int i = 0; i < 4; ++i) {
+        if (strlen(modes[i]) == length && !strncmp(mode, modes[i], length)) {
+            command->type = PREVIEW_COMMAND_FLASH;
+            command->flash_mode = i;
+            return true;
+        }
+    }
+    return false;
+}
 
 // Strict positive decimal integers: reject signs, suffixes and overflow.
 static bool preview_capture_integer(const char *text, int64_t maximum, int64_t *value)
@@ -101,11 +131,12 @@ static bool preview_parse_capture_command(const char *line, struct preview_comma
         if (strlen(args[0]) >= sizeof(command->path)) return true;
         strcpy(command->path, args[0]);
         command->type = PREVIEW_COMMAND_CAPTURE_JPEG;
-    } else if (!strcmp(name, "capture-raw") && n == 2) {
+    } else if (!strcmp(name, "capture-raw") && (n == 2 || (n == 3 && !strcmp(args[2], "flash")))) {
         if (strlen(args[0]) >= sizeof(command->path) ||
                 strlen(args[1]) >= sizeof(command->metadata_path)) return true;
         strcpy(command->path, args[0]);
         strcpy(command->metadata_path, args[1]);
+        command->flash = n == 3;
         command->type = PREVIEW_COMMAND_CAPTURE_RAW;
     } else if (!strcmp(name, "capture-raw-bracket") && n == 9 && !strcmp(args[0], "2")) {
         for (int i = 0; i < 2; ++i) {

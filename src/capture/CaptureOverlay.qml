@@ -28,11 +28,6 @@ SettingsOverlay {
     readonly property real camera2MaximumZoom: Settings.camera2MaximumZoom()
     currentZoom: captureView._camera2PreviewActive ? captureView.camera2Zoom : camera.digitalZoom
     maximumZoom: zoomController.limit
-    zoomButtonsEnabled: zoomController.allowed && maximumZoom > 1
-    onZoomPressed: zoomController.press(direction)
-    onZoomReleased: zoomController.release()
-    onZoomCanceled: zoomController.cancel()
-    onZoomResetRequested: if (zoomController.allowed) zoomController.setDirect(1)
     // The 1x / 2x presets work in Normal mode too.
     onZoomPresetRequested: zoomController.setDirect(value)
 
@@ -264,6 +259,16 @@ SettingsOverlay {
         }
     }
 
+    // Video only: its taps set brightness, so focus is locked by long-press.
+    onFocusLockRequested: {
+        if (captureView._captureOnFocus || !captureView._camera2VideoActive) return
+        var point = focusArea.mapFromItem(settingsOverlay, mouse.x, mouse.y)
+        point.x = point.x / focusArea.width
+        point.y = point.y / focusArea.height
+        if (point.x >= 0.0 && point.x <= 1.0 && point.y >= 0.0 && point.y <= 1.0)
+            captureView.lockFocus(point)
+    }
+
     onClicked: {
         if (!captureView._captureOnFocus && captureView.touchFocusSupported) {
             var focusPoint
@@ -310,7 +315,11 @@ SettingsOverlay {
             }
 
             if (focusPoint.x >= 0.0 && focusPoint.x <= 1.0 && focusPoint.y >= 0.0 && focusPoint.y <= 1.0) {
-                captureView.setFocusPoint(focusPoint)
+                // ProCam's photo viewfinder: a tap locks focus there.
+                if (captureView._camera2ViewfinderActive)
+                    captureView.lockFocus(focusPoint)
+                else
+                    captureView.setFocusPoint(focusPoint)
             }
         } else if (camera.captureMode == Camera.CaptureVideo && !captureView.recording) {
             tapBrightness.videoPoint = Qt.point(mouse.x, mouse.y)

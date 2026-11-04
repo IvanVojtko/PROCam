@@ -74,6 +74,11 @@ FocusScope {
     // next tap or camera change, like the focus lock it belongs to.
     property real tapExposureEv: 0
     // Video has no tap-to-focus; a tap only brings up the brightness slider.
+    // Focus lock (a tap in photo mode, a long-press in video): the focus
+    // point stays until the next one, the "AF locked" chip, a camera change
+    // or leaving ProCam, instead of going back to continuous focus after
+    // five seconds.
+    property bool focusLocked
     property bool videoBrightnessActive
     // Tap position, normalised to focusArea (draws the focus ring).
     property var _camera2FocusPoint: Qt.point(0.5, 0.5)
@@ -202,6 +207,12 @@ FocusScope {
         // not carry over: video runs on the camera's auto exposure.
         if (_camera2VideoActive)
             camera2Viewfinder.setExposurePair(0, "0", 0)
+        else
+            Settings.torch = false
+    }
+    Connections {
+        target: Settings
+        onDeviceIdChanged: Settings.torch = false
     }
     // HDR is a global switch: every photo is a merged RAW16 burst, in both
     // formats. Night mode is a burst too, of long frames.
@@ -217,6 +228,15 @@ FocusScope {
     property bool _videoStabilizationChecked: false
     property bool _startedInVideo: false
     readonly property bool _camera2NightCapture: _camera2HdrCapture && Settings.nightMode
+    // Photo flash ("off", "auto", "on") for cameras with a flash unit; night
+    // mode's long exposures never flash.
+    // ProCam's video recorder uses the flash as a torch instead.
+    readonly property string _camera2FlashMode: !Settings.camera2FlashSupported(Settings.deviceId) ? "off"
+                                                : _camera2VideoActive ? (Settings.torch ? "torch" : "off")
+                                                : _camera2ViewfinderActive && !Settings.nightMode
+                                                  ? Settings.global.camera2Flash : "off"
+    // The photo being taken fires the flash (decided at the shutter press).
+    property bool _camera2FlashShot: false
     // Too dark for the preview's auto exposure: the top bar offers night mode.
     // Bright again: night mode switches itself off (its long frames would
     // only clip), and the moon goes with it.
@@ -303,7 +323,8 @@ FocusScope {
     }
 
     function setFocusPoint(point) {
-        if (_camera2ViewfinderActive && camera2Viewfinder
+        focusLocked = false
+        if (_camera2PreviewActive && camera2Viewfinder
                 && typeof camera2Viewfinder.mapToSensor === "function") {
             // focusArea and the viewfinder may be rotated relative to each other.
             var local = focusArea.mapToItem(camera2Viewfinder, point.x * focusArea.width,
@@ -331,6 +352,17 @@ FocusScope {
         camera.searchAndLock()
     }
 
+    function lockFocus(point) {
+        setFocusPoint(point)
+        if (!tapFocusActive) return
+        focusTimer.stop()
+        focusLocked = true
+    }
+
+    function unlockFocus() {
+        _resetFocus()
+    }
+
     // Adjusting brightness keeps the tap focus (and this brightness) until
     // the next tap instead of expiring after a few seconds.
     function showVideoBrightness() {
@@ -346,13 +378,14 @@ FocusScope {
 
     function _resetFocus() {
         focusTimer.running = false
+        focusLocked = false
         tapFocusActive = false
         videoBrightnessActive = false
         tapExposureEv = 0
         _camera2FocusPoint = Qt.point(0.5, 0.5)
         _camera2SensorFocusPoint = Qt.point(0.5, 0.5)
         _releaseCamera2BracketFocusHold()
-        if (_camera2ViewfinderActive && camera2Viewfinder
+        if (_camera2PreviewActive && camera2Viewfinder
                 && typeof camera2Viewfinder.clearFocusPoint === "function") {
             camera2Viewfinder.clearFocusPoint()
         }
@@ -462,6 +495,14 @@ FocusScope {
     function _camera2FrameSuffix(index) {
         return _camera2BurstPlan ? "_burst" + index
                                  : _camera2BracketSuffix(_camera2BracketQueue[index])
+    }
+
+    // A flash photo is one warm RAW frame, never a burst or a bracket: "on",
+    // or "auto" while the preview's AE reports FLASH_REQUIRED (state 4).
+    function _camera2FlashFires() {
+        return _warmRawReady && !!camera2Viewfinder
+                && (_camera2FlashMode === "on"
+                    || (_camera2FlashMode === "auto" && exposureLogic.resultAeState === 4))
     }
 
     // Burst merge needs the warm RAW16 preview path; otherwise a normal capture runs.
@@ -1435,11 +1476,13 @@ FocusScope {
                                   captureView._captureSidecarPath(".warm.raw16"),
                                   captureView._captureSidecarPath(".warm.json"),
                                   bracketIso,
-                                  bracketShutter)
+                                  bracketShutter,
+                                  captureView._camera2FlashShot)
                     } else {
                         captureStarted = camera2Viewfinder.captureRaw(
                                   captureView._captureSidecarPath(".warm.raw16"),
-                                  captureView._captureSidecarPath(".warm.json"))
+                                  captureView._captureSidecarPath(".warm.json"),
+                                  captureView._camera2FlashShot)
                     }
                     if (!captureStarted) {
                         captureView._clearWarmRawBracketRenderQueue()
@@ -1530,8 +1573,10 @@ FocusScope {
                 camera2CaptureErrorNotification.publishMessage("Waiting for exposure, try again")
                 return
             }
-            var burstRequested = captureView._camera2BurstRequested()
-            if ((captureView._camera2BracketSteps().length > 0 || burstRequested) &&
+            var flashShot = captureView._camera2FlashFires()
+            var burstRequested = !flashShot && captureView._camera2BurstRequested()
+            var bracketRequested = !flashShot && captureView._camera2BracketSteps().length > 0
+            if ((bracketRequested || burstRequested) &&
                     !(captureView._camera2CurrentIso() > 0 && captureView._camera2CurrentShutterNs() > 0)) {
                 exposureLogic.status = "Waiting for exposure results before bracketing"
                 extensions.logCaptureEvent("capture without exposure results " + captureView._captureState())
@@ -1539,7 +1584,7 @@ FocusScope {
                 return
             }
             var burstPlan = burstRequested ? captureView._camera2PlanBurst() : null
-            if (captureView._camera2HdrCapture && !burstPlan) {
+            if (captureView._camera2HdrCapture && !burstPlan && !flashShot) {
                 // Say so instead of silently taking a single frame.
                 camera2CaptureErrorNotification.publishMessage(!captureView._warmRawReady
                         ? (Settings.camera2BurstFormat(Settings.deviceId) === "yuv"
@@ -1549,7 +1594,7 @@ FocusScope {
                            : "HDR needs the fast RAW16 preview (speed not Quality); taking a normal photo")
                         : "No HDR plan for this exposure; taking a normal photo")
             }
-            var pair = captureView._camera2BracketSteps()
+            var pair = bracketRequested ? captureView._camera2BracketSteps() : []
             if (pair.length > 0) {
                 var baseTime = captureView._camera2CurrentShutterNs()
                 var shortTime = Number(extensions.camera2BracketShutterNs(
@@ -1574,7 +1619,11 @@ FocusScope {
                             + captureView._warmJpegState())
             }
             var bracketSteps = burstPlan ? captureView._camera2BurstQueue(burstPlan.frames)
-                                         : captureView._camera2BracketSteps()
+                                         : bracketRequested ? captureView._camera2BracketSteps() : []
+            captureView._camera2FlashShot = flashShot
+            if (flashShot)
+                extensions.logCaptureEvent("capture flash mode=" + captureView._camera2FlashMode
+                                           + " ae=" + exposureLogic.resultAeState)
             var liveJpegCapture = bracketSteps.length > 0 ? false
                                                           : captureView._liveJpegCapture
             var liveWarmCapture = liveJpegCapture
@@ -2129,14 +2178,21 @@ FocusScope {
     Binding {
         target: captureView._camera2ViewfinderActive ? captureView.camera2Viewfinder : null
         property: "focusPeaking"
-        value: Settings.global.advancedMode && Settings.global.experimentalExposureLayout
+        value: Settings.global.advancedMode
                && Settings.global.captureMode === "image" && Settings.global.focusPeaking
+    }
+
+    Binding {
+        target: captureView._camera2ViewfinderActive || captureView._camera2VideoActive
+                ? captureView.camera2Viewfinder : null
+        property: "flashMode"
+        value: captureView._camera2FlashMode
     }
 
     Binding {
         target: captureView._camera2ViewfinderActive ? captureView.camera2Viewfinder : null
         property: "exposureZebras"
-        value: Settings.global.advancedMode && Settings.global.experimentalExposureLayout
+        value: Settings.global.advancedMode
                && Settings.global.captureMode === "image" && Settings.global.exposureZebras
     }
 
@@ -2313,33 +2369,33 @@ FocusScope {
     Item {
         id: focusArea
 
-        width: captureView._camera2ViewfinderActive
+        width: captureView._camera2PreviewActive
                ? captureView._camera2PreviewWidth
                : Screen.width * captureView._viewfinderAspectRatio
-        height: captureView._camera2ViewfinderActive
+        height: captureView._camera2PreviewActive
                 ? captureView._camera2PreviewHeight
                 : Screen.width
 
-        rotation: captureView._camera2ViewfinderActive
+        rotation: captureView._camera2PreviewActive
                   ? 0 : -captureView.viewfinderOrientation
         anchors {
             centerIn: parent
-            verticalCenterOffset: (captureView._camera2ViewfinderActive
+            verticalCenterOffset: (captureView._camera2PreviewActive
                                    ? captureView.camera2TopInset + focusArea.height / 2
                                      - parent.height / 2
                                    : (isPortrait ? viewfinderOffset : 0))
-            horizontalCenterOffset: captureView._camera2ViewfinderActive
+            horizontalCenterOffset: captureView._camera2PreviewActive
                                     ? focusArea.width / 2 - parent.width / 2
                                     : (isPortrait ? 0 : viewfinderOffset)
         }
         opacity: captureOverlay ? 1.0 - captureOverlay.settingsOpacity : 1.0
 
         Repeater {
-            model: captureView._camera2ViewfinderActive
+            model: captureView._camera2PreviewActive
                    ? (captureView.tapFocusActive ? 1 : 0)
                    : camera.focus.focusZones
             delegate: Item {
-                readonly property bool camera2FocusZone: captureView._camera2ViewfinderActive
+                readonly property bool camera2FocusZone: captureView._camera2PreviewActive
                 readonly property var zoneArea: camera2FocusZone
                                                 ? Qt.rect(Math.max(0, Math.min(0.85, captureView._camera2FocusPoint.x - 0.075)),
                                                           Math.max(0, Math.min(0.85, captureView._camera2FocusPoint.y - 0.075)),

@@ -1827,6 +1827,15 @@ bool DeclarativeCameraExtensions::camera2BurstSupported(const QString &cameraId)
     return supported;
 }
 
+bool DeclarativeCameraExtensions::camera2FlashSupported(const QString &cameraId)
+{
+    const QString id = cameraId.isEmpty() ? QStringLiteral("0") : cameraId;
+    if (!loadCamera2Capabilities(id)) return false;
+    const QJsonArray modes = cameraExposureObject(camera2ProbeCamera(m_camera2ProbeJson, id))
+            .value(QStringLiteral("ae_modes")).toArray();
+    return modes.contains(QJsonValue(3)); // ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH
+}
+
 QString DeclarativeCameraExtensions::camera2BurstFormat(const QString &cameraId)
 {
     if (!loadCamera2Capabilities(cameraId)) return QString();
@@ -1880,6 +1889,24 @@ QString DeclarativeCameraExtensions::camera2BurstRawSize(const QString &cameraId
         }
     }
     return best;
+}
+
+QStringList DeclarativeCameraExtensions::camera2BurstSizeModel(const QString &cameraId)
+{
+    if (!loadCamera2Capabilities(cameraId)) return QStringList();
+    // A YUV burst has a single size; RAW16 every size that streams next to
+    // the preview (the HAL's larger JPEGs are upscaled from the binned
+    // sensor and would be ignored).
+    if (m_camera2Raw16Sizes.isEmpty()) {
+        const QString size = camera2BurstRawSize(cameraId, QString());
+        return size.isEmpty() ? QStringList() : QStringList(size);
+    }
+    QStringList sizes;
+    for (const QString &size : m_camera2Raw16Sizes) {
+        if (camera2WarmRawCaptureSupported(cameraId, size))
+            sizes.append(size);
+    }
+    return sizes;
 }
 
 void DeclarativeCameraExtensions::logCaptureEvent(const QString &message)
