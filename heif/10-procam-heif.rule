@@ -1,0 +1,5 @@
+[ExtractorRule]
+MimeTypes=image/heif;image/heic;
+FallbackRdfTypes=nfo:Image;nmm:Photo;
+Graph=tracker:Pictures
+Hash=6b742a49fffdb503af1e5c9926663c47289194365054098d4a518d082839a972

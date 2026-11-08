@@ -49,6 +49,8 @@ jobs:
           # Tags are needed for the version.
           fetch-depth: 0
           persist-credentials: false
+          # libheif and libde265 for the HEIF image plugin.
+          submodules: true
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4

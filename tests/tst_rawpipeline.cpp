@@ -1325,6 +1325,34 @@ private slots:
         QVERIFY(mean > 40 && mean < 220);
     }
 
+    // A camera that adds a constant to its tone-mapped luma when the exposure
+    // rises (the Xperia 10 III's +0.155 for 2.3x): the curve recovers it, and
+    // a frame covering too little of the range gives none.
+    void yuvCameraCurve()
+    {
+        const int width = 640, height = 480;
+        YuvFrame captured, metered, flat;
+        captured.width = metered.width = flat.width = width;
+        captured.height = metered.height = flat.height = height;
+        const std::size_t size = std::size_t(width) * height * 3 / 2;
+        captured.data.assign(size, 128);
+        metered.data.assign(size, 128);
+        flat.data.assign(size, 128);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                const float v = 0.05f + 0.75f * float(x) / width;
+                captured.data[std::size_t(y) * width + x] = uint8_t(v * 255 + 0.5f);
+                metered.data[std::size_t(y) * width + x] = uint8_t(std::min(1.0f, v + 0.155f) * 255 + 0.5f);
+                flat.data[std::size_t(y) * width + x] = 140;
+            }
+        const std::vector<float> curve = measureCameraCurve(captured, metered);
+        QCOMPARE(int(curve.size()), 257);
+        for (float x : {0.2f, 0.4f, 0.6f})
+            QVERIFY2(std::abs(curve[int(x * 256)] - (x + 0.155f)) < 0.02f, qPrintable(QString::number(curve[int(x * 256)])));
+        for (int i = 1; i <= 256; ++i) QVERIFY(curve[i] >= curve[i - 1]);
+        QVERIFY(measureCameraCurve(flat, metered).empty());
+    }
+
     void yuvToneRefinements()
     {
         // Front / ultra-wide: a hazy YUV burst (no real blacks) gets the same

@@ -117,6 +117,24 @@ ApplicationSettings {
 
     IconTextSwitch {
         automaticCheck: false
+        text: "Keep trying RAW"
+        description: "For testing cameras whose RAW photos come out damaged (seen on the Xperia 10 III). ProCam keeps taking RAW photos instead of switching that camera to YUV frames. Damaged photos fail, and their RAW frame is saved next to your photos for troubleshooting."
+        enabled: AccessPolicy.cameraEnabled
+        checked: Settings.global.keepTryingRaw
+        onClicked: Settings.global.keepTryingRaw = !checked
+    }
+
+    IconTextSwitch {
+        automaticCheck: false
+        text: "Learned denoise (experimental)"
+        description: "Clean up noisy HDR and night photos with a small neural network on the graphics processor instead of the standard noise filter. Keeps more texture in dim light; adds about half a second per photo. Brighter photos keep the standard filter."
+        enabled: AccessPolicy.cameraEnabled
+        checked: Settings.global.learnedDenoise
+        onClicked: Settings.global.learnedDenoise = !checked
+    }
+
+    IconTextSwitch {
+        automaticCheck: false
         text: "ProCam video recorder"
         description: "Record video through ProCam's own camera session: 1080p at 30 fps with electronic stabilization, no system configuration needed. Turn off to record with the system camera service instead, if recording fails."
         enabled: AccessPolicy.cameraEnabled
@@ -174,6 +192,26 @@ ApplicationSettings {
         enabled: AccessPolicy.cameraEnabled
         checked: Settings.global.qrFilterEnabled
         onClicked: Settings.global.qrFilterEnabled = !Settings.global.qrFilterEnabled
+    }
+
+    ComboBox {
+        label: "Photo format"
+        description: Settings.global.photoFormat === "heic"
+                     ? "HEIC photos take about a third less space than JPEG at the same quality. Some older apps and computers cannot open them."
+                     : "JPEG opens everywhere. HEIC takes about a third less space."
+        enabled: AccessPolicy.cameraEnabled
+        currentIndex: Settings.global.photoFormat === "heic" ? 1 : 0
+
+        menu: ContextMenu {
+            MenuItem {
+                text: "JPEG"
+                onClicked: Settings.global.photoFormat = "jpeg"
+            }
+            MenuItem {
+                text: "HEIC"
+                onClicked: Settings.global.photoFormat = "heic"
+            }
+        }
     }
 
     ComboBox {

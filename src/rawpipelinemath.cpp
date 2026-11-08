@@ -1362,39 +1362,48 @@ std::vector<float> demosaic(const std::vector<float> &mosaic, int width, int hei
 
 // --- Tone mapping ------------------------------------------------------------------------
 
-std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int height,
-                                 double shortGain, double longGain)
-{
-    // Mertens exposure fusion of two synthetic exposures of the same linear
-    // luma: the short one keeps highlights, the long one lifts shadows. The
-    // full-resolution level is evaluated on the fly to save memory.
-    const Curve &c = curve();
-    const float gs = float(shortGain), gl = float(longGain);
-    struct Exposure {
-        float s, l, w; // gamma-encoded short/long exposure, weight of short
-    };
-    // Weights depend only on the gamma-encoded exposures, so tabulate them.
+namespace {
+
+struct Exposure {
+    float s, l, w; // gamma-encoded short/long exposure, weight of short
+};
+
+// Mertens weights; they depend only on the gamma-encoded exposures, so they
+// are tabulated.
+struct FusionWeights {
     static const int Steps = 4096;
-    std::vector<float> wellExposed(Steps + 1), takeover(Steps + 1), longWeight(Steps + 1);
-    for (int i = 0; i <= Steps; ++i) {
-        const float e = float(i) / Steps, d = e - 0.5f;
-        wellExposed[i] = std::exp(-d * d * 12.5f);
-        // The short exposure only takes over where the long one approaches
-        // white, so shadows and mid tones keep the metered brightness.
-        takeover[i] = 0.15f + 0.85f * std::min(1.0f, std::max(0.0f, (e - 0.5f) / 0.45f));
-        // A clipped long exposure carries no information.
-        longWeight[i] = wellExposed[i] * std::min(1.0f, std::max(0.0f, (1.0f - e) * 25.0f));
+    std::vector<float> wellExposed, takeover, longWeight;
+    FusionWeights() : wellExposed(Steps + 1), takeover(Steps + 1), longWeight(Steps + 1)
+    {
+        for (int i = 0; i <= Steps; ++i) {
+            const float e = float(i) / Steps, d = e - 0.5f;
+            wellExposed[i] = std::exp(-d * d * 12.5f);
+            // The short exposure only takes over where the long one approaches
+            // white, so shadows and mid tones keep the metered brightness.
+            takeover[i] = 0.15f + 0.85f * std::min(1.0f, std::max(0.0f, (e - 0.5f) / 0.45f));
+            // A clipped long exposure carries no information.
+            longWeight[i] = wellExposed[i] * std::min(1.0f, std::max(0.0f, (1.0f - e) * 25.0f));
+        }
     }
-    auto exposure = [&](float y) {
+    Exposure operator()(float s, float l) const
+    {
         Exposure e;
-        e.s = c.toGamma(y * gs);
-        e.l = c.toGamma(y * gl);
+        e.s = s;
+        e.l = l;
         const int is = int(e.s * Steps + 0.5f), il = int(e.l * Steps + 0.5f);
         const float ws = wellExposed[is] * takeover[il] + 1e-4f;
         const float wl = longWeight[il] + 1e-4f;
         e.w = ws / (ws + wl);
         return e;
-    };
+    }
+};
+
+// Mertens exposure fusion of two exposures of the same image, both derived
+// from `luma` by exposure(value). The full-resolution level is evaluated on
+// the fly to save memory.
+template <typename ExposureOf>
+std::vector<float> fuse(const std::vector<float> &luma, int width, int height, const ExposureOf &exposure)
+{
     auto lumaAt = [&](int x, int y) { return luma[std::size_t(y) * width + x]; };
 
     int levels = 1;
@@ -1492,6 +1501,36 @@ std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int 
         }
     });
     return fused;
+}
+
+} // namespace
+
+std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int height,
+                                 double shortGain, double longGain)
+{
+    // Two synthetic exposures of the same linear luma: the short one keeps
+    // highlights, the long one lifts shadows.
+    const Curve &c = curve();
+    const float gs = float(shortGain), gl = float(longGain);
+    const FusionWeights weights;
+    return fuse(luma, width, height, [&](float y) { return weights(c.toGamma(y * gs), c.toGamma(y * gl)); });
+}
+
+std::vector<float> fuseCameraExposures(const std::vector<float> &luma, int width, int height,
+                                       const std::vector<float> &longCurve)
+{
+    // The captured (gamma-encoded) luma is the short exposure; the long one
+    // is what the camera itself makes of it at the metered exposure.
+    const FusionWeights weights;
+    const int last = int(longCurve.size()) - 1;
+    return fuse(luma, width, height, [&](float y) {
+        const float clamped = std::max(0.0f, std::min(1.0f, y));
+        const float position = clamped * last;
+        const int index = std::min(last - 1, int(position));
+        const float fraction = position - index;
+        const float l = longCurve[index] + (longCurve[index + 1] - longCurve[index]) * fraction;
+        return weights(clamped, std::max(0.0f, std::min(1.0f, l)));
+    });
 }
 
 namespace {
@@ -2675,6 +2714,61 @@ NoiseModel flatNoise(const Planes &planes)
 
 }
 
+std::vector<float> measureCameraCurve(const YuvFrame &captured, const YuvFrame &metered)
+{
+    const int cell = 16;
+    const int width = captured.width, height = captured.height;
+    if (width != metered.width || height != metered.height || width < cell * 8 || height < cell * 8
+            || captured.data.size() < std::size_t(width) * height || metered.data.size() < std::size_t(width) * height)
+        return std::vector<float>();
+    const int bins = 64;
+    std::vector<std::vector<float>> values(bins);
+    for (int cy = 0; cy + cell <= height; cy += cell)
+        for (int cx = 0; cx + cell <= width; cx += cell) {
+            int a = 0, b = 0;
+            for (int y = cy; y < cy + cell; ++y) {
+                const uint8_t *ra = &captured.data[std::size_t(y) * width + cx];
+                const uint8_t *rb = &metered.data[std::size_t(y) * width + cx];
+                for (int x = 0; x < cell; ++x) {
+                    a += ra[x];
+                    b += rb[x];
+                }
+            }
+            const float la = a / (255.0f * cell * cell), lb = b / (255.0f * cell * cell);
+            values[std::min(bins - 1, int(la * bins))].push_back(lb);
+        }
+    // Knots: (0, 0), the median per well-populated bin, (1, 1).
+    std::vector<std::pair<float, float>> knots{{0.0f, 0.0f}};
+    float covered = 0;
+    int valid = 0;
+    for (int i = 0; i < bins; ++i) {
+        std::vector<float> &v = values[i];
+        if (v.size() < 16) continue;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        const float centre = (i + 0.5f) / bins;
+        // A brightening curve: never darker than the input, never falling.
+        const float median = std::max({v[v.size() / 2], centre, knots.back().second});
+        knots.emplace_back(centre, std::min(1.0f, median));
+        covered += 1.0f / bins;
+        ++valid;
+    }
+    knots.emplace_back(1.0f, 1.0f);
+    // Too little of the tonal range, or a lift no exposure change makes
+    // (moving scene, different framing): not trusted.
+    if (valid < 8 || covered < 0.3f) return std::vector<float>();
+    std::vector<float> curve(257);
+    std::size_t k = 0;
+    for (int i = 0; i <= 256; ++i) {
+        const float x = i / 256.0f;
+        while (k + 2 < knots.size() && knots[k + 1].first < x) ++k;
+        const auto &p = knots[k], &q = knots[k + 1];
+        const float t = q.first > p.first ? (x - p.first) / (q.first - p.first) : 0.0f;
+        curve[i] = std::max(curve[std::max(0, i - 1)], p.second + (q.second - p.second) * std::max(0.0f, std::min(1.0f, t)));
+        if (curve[i] - x > 0.5f) return std::vector<float>();
+    }
+    return curve;
+}
+
 RgbImage renderYuvBurst(const std::vector<const YuvFrame *> &frames, const YuvOptions &options,
                         YuvStats *stats)
 {
@@ -2819,7 +2913,46 @@ RgbImage renderYuvBurst(const std::vector<const YuvFrame *> &frames, const YuvOp
     if (stats) stats->faceLevel = faceLevel;
     const bool faceNeedsTone = faceLevel > 1e-5
             && (faceLevel * brightness > FaceHigh || faceLevel * brightness < FaceLow);
-    if (brightness > 1.01 || options.night || faceNeedsTone) {
+    if (!options.cameraCurve.empty()) {
+        // The camera's own brightening, measured from its frame at the
+        // metered exposure: the long exposure is what the camera made of the
+        // scene there, the captured frames keep the highlights it clipped.
+        // Colour follows the luma change as the camera's does, except in
+        // deep shadows, where it is partly noise.
+        // The camera's metered rendering of a bright scene is washed out
+        // (Xperia 10 III daylight: saturation 10.3 against 14.4 in the
+        // burst's own frames), so the lift stops at a median luma of 0.5:
+        // dark scenes get all of it, bright ones keep the captured contrast.
+        std::vector<float> sample;
+        for (std::size_t i = 0; i < y.size(); i += 97) sample.push_back(y[i]);
+        std::nth_element(sample.begin(), sample.begin() + sample.size() / 2, sample.end());
+        const float median = sample.empty() ? 0.5f : sample[sample.size() / 2];
+        const std::vector<float> &curveIn = options.cameraCurve;
+        const int last = int(curveIn.size()) - 1;
+        const float position = std::max(0.0f, std::min(1.0f, median)) * last;
+        const int index = std::min(last - 1, int(position));
+        const float lifted = curveIn[index] + (curveIn[index + 1] - curveIn[index]) * (position - index);
+        const float strength = lifted > median + 1e-3f
+                ? std::max(0.0f, std::min(1.0f, (0.5f - median) / (lifted - median))) : 0.0f;
+        std::vector<float> longCurve(curveIn.size());
+        for (int i = 0; i <= last; ++i) {
+            const float x = float(i) / last;
+            longCurve[i] = x + strength * (curveIn[i] - x);
+        }
+        if (stats) stats->cameraLift = strength;
+        const std::vector<float> fused = fuseCameraExposures(y, width, height, longCurve);
+        chromaGain.resize(y.size());
+        parallelFor(0, height, [&](int row) {
+            for (int x = 0; x < width; ++x) {
+                const std::size_t i = std::size_t(row) * width + x;
+                const float ratio = fused[i] / std::max(0.02f, y[i]);
+                const float t = std::max(0.0f, std::min(1.0f, (y[i] - 0.1f) / 0.2f));
+                const float exponent = 0.5f + 0.5f * t * t * (3 - 2 * t);
+                chromaGain[i] = std::max(0.5f, std::min(2.0f, std::pow(ratio, exponent)));
+                y[i] = fused[i];
+            }
+        });
+    } else if (brightness > 1.01 || options.night || faceNeedsTone) {
         const Curve &c = curve();
         std::vector<float> linear(y.size());
         parallelFor(0, height, [&](int row) {

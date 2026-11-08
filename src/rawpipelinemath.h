@@ -277,14 +277,28 @@ struct YuvOptions {
     double clarity = 0.0;
     double saturation = 1.0;
     double keptShortSide = 1.0;
+    // The camera's own brightening (measureCameraCurve()), when the burst
+    // had a frame at the metered exposure: replaces the sRGB model of the
+    // frames for the brightness gain. Empty: sRGB, as for every camera that
+    // applies burst exposures at once.
+    std::vector<float> cameraCurve;
 };
 struct YuvStats {
     double rejection = 0, lumaNoise = 0, chromaNoise = 0, severity = 0;
     double faceLevel = -1;
     double blackPoint = 0, whiteScale = 1;
+    // Share of the measured camera brightening applied (cameraCurve), -1 if none.
+    double cameraLift = -1;
     // Milliseconds: align, merge, finish.
     std::array<double, 3> stageMs{{0, 0, 0}};
 };
+// How a camera brightens its own (tone-mapped) output: from the luma of a
+// frame at the burst's exposure and one the camera took at a higher
+// (metered) exposure of the same scene, a curve of 257 values over [0, 1]
+// mapping the first to the second. Medians of 16x16 cell means, so small
+// shake and noise do not matter. Empty if the frames do not cover enough of
+// the range or the result is implausible.
+std::vector<float> measureCameraCurve(const YuvFrame &captured, const YuvFrame &metered);
 // frames[0] is the reference.
 RgbImage renderYuvBurst(const std::vector<const YuvFrame *> &frames, const YuvOptions &options,
                         YuvStats *stats);
@@ -331,6 +345,11 @@ void fft16x16(float *re, float *im, bool inverse);
 std::vector<float> demosaic(const std::vector<float> &mosaic, int width, int height, int cfa);
 std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int height,
                                  double shortGain, double longGain);
+// The same for an image a camera has already tone mapped (gamma-encoded
+// luma): the long exposure is longCurve (luma at the captured exposure ->
+// the camera's luma at the metered one, sampled evenly over [0, 1]).
+std::vector<float> fuseCameraExposures(const std::vector<float> &luma, int width, int height,
+                                       const std::vector<float> &longCurve);
 double srgbEncode(double linear);
 double srgbDecode(double encoded);
 

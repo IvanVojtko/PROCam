@@ -162,6 +162,7 @@ ApplicationWindow {
         captureSize: Settings.mode.rawCaptureSize
         rawCaptureSize: Settings.camera2BurstRawSize()
         rawCaptureFormat: Settings.camera2BurstFormat(cameraId) === "yuv" ? "yuv" : "raw16"
+        maxFrameRate: Settings.camera2PhotoMaxFps(cameraId)
         captureTimeout: Settings.mode.rawCaptureTimeout
         readonly property bool jpegFromRaw: Settings.camera2JpegFromRaw(cameraId)
         jpegCaptureEnabled: Settings.mode.camera2CaptureFormat === "jpeg" && !hdrCapture && !jpegFromRaw
@@ -172,7 +173,7 @@ ApplicationWindow {
                                || (Settings.mode.camera2CaptureFormat === "raw"
                                    && Settings.mode.rawCaptureRawFormat === "raw16"
                                    && Settings.camera2WarmRawCaptureSupported(Settings.mode.rawCaptureSize)))
-        jpegQuality: Settings.mode.rawCaptureJpegQuality
+        jpegQuality: Settings.photoJpegQuality()
         // Camera2 reports lens facing; Qt Multimedia's ids are the fallback.
         readonly property string lensFacing: Settings.camera2LensFacing(cameraId)
         readonly property bool frontFacing: lensFacing !== "unknown"

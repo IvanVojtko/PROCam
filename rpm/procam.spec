@@ -8,7 +8,7 @@ Name:       procam
 Summary:    Computational photography camera for the Jolla Phone 2
 Version:    1.4.0
 Release:    1
-License:    BSD-3-Clause AND GPL-2.0-or-later AND GPL-3.0-or-later
+License:    BSD-3-Clause AND GPL-2.0-or-later AND GPL-3.0-or-later AND LGPL-3.0-or-later
 URL:        https://github.com/IvanVojtko/PROCam
 Source0:    %{name}-%{version}.tar.bz2
 
@@ -38,6 +38,7 @@ BuildRequires:  pkgconfig(libpulse-simple)
 BuildRequires:  qt5-qttools
 BuildRequires:  qt5-qttools-linguist
 BuildRequires:  oneshot
+BuildRequires:  cmake
 
 Requires:  sailfishsilica-qt5 >= 1.1.79
 Requires:  libtiff
@@ -82,7 +83,7 @@ merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
 
 %build
 
-%qmake5 procam.pro
+%qmake5 procam.pro PROCAM_VERSION=%{version}
 %make_build
 
 %install
@@ -90,6 +91,12 @@ merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
 
 %post
 %{_bindir}/add-oneshot dconf-update || :
+# The indexer reads its extract rules only at start: without a restart new
+# HEIC photos stay plain files and the Gallery does not list them.
+systemctl-user try-restart localsearch-3.service || :
+
+%postun
+systemctl-user try-restart localsearch-3.service || :
 
 %files
 %license LICENSES/BSD-3-Clause.txt
@@ -117,8 +124,27 @@ merged RAW bursts (HDR, night mode), multi-frame super-resolution and sharp
 %dir %{_libexecdir}/droid-hybris/system/lib64
 %{_libexecdir}/droid-hybris/system/lib64/libprocamcamera2.so
 %{_sysconfdir}/dconf/db/vendor.d/00-procam.txt
+%{_libdir}/qt5/plugins/imageformats/libprocamheif.so
+%{_datadir}/procam/licenses
+%{_datadir}/localsearch3/extract-rules/10-procam-heif.rule
 
 %changelog
+* Sun Nov 08 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.6-1
+- HEIC photos (Settings: Photo format): the finished JPEG is encoded by the
+  hardware HEIC encoder through the Camera2 bridge with its EXIF (date, GPS,
+  size, orientation). A bundled libheif/libde265 Qt image plugin and a
+  localsearch rule. A JPEG without EXIF date, or a HEIC missing its EXIF,
+  stays a JPEG.
+- EXIF: rationals within 32-bit signed range (focal length read as -0.0 mm
+  before), exposure as 1/N, sRGB colour space, the real version as Software.
+- Learned denoise (experimental, off by default): a small network on the
+  GPU (GLES 3.1 compute) for the noisiest HDR and night merges.
+- Focus: a tap's AF scan finishes (up to 2 s) before a burst holds the lens.
+- Pro controls redesign, flash and torch, zoom double crop fixed, tap focus
+  lock.
+- Xperia 10 III: YUV bursts fused with the camera's own tone curve (no haze);
+  damaged RAW retried with the session capped at 30 fps before YUV; damaged
+  frames kept as <photo>_damaged.raw16; "Keep trying RAW" setting.
 * Mon Nov 02 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.4-1
 - Own video recorder in the Camera2 bridge, on by default: 1080p or 1440p
   at 30 fps, H.264 or HEVC, AAC sound, electronic stabilization with an

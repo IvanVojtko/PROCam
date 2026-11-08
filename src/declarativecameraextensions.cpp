@@ -6,6 +6,7 @@
 #include "declarativecameraextensions.h"
 #include "previewsize.h"
 #include "exifutils.h"
+#include "heicencode.h"
 #include "dnglensshading.h"
 #include "imageadjustments.h"
 #include "rawbracket.h"
@@ -176,10 +177,14 @@ qint64 procamMsSinceProcessStart(); // camera2preview.cpp
 
 // Cameras whose RAW frames came out damaged (rawframecheck.h): the HAL fills
 // only part of its RAW buffer. They are then treated as cameras without RAW,
-// so their photos come from YUV bursts. The verdict is kept until the Android
-// vendor image changes (an update may fix the HAL) or the check does.
+// so their photos come from YUV bursts, unless "Keep trying RAW" is on. The
+// verdict is kept until the Android vendor image changes (an update may fix
+// the HAL) or the check does.
 static const int Camera2RawDamageCheckVersion = 1;
 static int camera2RawDamageRevision = 0;
+// "Keep trying RAW" (Settings, for testers): a camera whose RAW came out
+// damaged stays with RAW, at the retry frame rate, instead of YUV frames.
+static bool camera2KeepTryingRaw = false;
 
 static QString camera2RawDamagePath()
 {
@@ -203,7 +208,15 @@ static QString camera2RawDamageFingerprint()
     return parts.join(QLatin1Char('|'));
 }
 
-// Camera id -> why its RAW output was found damaged.
+// Camera id -> why its RAW output was found damaged: {"reason", "fps_capped"}.
+// The first damaged frame starts a retry of RAW with the session capped at
+// Camera2RawRetryFps (an Xperia 10 III that streams its viewfinder at up to
+// 45 fps wrote binned 2016x1136 frames into its full-size RAW buffer, likely
+// from a fast binned sensor mode); damage again during that retry is final
+// and photos come from YUV frames. An entry from before the retry existed
+// (a plain reason string) counts as the first damage. Cameras whose RAW was
+// never damaged (Jolla Phone 2) have no entry and are never capped.
+static const int Camera2RawRetryFps = 30;
 static QJsonObject &camera2RawDamagedCameras()
 {
     static QJsonObject cameras;
@@ -219,15 +232,40 @@ static QJsonObject &camera2RawDamagedCameras()
     return cameras;
 }
 
-static void markCamera2RawDamaged(const QString &cameraId, const QString &reason)
+// RAW is no longer used for the camera: damaged again at the capped rate,
+// and Keep trying RAW is off.
+static bool camera2RawUnusable(const QString &cameraId)
+{
+    if (camera2KeepTryingRaw) return false;
+    const QJsonValue entry = camera2RawDamagedCameras().value(cameraId);
+    return entry.isObject() && entry.toObject().value(QStringLiteral("fps_capped")).toBool();
+}
+
+// Records damaged RAW output from frames captured with the session capped at
+// cappedFps (0: uncapped); true if it was damaged at the capped rate too, so
+// RAW is given up for the camera unless Keep trying RAW is on. Frames from
+// before the retry started (a burst still rendering) do not end it.
+static bool markCamera2RawDamaged(const QString &cameraId, const QString &reason, int cappedFps)
 {
     QJsonObject &cameras = camera2RawDamagedCameras();
-    if (cameraId.isEmpty() || cameras.contains(cameraId))
-        return;
-    cameras.insert(cameraId, reason);
+    if (cameraId.isEmpty() || camera2RawUnusable(cameraId))
+        return true;
+    if (cameras.contains(cameraId) && cappedFps <= 0)
+        return false;
+    const bool final = cameras.contains(cameraId);
+    QJsonObject entry;
+    entry.insert(QStringLiteral("reason"), reason);
+    entry.insert(QStringLiteral("fps_capped"), final);
+    cameras.insert(cameraId, entry);
     ++camera2RawDamageRevision;
-    appendRawCaptureLog(QStringLiteral("raw-damaged camera=%1 reason=\"%2\" photos now from YUV frames")
-                        .arg(cameraId, reason));
+    appendRawCaptureLog(!final
+            ? QStringLiteral("raw-damaged camera=%1 reason=\"%2\" retrying RAW at up to %3 fps")
+                  .arg(cameraId, reason).arg(Camera2RawRetryFps)
+            : camera2KeepTryingRaw
+            ? QStringLiteral("raw-damaged camera=%1 reason=\"%2\" also at %3 fps, keep trying RAW is on")
+                  .arg(cameraId, reason).arg(Camera2RawRetryFps)
+            : QStringLiteral("raw-damaged camera=%1 reason=\"%2\" also at %3 fps, photos now from YUV frames")
+                  .arg(cameraId, reason).arg(Camera2RawRetryFps));
     QJsonObject stored;
     stored.insert(QStringLiteral("fingerprint"), camera2RawDamageFingerprint());
     stored.insert(QStringLiteral("cameras"), cameras);
@@ -248,9 +286,37 @@ static QString frameCameraId(const QString &metadataPath)
             .value(QStringLiteral("camera_id")).toString();
 }
 
+// The session's frame rate cap when the frame was captured (bridge
+// --max-fps), 0 if none.
+static int frameSessionMaxFps(const QString &metadataPath)
+{
+    QFile file(metadataPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return 0;
+    return QJsonDocument::fromJson(file.readAll()).object()
+            .value(QStringLiteral("session_max_fps")).toInt();
+}
+
 static const char *const Camera2RawDamagedMessage =
         "This camera delivered damaged RAW frames. ProCam now takes its photos from "
         "YUV frames instead; please take the photo again.";
+static const char *const Camera2RawRetryMessage =
+        "This camera delivered damaged RAW frames. ProCam retries RAW at a lower "
+        "frame rate; please take the photo again.";
+static const char *const Camera2RawKeepTryingMessage =
+        "This camera delivered damaged RAW frames again. Keep trying RAW is on, so "
+        "ProCam stays with RAW; turn it off in Settings for photos from YUV frames.";
+
+// What the photo's failure tells the user: final is markCamera2RawDamaged's
+// verdict, saved the damaged frame kept for troubleshooting (if any).
+static QString camera2RawDamageMessage(bool final, const QString &saved)
+{
+    QString message = QString::fromLatin1(!final ? Camera2RawRetryMessage
+            : camera2KeepTryingRaw ? Camera2RawKeepTryingMessage : Camera2RawDamagedMessage);
+    if (!saved.isEmpty())
+        message += QStringLiteral(" The damaged frame is saved as %1.").arg(saved);
+    return message;
+}
 
 static const Camera2ProbeResult &camera2Probe()
 {
@@ -1056,6 +1122,47 @@ static QString rawPathFromMetadata(const QString &metadataPath, QString *error)
     return rawPath;
 }
 
+// A damaged RAW frame is kept for troubleshooting even with RAW saving off:
+// next to where the photo would have been, as <photo>_damaged.raw16 (or
+// .raw10) and .json with the reason. Not when the capture already saved its
+// RAW (RAW saving, or Keep every burst frame). Returns the RAW's file name,
+// or an empty string.
+static QString saveDamagedRawFrame(const QString &metadataPath, const QString &photoPath,
+                                   const QString &reason)
+{
+    const QFileInfo photo(photoPath);
+    if (metadataPath.isEmpty() || photoPath.isEmpty()) return QString();
+    const QString base = photo.absolutePath() + QLatin1Char('/') + photo.completeBaseName();
+    for (const QString &saved : { base, base + QStringLiteral("_burst0") }) {
+        for (const char *extension : { ".raw16", ".raw10", ".dng" }) {
+            if (QFileInfo::exists(saved + QLatin1String(extension))) return QString();
+        }
+    }
+    QString error;
+    const QString source = rawPathFromMetadata(metadataPath, &error);
+    QFile metadataFile(metadataPath);
+    const QString format = metadataFile.open(QIODevice::ReadOnly)
+            ? QJsonDocument::fromJson(metadataFile.readAll()).object()
+                  .value(QStringLiteral("format")).toString()
+            : QString();
+    const QString raw = base + (format == QLatin1String("RAW10") ? QStringLiteral("_damaged.raw10")
+                                                                 : QStringLiteral("_damaged.raw16"));
+    const QString metadata = base + QStringLiteral("_damaged.json");
+    QFile::remove(raw);
+    const bool ok = error.isEmpty() && QFile::copy(source, raw)
+            && writeMetadataWithRawPath(metadataPath, metadata, raw, &error)
+            && ExifUtils::enrichSidecar(metadata, QJsonObject{{QStringLiteral("raw_damage"), reason}}, &error);
+    if (!ok) {
+        QFile::remove(raw);
+        QFile::remove(metadata);
+        appendRawCaptureLog(QStringLiteral("raw-damaged frame not saved: %1")
+                            .arg(error.isEmpty() ? QStringLiteral("cannot copy ") + source : error));
+        return QString();
+    }
+    appendRawCaptureLog(QStringLiteral("raw-damaged frame saved %1").arg(raw));
+    return QFileInfo(raw).fileName();
+}
+
 bool DeclarativeCameraExtensions::rawImageCaptureAvailable() const
 {
     return executableExists(rawCaptureProbePath());
@@ -1324,9 +1431,12 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
     if (!overrides.value(QStringLiteral("raw10_enabled")).toBool(true)) {
         m_camera2Raw10Sizes.clear();
     }
-    const QString rawDamage = camera2RawDamagedCameras()
-            .value(selectedCamera.value(QStringLiteral("id")).toString()).toString();
-    if (!rawDamage.isEmpty()) {
+    const QString rawDamageCamera = selectedCamera.value(QStringLiteral("id")).toString();
+    const QString rawDamage = camera2RawUnusable(rawDamageCamera)
+            ? camera2RawDamagedCameras().value(rawDamageCamera).toObject()
+                  .value(QStringLiteral("reason")).toString()
+            : QString();
+    if (camera2RawUnusable(rawDamageCamera)) {
         m_camera2Raw16Sizes.clear();
         m_camera2Raw10Sizes.clear();
         qDebug() << "raw-damaged"
@@ -1834,6 +1944,25 @@ bool DeclarativeCameraExtensions::camera2FlashSupported(const QString &cameraId)
     const QJsonArray modes = cameraExposureObject(camera2ProbeCamera(m_camera2ProbeJson, id))
             .value(QStringLiteral("ae_modes")).toArray();
     return modes.contains(QJsonValue(3)); // ACAMERA_CONTROL_AE_MODE_ON_ALWAYS_FLASH
+}
+
+bool DeclarativeCameraExtensions::keepTryingRaw() const
+{
+    return camera2KeepTryingRaw;
+}
+
+void DeclarativeCameraExtensions::setKeepTryingRaw(bool keep)
+{
+    if (camera2KeepTryingRaw == keep) return;
+    camera2KeepTryingRaw = keep;
+    ++camera2RawDamageRevision; // RAW sizes and the frame rate cap are read again
+    emit keepTryingRawChanged();
+}
+
+int DeclarativeCameraExtensions::camera2PhotoMaxFps(const QString &cameraId)
+{
+    return camera2RawDamagedCameras().contains(cameraId) && !camera2RawUnusable(cameraId)
+            ? Camera2RawRetryFps : 0;
 }
 
 QString DeclarativeCameraExtensions::camera2BurstFormat(const QString &cameraId)
@@ -2671,7 +2800,8 @@ bool DeclarativeCameraExtensions::processRawImage(
 
 bool DeclarativeCameraExtensions::startRawImageRender()
 {
-    const RawPipeline::RenderSettings settings = rawPipelineSettings();
+    RawPipeline::RenderSettings settings = rawPipelineSettings();
+    settings.learnedDenoise = m_learnedDenoise;
     m_rawRenderStart = m_rawCaptureTimer.elapsed();
     m_rawRenderWatcher.reset(new QFutureWatcher<bool>);
     connect(m_rawRenderWatcher.data(), &QFutureWatcher<bool>::finished,
@@ -2754,6 +2884,7 @@ bool DeclarativeCameraExtensions::combineRawBurst(
     job.sources = paths;
     job.quality = qBound(1, jpegQuality, 100);
     job.settings = rawPipelineSettings();
+    job.settings.learnedDenoise = m_learnedDenoise;
     job.settings.targetGain = std::isfinite(targetGain) && targetGain > 0 ? targetGain : 1.0;
     job.directory = QSharedPointer<QTemporaryDir>(m_rawBracketDirectory.take());
     job.queued.start();
@@ -2766,6 +2897,35 @@ bool DeclarativeCameraExtensions::combineRawBurst(
 int DeclarativeCameraExtensions::pendingRenders() const
 {
     return m_burstJobs.size();
+}
+
+void DeclarativeCameraExtensions::convertToHeic(const QString &path, int jpegQuality)
+{
+    const QUrl url(path);
+    const QString jpegPath = url.isLocalFile() ? url.toLocalFile() : path;
+    const int quality = HeicEncode::qualityForJpegQuality(jpegQuality);
+    const QString helper = rawCaptureProbePath();
+    // One at a time, at background priority: encoder instances are few and
+    // the viewfinder comes first.
+    m_heicPool.setMaxThreadCount(1);
+    auto *watcher = new QFutureWatcher<QStringList>(this);
+    connect(watcher, &QFutureWatcher<QStringList>::finished, this, [this, watcher, jpegPath]() {
+        const QStringList result = watcher->result();
+        watcher->deleteLater();
+        appendRawCaptureLog(result.value(0).isEmpty()
+                            ? QStringLiteral("heic failed %1: %2").arg(jpegPath, result.value(1))
+                            : QStringLiteral("timing heic ms=%1 %2").arg(result.value(2), result.value(0)));
+        emit heicConverted(jpegPath, result.value(0), result.value(1));
+    });
+    watcher->setFuture(QtConcurrent::run(&m_heicPool, [jpegPath, helper, quality]() {
+        setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 5);
+        QElapsedTimer timer;
+        timer.start();
+        QString heicPath, error;
+        if (!HeicEncode::convertJpeg(jpegPath, helper, quality, &heicPath, &error))
+            heicPath.clear();
+        return QStringList{ heicPath, error, QString::number(timer.elapsed()) };
+    }));
 }
 
 void DeclarativeCameraExtensions::startNextBurstRender()
@@ -2809,10 +2969,13 @@ void DeclarativeCameraExtensions::finishBurstRender()
     } else if (RawPipeline::isRawFramesDamagedError(error)) {
         QFile::remove(job.target);
         QFile::remove(jsonSidecarPath(job.target));
+        // Every frame was damaged (RawPipeline leaves out damaged ones), so
+        // the first one shows it.
+        const QString saved = saveDamagedRawFrame(job.sources.first(), job.target, error);
         const QString cameraId = frameCameraId(job.sources.first());
-        markCamera2RawDamaged(cameraId, error);
+        const bool final = markCamera2RawDamaged(cameraId, error, frameSessionMaxFps(job.sources.first()));
         emit camera2RawDamaged(cameraId);
-        emit burstRenderFailed(QString::fromLatin1(Camera2RawDamagedMessage));
+        emit burstRenderFailed(camera2RawDamageMessage(final, saved));
     } else {
         QFile::remove(job.target);
         QFile::remove(jsonSidecarPath(job.target));
@@ -3001,10 +3164,12 @@ void DeclarativeCameraExtensions::finishRawImageRender()
                 ? QStringLiteral("RAW image conversion failed")
                 : m_rawCaptureErrors;
         if (RawPipeline::isRawFramesDamagedError(error)) {
-            const QString cameraId = frameCameraId(m_rawCapturePrefix + QLatin1String(".json"));
-            markCamera2RawDamaged(cameraId, error);
+            const QString metadata = m_rawCapturePrefix + QLatin1String(".json");
+            const QString saved = saveDamagedRawFrame(metadata, m_rawCaptureTargetPath, error);
+            const QString cameraId = frameCameraId(metadata);
+            const bool final = markCamera2RawDamaged(cameraId, error, frameSessionMaxFps(metadata));
             emit camera2RawDamaged(cameraId);
-            error = QString::fromLatin1(Camera2RawDamagedMessage);
+            error = camera2RawDamageMessage(final, saved);
         }
         clearRawImageCapture();
         emit rawImageCaptureFailed(error);

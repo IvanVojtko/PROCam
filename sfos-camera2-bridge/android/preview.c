@@ -48,6 +48,18 @@ enum preview_error {
     PREVIEW_WRITE_ERROR = -39,
 };
 
+// A tap's AF scan (AF trigger) as the preview results show it.
+enum preview_tap_focus {
+    PREVIEW_TAP_FOCUS_DONE,     // locked, or no tap
+    PREVIEW_TAP_FOCUS_PENDING,  // triggered, not seen scanning yet
+    PREVIEW_TAP_FOCUS_SCANNING,
+};
+// Results still showing a lock after a tap without a scan in between: the
+// HAL locked at once (earlier results may still carry the previous lock).
+#define PREVIEW_TAP_FOCUS_STALE_RESULTS 6
+// Contrast AF needs many frames in the dark (up to ~85 ms each).
+#define PREVIEW_TAP_FOCUS_WAIT_MS 2000
+
 struct preview_rational {
     int32_t numerator;
     int32_t denominator;
@@ -158,6 +170,8 @@ struct preview_context {
     float focus_distance;
     int focus_hold_active;
     float focus_hold_distance;
+    atomic_int tap_focus_phase;   // enum preview_tap_focus
+    atomic_int tap_focus_results; // locked results while pending
     atomic_int live_af_state;
     atomic_int live_ae_state;
     atomic_int live_focus_distance_micros;
@@ -179,6 +193,8 @@ struct preview_context {
     atomic_llong live_exposure_time_ns;
     int aperture;
     int noise_reduction;
+    // Photo session frame rate range (sfos_camera2_preview_set_max_fps), 0 if none.
+    int32_t photo_fps_range[2];
     int vendor_awb_value_supported;
     int awb_off_supported;
     char jpeg_path[4096];
@@ -612,6 +628,10 @@ static void preview_configure_request(ACaptureRequest *request,
             : ACAMERA_CONTROL_CAPTURE_INTENT_PREVIEW);
     }
     sfos_camera2_set_aperture(metadata, request, context->aperture);
+    if (!context->video && context->photo_fps_range[1] > 0) {
+        ACaptureRequest_setEntry_i32(request, ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, 2,
+                                     context->photo_fps_range);
+    }
     // Video keeps the record template's noise reduction: the camera's own
     // video tuning (the bridge default, 0, would switch it off).
     if (!context->video)
@@ -1378,6 +1398,54 @@ static void preview_write_stream_status(struct preview_context *context,
     pthread_mutex_unlock(&context->output_lock);
 }
 
+static void preview_track_tap_focus(struct preview_context *context,
+                                    int32_t af_state)
+{
+    int phase = atomic_load_explicit(&context->tap_focus_phase,
+                                     memory_order_acquire);
+    if (phase == PREVIEW_TAP_FOCUS_DONE) {
+        return;
+    }
+    if (af_state == ACAMERA_CONTROL_AF_STATE_ACTIVE_SCAN) {
+        atomic_store_explicit(&context->tap_focus_phase,
+                              PREVIEW_TAP_FOCUS_SCANNING, memory_order_release);
+    } else if ((af_state == ACAMERA_CONTROL_AF_STATE_FOCUSED_LOCKED ||
+                af_state == ACAMERA_CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) &&
+               (phase == PREVIEW_TAP_FOCUS_SCANNING ||
+                atomic_fetch_add_explicit(&context->tap_focus_results, 1,
+                                          memory_order_acq_rel) + 1 >=
+                        PREVIEW_TAP_FOCUS_STALE_RESULTS)) {
+        atomic_store_explicit(&context->tap_focus_phase,
+                              PREVIEW_TAP_FOCUS_DONE, memory_order_release);
+    }
+}
+
+// The shutter can come while a tap's scan is still running; holding the lens
+// then would freeze it mid-scan and leave the whole burst soft (and the next
+// shots too, as the lens stays there). Waits for the scan to lock.
+static void preview_settle_tap_focus(struct preview_context *context)
+{
+    if (atomic_load_explicit(&context->tap_focus_phase, memory_order_acquire) ==
+            PREVIEW_TAP_FOCUS_DONE) {
+        return;
+    }
+    const int64_t started = sfos_camera2_now_ms();
+    int phase;
+    while ((phase = atomic_load_explicit(&context->tap_focus_phase,
+                                         memory_order_acquire)) !=
+                   PREVIEW_TAP_FOCUS_DONE &&
+           sfos_camera2_now_ms() - started < PREVIEW_TAP_FOCUS_WAIT_MS) {
+        sfos_camera2_sleep_10_ms();
+    }
+    fprintf(stderr, "capture-focus settle af_state=%d waited_ms=%lld%s\n",
+            atomic_load_explicit(&context->live_af_state, memory_order_acquire),
+            (long long)(sfos_camera2_now_ms() - started),
+            phase == PREVIEW_TAP_FOCUS_DONE ? "" : " timeout");
+    // Held as it is after a timeout; do not wait again for the next shot.
+    atomic_store_explicit(&context->tap_focus_phase, PREVIEW_TAP_FOCUS_DONE,
+                          memory_order_release);
+}
+
 static void preview_write_metadata(struct preview_context *context,
                                    int32_t sensor_sensitivity,
                                    int64_t exposure_time_ns,
@@ -1397,6 +1465,7 @@ static void preview_write_metadata(struct preview_context *context,
         memory_order_acq_rel);
     int previous_af_state = atomic_exchange_explicit(
         &context->live_af_state, af_state, memory_order_acq_rel);
+    preview_track_tap_focus(context, af_state);
     int focus_distance_micros = focus_distance >= 0.0f
             ? (int)(focus_distance * 1000000.0f) : -1;
     int previous_focus_distance_micros = atomic_exchange_explicit(
@@ -1898,6 +1967,7 @@ static bool preview_write_raw_metadata(const char *camera_id,
             "\n  \"shutter_ns_range\":[%lld,%lld],"
             "\n  \"aperture_requested\":%d,"
             "\n  \"noise_reduction_requested\":%d,"
+            "\n  \"session_max_fps\":%d,"
             "\n  \"color_temperature_requested_kelvin\":%d,"
             "\n  \"color_tint_requested\":%d,"
             "\n  \"timing_ms\":{\"capture_submit\":%lld,"
@@ -1939,7 +2009,8 @@ static bool preview_write_raw_metadata(const char *camera_id,
             (long long)static_data->exposure_time_range[0],
             (long long)static_data->exposure_time_range[1],
             context->aperture,
-            context->noise_reduction, context->color_temperature_kelvin,
+            context->noise_reduction, context->photo_fps_range[1],
+            context->color_temperature_kelvin,
             context->color_tint,
             (long long)(context->raw_submit_ms - context->raw_command_ms),
             (long long)(context->raw_available_ms - context->raw_command_ms),
@@ -2496,6 +2567,40 @@ struct preview_video_options {
 
 static struct preview_video_options g_preview_video;
 
+// Photo sessions: cap the frame rate (AE target range, also as session
+// parameters, when the sensor mode is chosen). The app sets it for a camera
+// that wrote damaged RAW frames: an Xperia 10 III streaming its viewfinder at
+// up to 45 fps wrote binned 2016x1136 frames into its full-size RAW buffer.
+static int g_preview_max_fps;
+
+SFOS_CAMERA2_EXPORT void sfos_camera2_preview_set_max_fps(int fps)
+{
+    g_preview_max_fps = fps > 0 ? fps : 0;
+}
+
+// The advertised range with the highest maximum up to max_fps (then the
+// lowest minimum, for dim light); false if there is none.
+static bool preview_capped_fps_range(const ACameraMetadata *metadata, int max_fps, int32_t range[2])
+{
+    ACameraMetadata_const_entry entry;
+    if (!metadata || max_fps <= 0 ||
+            ACameraMetadata_getConstEntry(metadata, ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES,
+                                          &entry) != ACAMERA_OK || entry.count < 2) {
+        return false;
+    }
+    bool found = false;
+    for (uint32_t i = 0; i + 1 < entry.count; i += 2) {
+        const int32_t low = entry.data.i32[i], high = entry.data.i32[i + 1];
+        if (high > max_fps || low > high) continue;
+        if (!found || high > range[1] || (high == range[1] && low < range[0])) {
+            range[0] = low;
+            range[1] = high;
+            found = true;
+        }
+    }
+    return found;
+}
+
 SFOS_CAMERA2_EXPORT void sfos_camera2_preview_set_video(
     int width, int height, int fps, int bitrate, int stabilization, int hevc,
     int audio_sample_rate, int audio_channels)
@@ -2986,6 +3091,14 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     bool vendor_force_fps = false;
     const int vendor_count = sfos_camera2_vendor_video_settings(&vendor_tags, &vendor_values,
                                                                 &vendor_force_fps);
+    if (g_preview_max_fps > 0 && !(g_preview_video.width > 0 && g_preview_video.height > 0)) {
+        const bool capped = preview_capped_fps_range(characteristics, g_preview_max_fps,
+                                                     context.photo_fps_range);
+        if (!capped) context.photo_fps_range[0] = context.photo_fps_range[1] = 0;
+        fprintf(stderr, "photo-fps-cap max=%d range=[%d,%d]%s\n", g_preview_max_fps,
+                context.photo_fps_range[0], context.photo_fps_range[1],
+                capped ? "" : " (no advertised range fits)");
+    }
     if (g_preview_video.width > 0 && g_preview_video.height > 0) {
         // Only the viewfinder and the encoder, the pair every camera records
         // with: no still streams next to them.
@@ -3275,6 +3388,17 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
         camera_status = create_with_parameters(device, container, request,
                                                &session_callbacks, &session);
         fprintf(stderr, "session with vendor parameters status=%d\n", camera_status);
+    } else if (!context.video && context.photo_fps_range[1] > 0 && create_with_parameters) {
+        // The capped frame rate as session parameters too: some HALs pick
+        // the sensor mode when the session is configured.
+        camera_status = create_with_parameters(device, container, request,
+                                               &session_callbacks, &session);
+        fprintf(stderr, "session with fps cap status=%d\n", camera_status);
+        if (camera_status != ACAMERA_OK || !session) {
+            session = NULL;
+            camera_status = ACameraDevice_createCaptureSession(
+                device, container, &session_callbacks, &session);
+        }
     } else {
         camera_status = ACameraDevice_createCaptureSession(
             device, container, &session_callbacks, &session);
@@ -3476,6 +3600,14 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 context.focus_hold_active = 0;
                 context.focus_x = command.focus_x;
                 context.focus_y = command.focus_y;
+                atomic_store_explicit(&context.tap_focus_results, 0,
+                                      memory_order_release);
+                atomic_store_explicit(&context.tap_focus_phase,
+                                      context.focus_x >= 0.0f &&
+                                              preview_focus_regions_enabled(&context)
+                                          ? PREVIEW_TAP_FOCUS_PENDING
+                                          : PREVIEW_TAP_FOCUS_DONE,
+                                      memory_order_release);
                 preview_configure_request(request, &context, characteristics,
                                           0);
                 preview_configure_request(focus_request, &context,
@@ -3574,6 +3706,7 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
                 ACameraCaptureSession_setRepeatingRequest(
                     session, &preview_callbacks, 1, requests, &context.repeat_sequence);
             } else if (command.type == PREVIEW_COMMAND_FOCUS_HOLD) {
+                preview_settle_tap_focus(&context);
                 int focus_distance_micros = atomic_load_explicit(
                     &context.live_focus_distance_micros,
                     memory_order_acquire);

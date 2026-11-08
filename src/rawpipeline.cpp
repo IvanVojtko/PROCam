@@ -5,6 +5,7 @@
 #include "rawpipelinemath.h"
 #include "raisr.h"
 #include "dnglensshading.h"
+#include "mldenoise.h"
 #include "imageadjustments.h"
 
 #include <QDebug>
@@ -127,6 +128,11 @@ bool loadShading(const RenderSettings &settings, const QJsonObject &m, const Bay
 }
 
 } // namespace
+
+QJsonObject loadRawFrame(const QString &path, BayerFrame *frame)
+{
+    return loadFrame(path, frame);
+}
 
 namespace {
 
@@ -254,7 +260,7 @@ bool renderYuvImage(const QStringList &metadataPaths, const RenderSettings &sett
 {
     QElapsedTimer timer;
     timer.start();
-    const int count = metadataPaths.size();
+    int count = metadataPaths.size();
     std::vector<YuvFrame> frames(count);
     std::vector<QJsonObject> metadata;
     for (int i = 0; i < count; ++i) {
@@ -265,6 +271,55 @@ bool renderYuvImage(const QStringList &metadataPaths, const RenderSettings &sett
             throw std::runtime_error("Burst frames differ in camera or geometry");
     }
     const qint64 loadMs = timer.restart();
+    const double exposure = settings.exposure > 0 && std::isfinite(settings.exposure) ? settings.exposure : 1.0;
+    const double brightness = std::max(0.25, settings.targetGain) * exposure;
+
+    // Frames at another exposure than requested: some cameras (Xperia 10
+    // III) apply a new exposure a few frames late, so the first frames still
+    // carry the preview's. They are left out of the merge, as for RAW, and
+    // one at the metered exposure (the preview's) shows how the camera
+    // itself brightens the scene (YuvOptions::cameraCurve). A camera that
+    // applies the exposure at once (Jolla Phone 2: every frame of 109 saved
+    // bursts exactly as requested) has no such frames and renders as before.
+    int exposureOutliers = 0;
+    YuvFrame metered;
+    double meteredRatio = 0;
+    const double requested = number(metadata[0], "exposure_time_requested_ns")
+            * number(metadata[0], "sensor_sensitivity_requested");
+    if (count > 1 && requested > 0) {
+        std::vector<bool> outlier(count, false);
+        int kept = 0;
+        for (int i = 0; i < count; ++i) {
+            const double t = number(metadata[i], "exposure_time_ns"), iso = number(metadata[i], "iso");
+            const double ratio = t > 0 && iso > 0 ? t * iso / requested : 1.0;
+            outlier[i] = ratio < 0.8 || ratio > 1.25;
+            if (!outlier[i]) ++kept;
+            // The metered frame: brighter than the burst by about the gain
+            // the renderer restores.
+            else if (brightness > 1.15 && std::abs(ratio / brightness - 1.0) < 0.25
+                     && (metered.data.empty() || std::abs(ratio / brightness - 1.0) < std::abs(meteredRatio / brightness - 1.0))) {
+                metered = frames[i];
+                meteredRatio = ratio;
+            }
+        }
+        // No frame as requested (a camera that ignores the request): keep
+        // them all, as before.
+        if (kept > 0 && kept < count) {
+            std::vector<YuvFrame> keptFrames;
+            std::vector<QJsonObject> keptMetadata;
+            for (int i = 0; i < count; ++i)
+                if (!outlier[i]) {
+                    keptFrames.push_back(std::move(frames[i]));
+                    keptMetadata.push_back(metadata[i]);
+                }
+            frames.swap(keptFrames);
+            metadata.swap(keptMetadata);
+            exposureOutliers = count - kept;
+            count = kept;
+        } else {
+            metered = YuvFrame();
+        }
+    }
 
     // Reference: the sharpest frame (least shake), as for RAW.
     int reference = 0;
@@ -293,8 +348,11 @@ bool renderYuvImage(const QStringList &metadataPaths, const RenderSettings &sett
 
     YuvOptions options;
     options.spatialDenoise = std::max(0.0, settings.spatialDenoise);
-    const double exposure = settings.exposure > 0 && std::isfinite(settings.exposure) ? settings.exposure : 1.0;
-    options.brightness = std::max(0.25, settings.targetGain) * exposure;
+    options.brightness = brightness;
+    if (!metered.data.empty()) {
+        options.cameraCurve = measureCameraCurve(frames[reference], metered);
+        std::vector<uint8_t>().swap(metered.data);
+    }
     options.night = m.value(QStringLiteral("night_mode")).toBool();
     options.faces = facesFrom(m);
     if (settings.toneRefinements) {
@@ -327,6 +385,12 @@ bool renderYuvImage(const QStringList &metadataPaths, const RenderSettings &sett
         p.insert(QStringLiteral("input"), m.value(QStringLiteral("format")).toString() == QLatin1String("JPEG")
                  ? QStringLiteral("jpeg") : QStringLiteral("yuv"));
         p.insert(QStringLiteral("frames"), count);
+        if (exposureOutliers) {
+            p.insert(QStringLiteral("exposure_outliers"), exposureOutliers);
+            p.insert(QStringLiteral("camera_curve"), !options.cameraCurve.empty());
+            if (stats.cameraLift >= 0) p.insert(QStringLiteral("camera_lift"), stats.cameraLift);
+            if (meteredRatio > 0) p.insert(QStringLiteral("metered_frame_ratio"), meteredRatio);
+        }
         p.insert(QStringLiteral("reference_frame"), reference);
         p.insert(QStringLiteral("merge_rejection"), stats.rejection);
         p.insert(QStringLiteral("luma_noise"), stats.lumaNoise);
@@ -521,7 +585,50 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         mergeOptions.spatialStrength = (1.0 + 1.5 * severity) * std::max(0.0, settings.spatialDenoise);
         mergeOptions.spatialFloor = settings.spatialFloor >= 0 ? settings.spatialFloor : 0.5 * severity;
         mergeOptions.spatialPilot = settings.spatialPilot >= 0 ? settings.spatialPilot : 2.5 * severity;
-        Planes merged = merge(pointers, gains, alignments, noise, mergeOptions, &mergeStats);
+        // Learned denoise (mldenoise.h) instead of the spatial shrinkage for
+        // noisy merges: from severity 0.55 it beat the shrinkage on 15 of 16
+        // held-out bursts, below that the shrinkage did better.
+        const MlDenoise::Model *learned = settings.learnedDenoise && severity >= 0.55
+                ? MlDenoise::modelFrom(settings.calibrationDirs) : nullptr;
+        QString learnedError;
+        if (learned && !MlDenoise::gpuAvailable(&learnedError)) {
+            qWarning() << "rawpipeline learned denoise unavailable:" << learnedError;
+            learned = nullptr;
+        }
+        MergeOptions temporalOnly = mergeOptions;
+        temporalOnly.spatialStrength = 0.0;
+        Planes merged = merge(pointers, gains, alignments, noise, learned ? temporalOnly : mergeOptions, &mergeStats);
+        QJsonObject learnedInfo;
+        if (learned) {
+            // Planes in units of the white level, as the network was trained.
+            MlDenoise::Tensor planes;
+            planes.channels = 4;
+            planes.width = merged.width;
+            planes.height = merged.height;
+            planes.data.resize(std::size_t(4) * merged.width * merged.height);
+            const float clip = merged.clip > 0 ? merged.clip : 1.0f;
+            std::array<double, 4> scale, offset;
+            for (int k = 0; k < 4; ++k) {
+                float *dst = planes.plane(k);
+                const std::vector<float> &src = merged.phase[k];
+                for (std::size_t i = 0; i < src.size(); ++i) dst[i] = src[i] / clip;
+                // variance(x / clip) = (scale * clip * x + offset) / clip^2
+                scale[k] = noise.scale[k] / clip;
+                offset[k] = noise.offset[k] / (double(clip) * clip);
+            }
+            const double gain = std::max(0.05, settings.targetGain) * exposureScale;
+            if (MlDenoise::denoisePlanes(*learned, &planes, scale, offset, gain, &learnedInfo, &learnedError)) {
+                for (int k = 0; k < 4; ++k) {
+                    const float *src = planes.plane(k);
+                    std::vector<float> &dst = merged.phase[k];
+                    for (std::size_t i = 0; i < dst.size(); ++i) dst[i] = src[i] * clip;
+                }
+            } else {
+                qWarning() << "rawpipeline learned denoise failed:" << learnedError;
+                learnedInfo = QJsonObject{{QStringLiteral("error"), learnedError}};
+                merged = merge(pointers, gains, alignments, noise, mergeOptions, &mergeStats);
+            }
+        }
         const qint64 mergeOnlyMs = timer.restart();
         // Super-resolved fine detail, while the mosaics are still loaded; it
         // carries some noise the merge removed, so it fades with severity.
@@ -612,6 +719,7 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
             p.insert(QStringLiteral("merge_rejection"), mergeStats.rejection);
             p.insert(QStringLiteral("relative_noise"), options.relativeNoise);
             p.insert(QStringLiteral("denoise_severity"), severity);
+            if (!learnedInfo.isEmpty()) p.insert(QStringLiteral("learned_denoise"), learnedInfo);
             p.insert(QStringLiteral("super_resolution"), detail.empty() ? 0.0 : detailStrength);
             if (zoom.active()) {
                 QJsonObject z;

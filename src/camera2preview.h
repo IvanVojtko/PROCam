@@ -27,6 +27,9 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(QString rawCaptureSize READ rawCaptureSize WRITE setRawCaptureSize NOTIFY rawCaptureSizeChanged)
     // "raw16", or "yuv" for cameras without RAW output (I420 burst frames).
     Q_PROPERTY(QString rawCaptureFormat READ rawCaptureFormat WRITE setRawCaptureFormat NOTIFY rawCaptureFormatChanged)
+    // Photo mode frame rate cap for the camera session, 0 for none: a camera
+    // that wrote damaged (binned) RAW frames is retried with it.
+    Q_PROPERTY(int maxFrameRate READ maxFrameRate WRITE setMaxFrameRate NOTIFY maxFrameRateChanged)
     // The helper's last RAW/YUV stream report ("raw=0 raw_error=session:-10003 ..."), for diagnostics.
     Q_PROPERTY(QString rawStreamStatus READ rawStreamStatus NOTIFY rawCaptureReadyChanged)
     Q_PROPERTY(int captureTimeout READ captureTimeout WRITE setCaptureTimeout NOTIFY captureTimeoutChanged)
@@ -110,6 +113,7 @@ public:
     QString rawCaptureSize() const;
     void setRawCaptureSize(const QString &rawCaptureSize);
     QString rawCaptureFormat() const;
+    int maxFrameRate() const { return m_maxFrameRate; }
     QString rawStreamStatus() const;
     // Small JPEG of the current frame as the photo will look (unmirrored,
     // zoom crop, rotated by captureRotation), for an instant gallery
@@ -119,6 +123,7 @@ public:
     // subjectMotion (0..1), faceLuma (0..1, -1 without a face), faceClipped.
     Q_INVOKABLE QVariantMap sceneInfo() const;
     void setRawCaptureFormat(const QString &rawCaptureFormat);
+    void setMaxFrameRate(int maxFrameRate);
 
     int captureTimeout() const;
     void setCaptureTimeout(int captureTimeout);
@@ -298,6 +303,7 @@ signals:
     void captureSizeChanged();
     void rawCaptureSizeChanged();
     void rawCaptureFormatChanged();
+    void maxFrameRateChanged();
     void captureTimeoutChanged();
     void jpegCaptureEnabledChanged();
     void rawCaptureEnabledChanged();
@@ -404,6 +410,7 @@ private:
     QString m_captureSize = QStringLiteral("4096x3072");
     QString m_rawCaptureSize;
     QString m_rawCaptureFormat = QStringLiteral("raw16");
+    int m_maxFrameRate = 0;
     QString m_rawStreamStatus;
     int m_captureTimeout = 30;
     bool m_jpegCaptureEnabled = false;

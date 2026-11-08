@@ -13,7 +13,12 @@ TARGETPATH = $$[QT_INSTALL_QML]/$$MODULENAME
 QT += gui-private qml quick multimedia concurrent
 CONFIG += plugin link_pkgconfig c++14
 
-PKGCONFIG += mlite5 systemsettings libtiff-4 libexif
+PKGCONFIG += mlite5 systemsettings libtiff-4 libexif egl glesv2
+
+# The version EXIF names as Software. The RPM build passes it
+# (PROCAM_VERSION=%{version}), cut before the SDK's +branch.date.commit
+# suffix; other builds say "dev".
+!isEmpty(PROCAM_VERSION): DEFINES += PROCAM_VERSION=\\\"$$section(PROCAM_VERSION, +, 0, 0)\\\"
 
 # The RAW pipeline is long, vectorizable loops: -O3 vectorizes them fully
 # (GCC's -O2 only takes the cheapest cases) and maths functions that never
@@ -26,25 +31,28 @@ SOURCES += rawbracket.cpp \
         rawpipeline.cpp \
         rawpipelinemath.cpp \
         raisr.cpp \
+        mldenoise.cpp \
         camera2preview.cpp \
         previewnode.cpp \
         cameraplugin.cpp \
         capturemodel.cpp \
         declarativecameraextensions.cpp \
         exifutils.cpp \
+        heicencode.cpp \
         dnglensshading.cpp \
         imageadjustments.cpp \
         declarativesettings.cpp \
         cameraconfigs.cpp
 
 HEADERS += rawbracket.h rawbracketmath.h \
-        rawpipeline.h rawpipelinemath.h rawframecheck.h raisr.h \
+        rawpipeline.h rawpipelinemath.h rawframecheck.h raisr.h mldenoise.h \
         previewsize.h previewaids.h videoencoderlimits.h storagefolders.h \
         camera2preview.h \
         previewnode.h \
         capturemodel.h \
         declarativecameraextensions.h \
         exifutils.h \
+        heicencode.h \
         dnglensshading.h \
         imageadjustments.h \
         declarativesettings.h \

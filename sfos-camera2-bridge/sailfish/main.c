@@ -61,9 +61,14 @@ typedef void (*preview_set_video_fn)(int width, int height, int fps,
                                      int bitrate, int stabilization, int hevc,
                                      int audio_sample_rate,
                                      int audio_channels);
+typedef void (*preview_set_max_fps_fn)(int fps);
 typedef int (*probe_vendor_tags_fn)(char *out, size_t out_size);
 typedef void (*record_set_vendor_fn)(const int32_t *tags, const int32_t *values,
                                      int count, int force_fps);
+typedef int (*encode_heic_fn)(const char *input_path, int width, int height,
+                              int quality, int rotation_degrees,
+                              const char *exif_path, const char *output_path,
+                              char *json, size_t json_size);
 typedef const char *(*version_fn)(void);
 typedef void (*droid_media_init_fn)(void);
 typedef void (*droid_media_deinit_fn)(void);
@@ -369,7 +374,7 @@ static void usage(FILE *stream, const char *program)
             "     [--orientation DEGREES] [--zoom R]\n"
             "     [--raw-size WIDTHxHEIGHT] [--raw-format raw16|yuv|jpeg]\n"
             "     [--preview-format rgb|yuv] [--focus-x X --focus-y Y]\n"
-            "     [--start-paused]\n"
+            "     [--start-paused] [--max-fps FPS]\n"
             "     [--video-size WIDTHxHEIGHT [--video-fps N]\n"
             "      [--video-bitrate BPS] [--stabilization on|off]\n"
             "      [--codec avc|hevc] [--audio on|off] [--audio-channels 1|2]]\n"
@@ -389,7 +394,10 @@ static void usage(FILE *stream, const char *program)
             "     [--force]\n\n"
             "  %s --calibrate-shutter [--camera ID] [--size WIDTHxHEIGHT]\n"
             "     [--iso N] [--quality N] [--timeout SECONDS]\n"
-            "     [--output-dir PATH] [--force]\n\n"
+            "     [--output-dir PATH] [--force]\n"
+            "  %s --encode-heic INPUT.i420 WIDTH HEIGHT QUALITY ROTATION\n"
+            "     OUTPUT.heic [EXIF]   (hardware HEIC encoder; EXIF file is\n"
+            "     \"Exif\\0\\0\" and TIFF data)\n\n"
             "Without arguments, print Camera2 capabilities. Capture mode creates\n"
             "PREFIX.raw16 or PREFIX.raw10 and PREFIX.json. Focus modes are none (default), auto,\n"
             "continuous, manual, and infinity. Manual distance is in diopters.\n"
@@ -398,7 +406,7 @@ static void usage(FILE *stream, const char *program)
             "Preview mode writes consecutive binary RGB888 frames. With\n"
             "--video-size it also takes record-start DEGREES PATH.mp4 and\n"
             "record-stop on standard input.\n",
-            program, program, program, program, program, program, program);
+            program, program, program, program, program, program, program, program);
 }
 
 static long long absolute_i64(long long value)
@@ -760,6 +768,19 @@ int main(int argc, char **argv)
     char json[131072] = {0};
     int result;
 
+    if (argc >= 8 && argc <= 9 && !strcmp(argv[1], "--encode-heic")) {
+        encode_heic_fn encode_heic = (encode_heic_fn)android_dlsym(
+            bridge, "sfos_camera2_encode_heic");
+        if (!encode_heic) {
+            fprintf(stderr, "The installed bridge cannot encode HEIC.\n");
+            return 14;
+        }
+        result = encode_heic(argv[2], atoi(argv[3]), atoi(argv[4]), atoi(argv[5]),
+                             atoi(argv[6]), argc == 9 ? argv[8] : NULL, argv[7],
+                             json, sizeof(json));
+        printf("%s\n", json);
+        return result == 0 ? 0 : 1;
+    }
     if (argc == 2 && !strcmp(argv[1], "--vendor-tags")) {
         /* Diagnostics: vendor characteristics (MediaTek high-fps modes and
          * the like) by id; can exceed the normal probe's buffer. */
@@ -804,6 +825,7 @@ int main(int argc, char **argv)
         int32_t preview_vendor_values[8];
         int preview_vendor_count = 0;
         int preview_force_fps = 0;
+        int preview_max_fps = 0;
         int video_fps = 30;
         int video_bitrate = 20000000;
         int stabilization = 1;
@@ -901,6 +923,12 @@ int main(int argc, char **argv)
                 }
             } else if (!strcmp(argv[index], "--start-paused")) {
                 start_paused = 1;
+            } else if (!strcmp(argv[index], "--max-fps") && index + 1 < argc) {
+                if (parse_positive_int(argv[++index], &preview_max_fps) != 0 ||
+                        preview_max_fps > 240) {
+                    fprintf(stderr, "Invalid --max-fps value\n");
+                    return 2;
+                }
             } else if (!strcmp(argv[index], "--force-fps")) {
                 preview_force_fps = 1;
             } else if (!strcmp(argv[index], "--vendor") && index + 1 < argc) {
@@ -1029,6 +1057,12 @@ int main(int argc, char **argv)
                               video_bitrate, stabilization, hevc,
                               relay.capture.sample_rate,
                               audio ? audio_channels : 0);
+        }
+        if (preview_max_fps > 0) {
+            preview_set_max_fps_fn set_max_fps = (preview_set_max_fps_fn)android_dlsym(
+                bridge, "sfos_camera2_preview_set_max_fps");
+            if (set_max_fps) set_max_fps(preview_max_fps);
+            else fprintf(stderr, "bridge has no frame rate cap; --max-fps ignored\n");
         }
         result = preview_ppm(camera_id, width, height, frames,
                              timeout_seconds * 1000, output_fd, control_fd,

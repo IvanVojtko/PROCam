@@ -17,10 +17,14 @@ SettingsBase {
     // Camera change goes here, CaptureView updates to global.deviceId
     property string deviceId: global.deviceId
     onDeviceIdChanged: normalizeCamera2Settings()
-    property CameraExtensions camera2Capabilities: CameraExtensions {}
+    property CameraExtensions camera2Capabilities: CameraExtensions {
+        keepTryingRaw: globalSettings.keepTryingRaw
+        onKeepTryingRawChanged: camera2RawRevision++
+    }
     // Bumped when a camera's RAW frames turn out damaged and it falls back to
-    // YUV (CameraExtensions.camera2RawDamaged): the wrappers below that depend
-    // on RAW output read it, so their bindings are evaluated again.
+    // YUV (CameraExtensions.camera2RawDamaged), or Keep trying RAW changes:
+    // the wrappers below that depend on RAW output read it, so their bindings
+    // are evaluated again.
     property int camera2RawRevision
 
     readonly property int aspectRatio: mode.aspectRatio
@@ -147,6 +151,12 @@ SettingsBase {
         // Every frame of each burst kept as RAW (or YUV) + JSON, for
         // diagnostics and training data; about 25 MB per frame.
         property bool keepBurstFrames: false
+        // A camera whose RAW frames come out damaged stays with RAW instead
+        // of switching to YUV frames (CameraExtensions.keepTryingRaw); for
+        // testers collecting damaged frames.
+        property bool keepTryingRaw: false
+        // Learned GPU denoise for noisy HDR and night photos (experimental).
+        property bool learnedDenoise: false
         property bool estimatedExposureMetering: false
         property bool showExposureStatus: false
         property bool focusPeaking: false
@@ -167,6 +177,10 @@ SettingsBase {
         // Photo flash: "off", "auto" (when the camera's exposure asks for it)
         // or "on". Flash photos are single frames; night mode never flashes.
         property string camera2Flash: "off"
+        // Photo file format: "jpeg", or "heic" (a JPEG converted by the
+        // hardware HEIC encoder once finished). RAW mode keeps RAW files
+        // next to the photo in this format.
+        property string photoFormat: "jpeg"
         // Lets tools/device-smoke-test.sh press the shutter over D-Bus
         // (com.procam.camera.ui.capture). Off unless the script runs.
         property bool smokeTestCapture: false
@@ -464,10 +478,23 @@ SettingsBase {
         return camera2Capabilities.camera2BurstFormat(cameraId !== undefined ? cameraId : deviceId)
     }
 
+    // Frame rate cap while a camera with damaged RAW frames is retried
+    // (CameraExtensions.camera2PhotoMaxFps), 0 for none.
+    function camera2PhotoMaxFps(cameraId) {
+        void camera2RawRevision
+        return camera2Capabilities.camera2PhotoMaxFps(cameraId !== undefined ? cameraId : deviceId)
+    }
+
     // Pass the camera id from bindings so they re-evaluate on camera changes.
     function camera2BurstSupported(cameraId) {
         void camera2RawRevision
         return camera2Capabilities.camera2BurstSupported(cameraId !== undefined ? cameraId : deviceId)
+    }
+
+    // JPEG quality for the capture paths: HEIC photos are converted from a
+    // JPEG written at full quality, and get the chosen quality as HEIC.
+    function photoJpegQuality() {
+        return globalSettings.photoFormat === "heic" ? 100 : modeSettings.rawCaptureJpegQuality
     }
 
     function camera2FlashSupported(cameraId) {

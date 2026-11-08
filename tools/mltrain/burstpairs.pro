@@ -1,0 +1,13 @@
+# Host tool: qmake tools/mltrain/burstpairs.pro && make
+TEMPLATE = app
+TARGET = burstpairs
+QT += core gui
+CONFIG += console c++14 object_parallel_to_source
+CONFIG -= app_bundle
+# As the app (src/src.pro), so the merge matches the shipped code.
+QMAKE_CXXFLAGS_RELEASE += -O3 -fno-math-errno
+SOURCES += burstpairs.cpp ../../src/rawpipelinemath.cpp ../../src/rawpipeline.cpp \
+        ../../src/dnglensshading.cpp ../../src/imageadjustments.cpp ../../src/raisr.cpp ../../src/mldenoise.cpp
+HEADERS += ../../src/rawpipelinemath.h ../../src/rawpipeline.h ../../src/rawframecheck.h \
+        ../../src/dnglensshading.h ../../src/imageadjustments.h ../../src/raisr.h ../../src/mldenoise.h
+LIBS += -lEGL -lGLESv2

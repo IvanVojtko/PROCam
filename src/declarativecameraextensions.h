@@ -39,12 +39,20 @@ class DeclarativeCameraExtensions : public QObject
     // Keep every frame of a burst (RAW16 or YUV + JSON sidecar), not just
     // the first: for diagnostics and training data.
     Q_PROPERTY(bool keepBurstFrames MEMBER m_keepBurstFrames NOTIFY keepBurstFramesChanged)
+    // Learned GPU denoise for noisy RAW merges (RawPipeline::RenderSettings).
+    Q_PROPERTY(bool learnedDenoise MEMBER m_learnedDenoise NOTIFY learnedDenoiseChanged)
+    // A camera whose RAW frames came out damaged keeps taking RAW photos (at
+    // the retry frame rate) instead of switching to YUV frames: for testers.
+    // One value for the whole app, whichever instance sets it.
+    Q_PROPERTY(bool keepTryingRaw READ keepTryingRaw WRITE setKeepTryingRaw NOTIFY keepTryingRawChanged)
 
 public:
     DeclarativeCameraExtensions(QObject *parent = nullptr);
     ~DeclarativeCameraExtensions();
 
     bool rawImageCaptureAvailable() const;
+    bool keepTryingRaw() const;
+    void setKeepTryingRaw(bool keep);
 
     Q_INVOKABLE void disableNotifications(QQuickItem *item, bool disable);
     Q_INVOKABLE QString camera2DeviceConfigDir() const;
@@ -74,6 +82,8 @@ public:
     Q_INVOKABLE QVariantMap camera2CameraRoles();
     // Burst input for HDR: "raw16", "yuv" (cameras without RAW) or "".
     Q_INVOKABLE QString camera2BurstFormat(const QString &cameraId);
+    // Session frame rate cap while damaged RAW output is retried, else 0.
+    Q_INVOKABLE int camera2PhotoMaxFps(const QString &cameraId);
     Q_INVOKABLE QStringList camera2FocusModeModel(const QString &cameraId);
     Q_INVOKABLE QStringList camera2SceneModel(const QString &cameraId);
     Q_INVOKABLE QVariantList camera2NoiseReductionModel(const QString &cameraId);
@@ -186,6 +196,9 @@ public:
     Q_INVOKABLE bool combineRawBurst(const QString &targetPath,
                                      const QVariantList &sourcePaths,
                                      int jpegQuality, qreal targetGain);
+    // A finished JPEG photo becomes <base>.heic (HeicEncode) in the
+    // background; heicConverted() follows, also on failure (JPEG kept).
+    Q_INVOKABLE void convertToHeic(const QString &path, int jpegQuality);
 signals:
     void captureMirrorChanged();
     void rawBracketFrameReady(const QString &path);
@@ -196,11 +209,15 @@ signals:
     // Queued burst merges finish after their capture has completed.
     void burstRendered(const QString &path);
     void burstRenderFailed(const QString &error);
+    // heicPath is empty when the conversion failed and the JPEG stays.
+    void heicConverted(const QString &jpegPath, const QString &heicPath, const QString &error);
     // The camera's RAW frames were found damaged: it now takes its photos
     // from YUV frames, so bindings on its capabilities must be re-read.
     void camera2RawDamaged(const QString &cameraId);
     void pendingRendersChanged();
     void keepBurstFramesChanged();
+    void learnedDenoiseChanged();
+    void keepTryingRawChanged();
 
 public:
     int pendingRenders() const;
@@ -220,6 +237,7 @@ private:
     qint64 m_burstRenderStart = 0; // the first job's queued time when it started
     // One background thread for merges, at a lower priority than the UI.
     QThreadPool m_burstPool;
+    QThreadPool m_heicPool;
     void startNextBurstRender();
     void finishBurstRender();
 
@@ -278,6 +296,7 @@ private:
     int m_bracketCount = 0;
     bool m_bracketBurst = false;
     bool m_keepBurstFrames = false;
+    bool m_learnedDenoise = false;
     qreal m_bracketEv = 0.0;
     QString m_bracketBaseShutterNs;
     QString m_bracketCombineTargetPath;

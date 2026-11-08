@@ -20,6 +20,7 @@ OTHER_FILES += \
     android/video_record.c \
     android/recorder.c \
     android/recorder.h \
+    android/heif_encode.c \
     android/preview.c \
     android/raw_capture.c \
     scripts/build-android.sh \

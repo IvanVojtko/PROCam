@@ -413,6 +413,23 @@ FocusScope {
         }
     }
 
+    // A finished photo goes to the photo list, or first becomes a HEIC
+    // (extensions.heicConverted adds it then).
+    function _publishPhoto(imageUrl, mimeType) {
+        if (Settings.global.photoFormat === "heic" && mimeType === "image/jpeg") {
+            extensions.convertToHeic(imageUrl, Settings.mode.rawCaptureJpegQuality)
+            return
+        }
+        _addPhoto(imageUrl, mimeType)
+    }
+
+    function _addPhoto(imageUrl, mimeType) {
+        if (captureModel) {
+            captureModel.appendCapture(imageUrl, mimeType)
+        }
+        Settings.completePhoto(imageUrl)
+    }
+
     function resetZoom() {
         if (captureOverlay) captureOverlay.cancelZoom()
         camera2Zoom = 1.0
@@ -590,7 +607,7 @@ FocusScope {
                 // The merge is queued; the capture is done and the next photo
                 // can be taken while it renders.
                 if (extensions.combineRawBurst(combinedPath, sourcePaths,
-                                               Settings.mode.rawCaptureJpegQuality,
+                                               Settings.photoJpegQuality(),
                                                burstPlan.targetGain)) {
                     camera._completeQueuedCamera2Capture()
                 } else {
@@ -600,7 +617,7 @@ FocusScope {
             }
             captureView._camera2BracketMerging = true
             if (!extensions.combineRawBracket(combinedPath, sourcePaths,
-                                              Settings.mode.rawCaptureJpegQuality)) {
+                                              Settings.photoJpegQuality())) {
                 camera._failCamera2ImageCapture("Could not start bracket combine")
             }
             return
@@ -616,7 +633,7 @@ FocusScope {
                                    _camera2WarmRawBracketRawPaths[index],
                                    _camera2WarmRawBracketMetadataPaths[index],
                                    Settings.mode.rawCaptureExposure,
-                                   Settings.mode.rawCaptureJpegQuality,
+                                   Settings.photoJpegQuality(),
                                    captureView._camera2CaptureRotation(),
                                    captureView._camera2RawSaveFormat(),
                                    Settings.mode.rawRenderEngine,
@@ -1221,17 +1238,13 @@ FocusScope {
                 captureView._camera2BracketMerging = true
                 if (!extensions.combineRawBracket(
                             combinedPath, sourcePaths,
-                            Settings.mode.rawCaptureJpegQuality)) {
+                            Settings.photoJpegQuality())) {
                     camera._failCamera2ImageCapture("Could not start bracket combine")
                 }
                 return
             }
 
-            if (captureModel) {
-                captureModel.appendCapture(imageUrl, mimeType)
-            }
-
-            Settings.completePhoto(imageUrl)
+            captureView._publishPhoto(imageUrl, mimeType)
             captureView._camera2BracketQueue = []
             captureView._camera2BracketCapturedPaths = []
             captureView._camera2BracketIndex = 0
@@ -1329,7 +1342,7 @@ FocusScope {
                                                captureView._camera2CaptureCameraId,
                                                Settings.mode.rawCaptureSize,
                                                Settings.mode.rawCaptureTimeout,
-                                               Settings.mode.rawCaptureJpegQuality,
+                                               Settings.photoJpegQuality(),
                                                captureView._camera2AdvancedJpegRotation(),
                                                Settings.mode.rawCaptureExposure,
                                                exposureLogic.scene,
@@ -1523,7 +1536,7 @@ FocusScope {
                                             rawFocusTimeout,
                                             Settings.mode.rawCaptureFocusFailure,
                                             Settings.mode.rawCaptureExposure,
-                                            Settings.mode.rawCaptureJpegQuality,
+                                            Settings.photoJpegQuality(),
                                             camera2Rotation,
                                             captureView._camera2RawSaveFormat(),
                                             Settings.mode.rawRenderEngine,
@@ -1956,6 +1969,7 @@ FocusScope {
         id: extensions
 
         keepBurstFrames: Settings.global.keepBurstFrames
+        learnedDenoise: Settings.global.learnedDenoise
         // Selfies saved as the mirrored viewfinder shows them.
         captureMirror: Settings.global.mirrorSelfies && captureView.camera2Viewfinder !== null
                        && captureView.camera2Viewfinder.selfieCamera
@@ -1986,11 +2000,18 @@ FocusScope {
 
         onBurstRendered: {
             var imageUrl = captureView._localFileUrl(path)
-            if (captureModel) {
-                captureModel.appendCapture(imageUrl, "image/jpeg")
-            }
-            Settings.completePhoto(imageUrl)
+            captureView._publishPhoto(imageUrl, "image/jpeg")
             captureView.captured()
+            captureView._clearPendingThumbnailIfIdle()
+        }
+
+        onHeicConverted: {
+            if (!heicPath) {
+                console.warn("HEIC conversion failed, the photo stays a JPEG:", error)
+                camera2CaptureErrorNotification.publishMessage("Could not save as HEIC; the photo is a JPEG")
+            }
+            captureView._addPhoto(captureView._localFileUrl(heicPath || jpegPath),
+                                  heicPath ? "image/heic" : "image/jpeg")
             captureView._clearPendingThumbnailIfIdle()
         }
 
@@ -1999,8 +2020,9 @@ FocusScope {
             captureView._clearPendingThumbnailIfIdle()
         }
 
-        // Its photos now come from YUV frames: the session and the menus
-        // follow once the bindings on its capabilities are read again.
+        // Its RAW is retried at a capped frame rate or replaced by YUV frames
+        // (unless Keep trying RAW is on): the session and the menus follow
+        // once the bindings on its capabilities are read again.
         onCamera2RawDamaged: Settings.camera2RawRevision++
     }
 
@@ -2026,7 +2048,7 @@ FocusScope {
                                        rawPath,
                                        metadataPath,
                                        Settings.mode.rawCaptureExposure,
-                                       Settings.mode.rawCaptureJpegQuality,
+                                       Settings.photoJpegQuality(),
                                        captureView._camera2CaptureRotation(),
                                        captureView._camera2RawSaveFormat(),
                                        captureView._camera2JpegFromRaw ? "enhanced" : Settings.mode.rawRenderEngine,

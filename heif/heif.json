@@ -1,0 +1,4 @@
+{
+    "Keys": [ "heic", "heif", "hif" ],
+    "MimeTypes": [ "image/heic", "image/heif", "image/heif" ]
+}

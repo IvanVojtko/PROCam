@@ -71,10 +71,28 @@ compile_commands.json
 *.raw10
 *.dng
 ProCam_*.jpg
+ProCam_*.heic
+ProCam_*.mp4
 ProCam_*.json
+/*.jpg
+/*.jpeg
+*.heic
+*.heif
+*.i420
 procam-capture.log
+*.log
+/log*.txt
 /probe.json
 /generated-hal.json
+# Camera HAL, vendor-tag and high-fps dumps, kernel modules pulled from the
+# phone, and research notes written from them.
+/hal.json
+# Photos and logs from testers.
+/xperia/
+/hfps-*.json
+/vendor-tags.json
+*.ko
+/*-report.md
 
 # Downloaded third-party apps and archives used for research.
 *.apk

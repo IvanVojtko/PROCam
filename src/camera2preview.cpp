@@ -346,6 +346,19 @@ void Camera2Preview::setRawCaptureFormat(const QString &rawCaptureFormat)
     }
 }
 
+void Camera2Preview::setMaxFrameRate(int maxFrameRate)
+{
+    maxFrameRate = qMax(0, maxFrameRate);
+    if (m_maxFrameRate == maxFrameRate) {
+        return;
+    }
+    m_maxFrameRate = maxFrameRate;
+    emit maxFrameRateChanged();
+    if (m_rawCaptureEnabled) {
+        restart();
+    }
+}
+
 int Camera2Preview::captureTimeout() const
 {
     return m_captureTimeout;
@@ -1841,6 +1854,8 @@ void Camera2Preview::startPreview()
     if (m_rawCaptureEnabled && !videoMode) {
         arguments << QStringLiteral("--raw-size") << rawCaptureSize()
                   << QStringLiteral("--raw-format") << m_rawCaptureFormat;
+        if (m_maxFrameRate > 0)
+            arguments << QStringLiteral("--max-fps") << QString::number(m_maxFrameRate);
     }
     if (m_focusX >= 0.0 && m_focusY >= 0.0) {
         arguments << QStringLiteral("--focus-x") << QString::number(m_focusX, 'f', 4)

@@ -549,14 +549,16 @@ PinchArea {
                 }
             }
 
-            // Pro: the capture format, RAW or JPG.
+            // Pro: the capture format, RAW (with the photo in the chosen
+            // format) or the photo only (JPG or HEIC, Settings).
             FloatingChip {
                 readonly property var formats: Settings.camera2CaptureFormatModel()
 
                 height: parent.height
                 visible: camera2BottomDeck.pro && formats.length > 1
                 enabled: !captureView.captureBusy
-                text: Settings.mode.camera2CaptureFormat === "raw" ? "RAW" : "JPG"
+                text: Settings.mode.camera2CaptureFormat === "raw" ? "RAW"
+                      : Settings.global.photoFormat === "heic" ? "HEIC" : "JPG"
                 checked: Settings.mode.camera2CaptureFormat === "raw"
                 onClicked: Settings.mode.camera2CaptureFormat =
                            formats[(formats.indexOf(Settings.mode.camera2CaptureFormat) + 1) % formats.length]

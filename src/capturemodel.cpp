@@ -623,7 +623,7 @@ bool CaptureModel::compare(const Capture &left, const Capture &right)
 bool CaptureModel::isCameraFile(const QByteArray &fileName) const
 {
     static const QRegularExpression cameraFileRegEx = [] {
-        QRegularExpression regex("\\A(?:ProCam_)?\\d{8}_\\d{6}(?:_\\d+)?.(?:jpg|mp4)\\z");
+        QRegularExpression regex("\\A(?:ProCam_)?\\d{8}_\\d{6}(?:_\\d+)?.(?:jpg|heic|mp4)\\z");
 
         regex.optimize();
 

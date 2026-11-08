@@ -216,6 +216,10 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_capture_raw_options(
  * @return 0 on normal completion, or a negative error code with details in
  * @p out.
  */
+// Caps the frame rate of photo preview sessions started afterwards (AE
+// target range and session parameters); 0 removes the cap.
+SFOS_CAMERA2_EXPORT void sfos_camera2_preview_set_max_fps(int fps);
+
 SFOS_CAMERA2_EXPORT int sfos_camera2_preview_ppm(
     const char *camera_id,
     int width,
@@ -303,6 +307,20 @@ SFOS_CAMERA2_EXPORT int sfos_camera2_record_video(
  */
 SFOS_CAMERA2_EXPORT void sfos_camera2_record_audio_push(
     const int16_t *pcm, int samples, long long age_us);
+
+/**
+ * @brief Encode an I420 picture as HEIC with the hardware HEIC encoder and
+ * the Android muxer (a 512x512 tile grid).
+ *
+ * @param quality 0-100 (constant quality).
+ * @param rotation_degrees Rotation viewers apply (HEIF irot).
+ * @param exif_path NULL or a file of "Exif\0\0" followed by the TIFF data.
+ * @return 0 on success or a negative code; JSON report in json.
+ */
+SFOS_CAMERA2_EXPORT int sfos_camera2_encode_heic(const char *input_path, int width, int height,
+                                                 int quality, int rotation_degrees,
+                                                 const char *exif_path, const char *output_path,
+                                                 char *json, size_t json_size);
 
 /**
  * @brief Return the bridge ABI version string.

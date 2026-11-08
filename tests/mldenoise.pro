@@ -1,0 +1,9 @@
+TEMPLATE = app
+TARGET = tst_mldenoise
+QT = core
+CONFIG += console c++14 object_parallel_to_source
+CONFIG -= app_bundle
+QMAKE_CXXFLAGS_RELEASE += -O3 -fno-math-errno
+SOURCES += mldenoise.cpp ../src/mldenoise.cpp
+HEADERS += ../src/mldenoise.h ../src/rawpipelinemath.h
+LIBS += -lEGL -lGLESv2

@@ -10,6 +10,8 @@ class QImage;
 // local tone mapping, bursts are aligned and merged first (rawpipelinemath.h).
 namespace RawPipeline {
 
+struct BayerFrame;
+
 struct RenderSettings {
     // Lens shading calibration lookup (see DngLensShading), tried in order.
     QStringList calibrationDirs;
@@ -23,6 +25,9 @@ struct RenderSettings {
     double spatialDenoise = 1.0;
     double spatialFloor = -1.0; // < 0: automatic
     double spatialPilot = -1.0; // < 0: automatic
+    // Learned denoise on the GPU (mldenoise.h, model denoise.bin in
+    // calibrationDirs) in place of the spatial shrinkage for noisy merges.
+    bool learnedDenoise = false;
     // Multi-frame super-resolution of fine detail for bursts of 3+ frames.
     bool superResolution = true;
     // Viewfinder zoom: the centre 1/zoom of the frame is rendered, up to 2x
@@ -40,6 +45,11 @@ struct RenderSettings {
 // of renderImage() and renderBurst() then starts with this.
 QString rawFramesDamagedError(const QString &detail);
 bool isRawFramesDamagedError(const QString &error);
+
+// Reads one RAW frame (RAW16 or RAW10) described by a JSON sidecar with
+// raw_path, as the renderer does; returns the sidecar. Throws
+// std::runtime_error on unusable metadata or a missing frame.
+QJsonObject loadRawFrame(const QString &path, BayerFrame *frame);
 
 // Renders RAW frames described by JSON sidecars (with raw_path) to an RGB
 // image. More than one frame is merged as a burst of equal exposures.

@@ -17,6 +17,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <utility>
+
+// The RPM build passes its version (src.pro); other builds say "dev".
+#ifndef PROCAM_VERSION
+#define PROCAM_VERSION "dev"
+#endif
 
 namespace {
 // Both backends consume these entries; tag selection and value precedence live here.
@@ -28,6 +34,11 @@ struct Field {
     QByteArray bytes;
 };
 using Fields = QList<Field>;
+
+QString software()
+{
+    return QStringLiteral("ProCam " PROCAM_VERSION);
+}
 
 void text(Fields &fields, ExifIfd directory, unsigned short tag, const QString &value)
 {
@@ -127,7 +138,7 @@ Fields fieldsFor(const QJsonObject &m, bool dng)
     const auto image = EXIF_IFD_0;
     text(fields, image, 0x010f, m.value(QStringLiteral("make")).toString());
     text(fields, image, 0x0110, m.value(QStringLiteral("model")).toString());
-    text(fields, image, 0x0131, QStringLiteral("ProCam 1.3.1-5"));
+    text(fields, image, 0x0131, software());
     number(fields, image, 0x0112, EXIF_FORMAT_SHORT, ExifUtils::orientation(m, dng));
     for (const auto &dimension : {qMakePair(QStringLiteral("width"), 0xa002),
                                  qMakePair(QStringLiteral("height"), 0xa003)}) {
@@ -152,8 +163,13 @@ Fields fieldsFor(const QJsonObject &m, bool dng)
         for (unsigned short tag : {0x9010, 0x9011, 0x9012}) text(fields, photo, tag, offset);
     }
     // Requested values stay in UserComment; standard exposure tags describe measured results.
-    positiveTag(fields, 0x829a, EXIF_FORMAT_RATIONAL,
-                positive(m, {"exposure_time_ns", "live_exposure_time_ns"}) / 1e9);
+    // Short exposures as cameras write them: 1/15 s rather than 6666/99991 s.
+    double exposure = positive(m, {"exposure_time_ns", "live_exposure_time_ns"}) / 1e9;
+    if (exposure > 0 && exposure < 1) {
+        const double reciprocal = std::round(1 / exposure);
+        if (std::abs(exposure * reciprocal - 1) < 1e-3) exposure = 1 / reciprocal;
+    }
+    positiveTag(fields, 0x829a, EXIF_FORMAT_RATIONAL, exposure);
     const double iso = positive(m, {"iso", "live_sensor_sensitivity"});
     if (iso > 0) {
         positiveTag(fields, 0x8827, EXIF_FORMAT_SHORT, std::min(iso, 65535.0));
@@ -179,6 +195,7 @@ Fields fieldsFor(const QJsonObject &m, bool dng)
     if (m.value(QStringLiteral("exposure_compensation_ev")).isDouble())
         number(fields, photo, 0x9204, EXIF_FORMAT_SRATIONAL, m.value(QStringLiteral("exposure_compensation_ev")).toDouble());
     fields.append({photo, 0x9000, EXIF_FORMAT_UNDEFINED, {}, QByteArrayLiteral("0232")});
+    if (!dng) number(fields, photo, 0xa001, EXIF_FORMAT_SHORT, 1); // sRGB pixels
     // libtiff's built-in UserComment uses a 16-bit count even in DNG.
     fields.append({photo, 0x9286, EXIF_FORMAT_UNDEFINED, {}, dng ? boundedComment(m, 65535) : comment(m)});
     if (hasGps(m)) {
@@ -216,15 +233,19 @@ void clearDirectory(ExifData *data, ExifIfd directory)
     ExifContent *content = data->ifd[directory];
     while (content->count) exif_content_remove_entry(content, content->entries[0]);
 }
-void cleanOriginal(ExifData *data)
+void dropThumbnailAndMakerNote(ExifData *data)
 {
-    clearDirectory(data, EXIF_IFD_GPS);
     clearDirectory(data, EXIF_IFD_1); // Old thumbnails no longer describe transformed pixels.
     std::free(data->data);
     data->data = nullptr;
     data->size = 0;
     // Opaque MakerNotes can contain absolute offsets and location; do not relocate them.
     removeTag(data, EXIF_IFD_EXIF, 0x927c);
+}
+void cleanOriginal(ExifData *data)
+{
+    clearDirectory(data, EXIF_IFD_GPS);
+    dropThumbnailAndMakerNote(data);
 }
 QByteArray serialized(ExifData *data)
 {
@@ -234,6 +255,28 @@ QByteArray serialized(ExifData *data)
     const QByteArray result(reinterpret_cast<const char *>(bytes), int(size));
     std::free(bytes);
     return result;
+}
+// numerator / denominator for an EXIF (S)RATIONAL: the first continued-fraction
+// convergent within a millionth of the value, so 5.95 mm is 119/20. Both terms
+// stay below 2^31, as some readers take RATIONAL terms as signed.
+std::pair<qint64, qint64> fraction(double value)
+{
+    const double limit = 2147483647.0;
+    const double target = std::min(std::abs(value), limit);
+    double numerator = 1, denominator = 0, previousNumerator = 0, previousDenominator = 1;
+    double rest = target;
+    for (int term = 0; term < 64; ++term) {
+        const double whole = std::floor(rest);
+        const double nextNumerator = whole * numerator + previousNumerator;
+        const double nextDenominator = whole * denominator + previousDenominator;
+        if (nextNumerator > limit || nextDenominator > limit) break;
+        previousNumerator = numerator; previousDenominator = denominator;
+        numerator = nextNumerator; denominator = nextDenominator;
+        if (rest == whole || std::abs(numerator / denominator - target) <= 1e-6 * target) break;
+        rest = 1 / (rest - whole);
+    }
+    // The first term always fits (target <= limit), so denominator >= 1.
+    return {qint64(value < 0 ? -numerator : numerator), qint64(denominator)};
 }
 void put(ExifData *data, const Field &field)
 {
@@ -257,13 +300,14 @@ void put(ExifData *data, const Field &field)
             case EXIF_FORMAT_BYTE: *p = static_cast<unsigned char>(value); break;
             case EXIF_FORMAT_SHORT: exif_set_short(p, order, ExifShort(value)); break;
             case EXIF_FORMAT_LONG: exif_set_long(p, order, ExifLong(value)); break;
-            case EXIF_FORMAT_RATIONAL:
+            case EXIF_FORMAT_RATIONAL: {
+                const auto ratio = fraction(value);
+                exif_set_rational(p, order, {ExifLong(ratio.first), ExifLong(ratio.second)});
+                break;
+            }
             case EXIF_FORMAT_SRATIONAL: {
-                const bool signedValue = field.format == EXIF_FORMAT_SRATIONAL;
-                const double maximum = signedValue ? 2147483647.0 : 4294967295.0;
-                const auto denominator = quint32(std::max(1.0, std::min(1e9, std::floor(maximum / std::max(1.0, std::abs(value))))));
-                if (signedValue) exif_set_srational(p, order, {ExifSLong(std::llround(value * denominator)), ExifSLong(denominator)});
-                else exif_set_rational(p, order, {ExifLong(std::llround(value * denominator)), denominator});
+                const auto ratio = fraction(value);
+                exif_set_srational(p, order, {ExifSLong(ratio.first), ExifSLong(ratio.second)});
                 break;
             }
             default: break;
@@ -358,7 +402,7 @@ QJsonObject captureContext(const QVariantMap &values)
     QString captured = now.toOffsetFromUtc(now.offsetFromUtc()).toString(Qt::ISODate);
     captured.insert(19, QLatin1Char('.') + now.toString(QStringLiteral("zzz")));
     context.insert(QStringLiteral("captured_at"), captured);
-    context.insert(QStringLiteral("software"), QStringLiteral("ProCam 1.3.1-5"));
+    context.insert(QStringLiteral("software"), software());
     QFile hardware(QStringLiteral("/etc/hw-release"));
     if (hardware.open(QIODevice::ReadOnly)) {
         while (!hardware.atEnd()) {
@@ -406,6 +450,28 @@ QByteArray originalJpegExif(const QString &path)
     if (!data) return {};
     cleanOriginal(data);
     const QByteArray result = serialized(data);
+    exif_data_unref(data);
+    return result;
+}
+QByteArray heicExif(const QString &jpegPath, const QSize &size)
+{
+    ExifData *data = exif_data_new_from_file(QFile::encodeName(jpegPath).constData());
+    if (!data) return {};
+    QByteArray result;
+    if (exif_content_get_entry(data->ifd[EXIF_IFD_EXIF], EXIF_TAG_DATE_TIME_ORIGINAL)) {
+        // GPS stays: ProCam's JPEG has it only when location saving is on.
+        dropThumbnailAndMakerNote(data);
+        // The HEIC's pixels are upright (HEIF would keep a rotation in its
+        // irot box) and can be a row or column smaller than the JPEG's.
+        const double width = size.width(), height = size.height();
+        put(data, {EXIF_IFD_0, 0x0112, EXIF_FORMAT_SHORT, {1}, {}});
+        put(data, {EXIF_IFD_0, 0x0100, EXIF_FORMAT_LONG, {width}, {}});
+        put(data, {EXIF_IFD_0, 0x0101, EXIF_FORMAT_LONG, {height}, {}});
+        put(data, {EXIF_IFD_EXIF, 0xa002, EXIF_FORMAT_LONG, {width}, {}});
+        put(data, {EXIF_IFD_EXIF, 0xa003, EXIF_FORMAT_LONG, {height}, {}});
+        put(data, {EXIF_IFD_EXIF, 0xa001, EXIF_FORMAT_SHORT, {1}, {}}); // sRGB, as the encoder tags it
+        result = serialized(data);
+    }
     exif_data_unref(data);
     return result;
 }
