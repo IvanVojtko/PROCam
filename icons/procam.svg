@@ -1,31 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500" viewBox="0 0 500 500">
-  <!-- ProCam app icon: HDR-sunset disc, lens ring, six-blade aperture. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="86" height="86" viewBox="0 0 86 86">
+  <!-- ProCam launcher icon, Sailfish style: sunset leaf base, lens ring, six-blade aperture. -->
   <defs>
-    <linearGradient id="sky" x1="0.15" y1="0.05" x2="0.85" y2="0.95">
-      <stop offset="0" stop-color="#ffb347"/>
-      <stop offset="0.38" stop-color="#ff5e62"/>
-      <stop offset="0.72" stop-color="#8a2be2"/>
-      <stop offset="1" stop-color="#2b1a7a"/>
+    <linearGradient id="sky" gradientUnits="userSpaceOnUse" x1="82" y1="4" x2="4" y2="82">
+      <stop offset="0" stop-color="#f1b155"/>
+      <stop offset="0.4" stop-color="#f36a6d"/>
+      <stop offset="0.75" stop-color="#9741ca"/>
+      <stop offset="1" stop-color="#4e2e9e"/>
     </linearGradient>
-    <radialGradient id="glass" cx="0.42" cy="0.38" r="0.7">
-      <stop offset="0" stop-color="#e8fbff"/>
-      <stop offset="0.45" stop-color="#5ee7ff"/>
-      <stop offset="1" stop-color="#3a5bff"/>
+    <radialGradient id="light" gradientUnits="userSpaceOnUse" cx="76" cy="10" r="70">
+      <stop offset="0" stop-color="#f6dc93" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#f6dc93" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="shine" cx="0.3" cy="0.2" r="0.8">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"/>
-      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
-    </radialGradient>
+    <linearGradient id="sensor" gradientUnits="userSpaceOnUse" x1="50.6" y1="34.2" x2="35.4" y2="51.8">
+      <stop offset="0" stop-color="#4bd4bd"/>
+      <stop offset="0.5" stop-color="#5883f1"/>
+      <stop offset="1" stop-color="#a264f2"/>
+    </linearGradient>
+    <clipPath id="lens"><circle cx="43" cy="43" r="21.35"/></clipPath>
   </defs>
-  <circle cx="250" cy="250" r="240" fill="url(#sky)"/>
-  <circle cx="250" cy="250" r="240" fill="url(#shine)"/>
-  <circle cx="250" cy="250" r="168" fill="#0d1033" fill-opacity="0.35"/>
-  <circle cx="250" cy="250" r="150" fill="#0b0f2e"/>
-  <circle cx="250" cy="250" r="150" fill="none" stroke="#ffffff" stroke-width="16"/>
-  <path d="M293.30,225.00 L389.68,280.64 A143.0,143.0 0 0 1 293.30,386.29 L293.30,275.00 Z" fill="#141a4a"/><path d="M293.30,275.00 L293.30,386.29 A143.0,143.0 0 0 1 153.62,355.64 L250.00,300.00 Z" fill="#1d2563"/><path d="M250.00,300.00 L153.62,355.64 A143.0,143.0 0 0 1 110.32,219.36 L206.70,275.00 Z" fill="#141a4a"/><path d="M206.70,275.00 L110.32,219.36 A143.0,143.0 0 0 1 206.70,113.71 L206.70,225.00 Z" fill="#1d2563"/><path d="M206.70,225.00 L206.70,113.71 A143.0,143.0 0 0 1 346.38,144.36 L250.00,200.00 Z" fill="#141a4a"/><path d="M250.00,200.00 L346.38,144.36 A143.0,143.0 0 0 1 389.68,280.64 L293.30,225.00 Z" fill="#1d2563"/>
-  <g stroke="#ffffff" stroke-opacity="0.55" stroke-width="3" stroke-linecap="round"><line x1="293.30" y1="225.00" x2="389.68" y2="280.64"/><line x1="293.30" y1="275.00" x2="293.30" y2="386.29"/><line x1="250.00" y1="300.00" x2="153.62" y2="355.64"/><line x1="206.70" y1="275.00" x2="110.32" y2="219.36"/><line x1="206.70" y1="225.00" x2="206.70" y2="113.71"/><line x1="250.00" y1="200.00" x2="346.38" y2="144.36"/></g>
-  <polygon points="250.00,200.00 293.30,225.00 293.30,275.00 250.00,300.00 206.70,275.00 206.70,225.00" fill="url(#glass)"/>
-  <polygon points="250.00,200.00 293.30,225.00 293.30,275.00 250.00,300.00 206.70,275.00 206.70,225.00" fill="none" stroke="#ffffff" stroke-opacity="0.8" stroke-width="3" stroke-linejoin="round"/>
-  <circle cx="232" cy="231" r="11" fill="#ffffff" fill-opacity="0.9"/>
-  <ellipse cx="322" cy="168" rx="22" ry="11" transform="rotate(-40 322 168)" fill="#ffffff" fill-opacity="0.85"/>
+  <g transform="matrix(-1 0 0 1 86 0)">
+  <path fill="url(#sky)" d="M84.277,0.3H43C19.417,0.3,0.3,19.418,0.3,43v41.277c0,0.786,0.637,1.423,1.423,1.423H43c23.583,0,42.7-19.118,42.7-42.7V1.723C85.7,0.937,85.063,0.3,84.277,0.3z"/>
+  <path fill="url(#light)" d="M84.277,0.3H43C19.417,0.3,0.3,19.418,0.3,43v41.277c0,0.786,0.637,1.423,1.423,1.423H43c23.583,0,42.7-19.118,42.7-42.7V1.723C85.7,0.937,85.063,0.3,84.277,0.3z"/>
+  <linearGradient id="refl" gradientUnits="userSpaceOnUse" x1="61.86" y1="24.14" x2="24.14" y2="61.86">
+    <stop offset="0" stop-color="#6c36b9"/><stop offset="0.5" stop-color="#f36a6d"/><stop offset="1" stop-color="#f4c376"/>
+  </linearGradient>
+  <circle cx="43" cy="43" r="32.025" fill="#ffffff"/>
+  <circle cx="43" cy="43" r="26.672" fill="url(#refl)"/>
+  <circle cx="43" cy="43" r="21.35" fill="#181a46"/>
+  <polygon points="43.00,33.85 50.93,38.42 50.93,47.58 43.00,52.15 35.07,47.58 35.07,38.42" fill="url(#sensor)"/>
+  <path d="M43.00,34.20 L64.08,46.37 A21.35,21.35 0 0 0 53.38,24.34 Q49.73,30.31 43.00,34.20 Z" fill="#191b44"/><path d="M50.62,38.60 L50.62,62.94 A21.35,21.35 0 0 0 64.35,42.66 Q57.35,42.49 50.62,38.60 Z" fill="#33387e"/><path d="M50.62,47.40 L29.54,59.57 A21.35,21.35 0 0 0 53.97,61.32 Q50.62,55.17 50.62,47.40 Z" fill="#191b44"/><path d="M43.00,51.80 L21.92,39.63 A21.35,21.35 0 0 0 32.62,61.66 Q36.27,55.69 43.00,51.80 Z" fill="#33387e"/><path d="M35.38,47.40 L35.38,23.06 A21.35,21.35 0 0 0 21.65,43.34 Q28.65,43.51 35.38,47.40 Z" fill="#191b44"/><mask id="m5" maskUnits="userSpaceOnUse" x="0" y="0" width="86" height="86"><rect width="86" height="86" fill="#fff"/><path d="M43.00,34.20 L64.08,46.37 A21.35,21.35 0 0 0 53.38,24.34 Q49.73,30.31 43.00,34.20 Z" fill="#000"/></mask><path d="M35.38,38.60 L56.46,26.43 A21.35,21.35 0 0 0 32.03,24.68 Q35.38,30.83 35.38,38.60 Z" fill="#33387e" mask="url(#m5)"/>
+  </g>
 </svg>
