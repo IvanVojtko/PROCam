@@ -33,11 +33,14 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # EGL and GLES headers: the RAW pipeline links the learned denoiser
+      # (src/mldenoise.cpp); the tests never start the GPU path.
       - name: Install Qt 5
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qtbase5-dev qt5-qmake qtdeclarative5-dev-tools pkg-config
+            qtbase5-dev qt5-qmake qtdeclarative5-dev-tools pkg-config \
+            libegl-dev libgles-dev
 
       - name: Settings and capture-flow checks
         run: |
