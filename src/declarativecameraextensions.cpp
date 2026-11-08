@@ -275,6 +275,7 @@ static bool markCamera2RawDamaged(const QString &cameraId, const QString &reason
         save.write(QJsonDocument(stored).toJson(QJsonDocument::Compact));
         save.commit();
     }
+    return final;
 }
 
 static QString frameCameraId(const QString &metadataPath)

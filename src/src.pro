@@ -26,6 +26,9 @@ PKGCONFIG += mlite5 systemsettings libtiff-4 libexif egl glesv2
 # Appended after the SDK's -O2, so it wins. About 11% faster per burst on
 # the host benchmark, a third faster merge.
 QMAKE_CXXFLAGS_RELEASE += -O3 -fno-math-errno
+# Falling off the end of a value-returning function is undefined; with
+# optimisation GCC runs on into whatever code follows.
+QMAKE_CXXFLAGS += -Werror=return-type
 
 SOURCES += rawbracket.cpp \
         rawpipeline.cpp \
