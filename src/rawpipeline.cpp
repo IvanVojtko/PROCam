@@ -30,6 +30,19 @@
 namespace RawPipeline {
 namespace {
 
+// Strength of the night shadow cleanup after the learned denoiser
+// (shadowCleanup): in 16-frame ISO 19200 night shots 0.5 halved the fine
+// grain on dark walls and sky; 1 smoothed them further but left faint
+// wavy patterns.
+const double NightShadowCleanup = 0.5;
+
+// Single frames get the learned denoiser only up to this ISO. Each of 43
+// daylight bursts' reference frames was rendered alone and compared with
+// the merge of its burst: at ISO 100-112 the network came out about 1 dB
+// closer (9 of 11) with crisper fine detail; from ISO 180 up the
+// shrinkage was as close or closer, by up to 2 dB in dim light.
+const double SingleFrameLearnedMaxIso = 150;
+
 double number(const QJsonObject &m, const char *key)
 {
     const QJsonValue v = m.value(QLatin1String(key));
@@ -577,8 +590,13 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         // after averaging the frames: light for clean shots (keeps detail),
         // strong two-step filtering for high-ISO single frames.
         const double exposureScale = settings.exposure > 0 && std::isfinite(settings.exposure) ? settings.exposure : 1.0;
+        // Night mode lifts dark scenes up to 8x the metered exposure instead
+        // of 3x (finish()), so its grain shows in shadows that much darker:
+        // noise is judged there (denoise strength, and in finish() chroma
+        // denoise, clarity and sharpening).
+        const double nightLift = m.value(QStringLiteral("night_mode")).toBool() ? 8.0 / 3.0 : 1.0;
         // Judged in the shadows the tone mapping lifts (up to 3x), where grain shows first.
-        const double expectedShadow = 0.06 / (std::max(0.05, settings.targetGain) * exposureScale);
+        const double expectedShadow = 0.06 / (std::max(0.05, settings.targetGain) * exposureScale) / nightLift;
         const double expectedNoise = std::sqrt(noise.meanVariance(expectedShadow) / count) / expectedShadow;
         const double severity = std::max(0.0, std::min(1.0, (expectedNoise - 0.015) / 0.085));
         MergeOptions mergeOptions;
@@ -587,8 +605,13 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         mergeOptions.spatialPilot = settings.spatialPilot >= 0 ? settings.spatialPilot : 2.5 * severity;
         // Learned denoise (mldenoise.h) instead of the spatial shrinkage for
         // noisy merges: from severity 0.55 it beat the shrinkage on 15 of 16
-        // held-out bursts, below that the shrinkage did better.
-        const MlDenoise::Model *learned = settings.learnedDenoise && severity >= 0.55
+        // held-out bursts, below that the shrinkage did better. A single
+        // frame only at base ISO (SingleFrameLearnedMaxIso): the network
+        // learns mostly from merges of several (as the app uses it), and on
+        // noisier single frames the shrinkage did better.
+        const double iso = number(m, "iso");
+        const bool learnedFits = count >= 2 || (iso > 0 && iso <= SingleFrameLearnedMaxIso);
+        const MlDenoise::Model *learned = settings.learnedDenoise && learnedFits && severity >= 0.55
                 ? MlDenoise::modelFrom(settings.calibrationDirs) : nullptr;
         QString learnedError;
         if (learned && !MlDenoise::gpuAvailable(&learnedError)) {
@@ -617,11 +640,46 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
                 offset[k] = noise.offset[k] / (double(clip) * clip);
             }
             const double gain = std::max(0.05, settings.targetGain) * exposureScale;
-            if (MlDenoise::denoisePlanes(*learned, &planes, scale, offset, gain, &learnedInfo, &learnedError)) {
+            // Where the merge rejected alternates (motion, a flickering
+            // light) it averaged fewer frames and kept more noise than the
+            // network's image-wide estimate: it is told so per pixel, and the
+            // night cleanup below per tile.
+            const std::vector<float> tileNoise = relativeTileNoise(mergeStats);
+            const std::vector<float> pixelNoise = tileMapToPixels(tileNoise, merged.width, merged.height);
+            if (MlDenoise::denoisePlanes(*learned, &planes, scale, offset, gain, &learnedInfo, &learnedError,
+                                         &pixelNoise)) {
+                int noisier = 0;
+                float most = 1;
+                for (float v : tileNoise) {
+                    noisier += v > 2.0f;
+                    most = std::max(most, v);
+                }
+                learnedInfo.insert(QStringLiteral("noisier_tiles"), tileNoise.empty() ? 0.0
+                                   : double(noisier) / double(tileNoise.size()));
+                learnedInfo.insert(QStringLiteral("max_tile_noise"), double(most));
                 for (int k = 0; k < 4; ++k) {
                     const float *src = planes.plane(k);
                     std::vector<float> &dst = merged.phase[k];
                     for (std::size_t i = 0; i < dst.size(); ++i) dst[i] = src[i] * clip;
+                }
+                // Night mode lifts the shadows up to 8x, which brings the
+                // fine grain the network leaves into view (dark walls, sky).
+                // A light second shrinkage removes it there; from about
+                // mid grey up it fades out, as road and foliage got softer
+                // and showed a faint 2-pixel green checker the grain hid.
+                if (nightLift > 1.0) {
+                    const double frames = 1.0 + (count - 1) * (1.0 - mergeStats.rejection);
+                    NoiseModel residual = noise;
+                    for (int k = 0; k < 4; ++k) {
+                        residual.scale[k] /= frames;
+                        residual.offset[k] /= frames;
+                    }
+                    // Plane units for a displayed linear level at the
+                    // night lift (3x nightLift = 8x the metered exposure).
+                    const double displayed = clip / (gain * 3.0 * nightLift);
+                    shadowCleanup(&merged, residual, NightShadowCleanup, 0.03 * displayed, 0.12 * displayed,
+                                  &tileNoise);
+                    learnedInfo.insert(QStringLiteral("night_shadow_cleanup"), NightShadowCleanup);
                 }
             } else {
                 qWarning() << "rawpipeline learned denoise failed:" << learnedError;
@@ -689,9 +747,14 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
         }
         // Noise relative to signal at metered mid grey, after merging.
         const double effectiveFrames = 1.0 + (count - 1) * (1.0 - mergeStats.rejection);
-        const double midGrey = 0.18 / options.targetGain;
+        const double midGrey = 0.18 / options.targetGain / nightLift;
         options.relativeNoise = std::sqrt(noise.meanVariance(midGrey) / effectiveFrames) / midGrey;
         options.blackNoise = std::sqrt(noise.meanVariance(0.0) / effectiveFrames);
+        options.mergedNoise = noise;
+        for (int k = 0; k < 4; ++k) {
+            options.mergedNoise.scale[k] /= effectiveFrames;
+            options.mergedNoise.offset[k] /= effectiveFrames;
+        }
         FinishStats finishStats;
         const RgbImage rgb = finish(merged, options, &finishStats);
         Planes().phase.swap(merged.phase);
@@ -740,6 +803,11 @@ bool renderFullFrame(const QStringList &metadataPaths, const RenderSettings &set
                 p.insert(QStringLiteral("white_scale"), finishStats.whiteScale);
             }
             p.insert(QStringLiteral("long_gain"), finishStats.longGain);
+            p.insert(QStringLiteral("key_level"), finishStats.keyLevel);
+            if (options.night) {
+                p.insert(QStringLiteral("key_snr"), finishStats.keySnr);
+                p.insert(QStringLiteral("night_lift_cap"), finishStats.nightLiftCap);
+            }
             p.insert(QStringLiteral("lens_shading"), shadingSource.isEmpty() ? QJsonValue(false) : QJsonValue(shadingSource));
             QJsonObject timing;
             timing.insert(QStringLiteral("load"), double(loadMs));

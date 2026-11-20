@@ -259,6 +259,12 @@ double NoiseModel::variance(int phase, double signal) const
     return std::max(1e-12, scale[phase] * std::max(0.0, signal) + offset[phase]);
 }
 
+double nightLiftCap(double keySnr)
+{
+    if (!(keySnr >= 0)) return 8.0;
+    return std::max(1.25, 8.0 * std::sqrt(std::min(1.0, keySnr / 4.0)));
+}
+
 double NoiseModel::meanVariance(double signal) const
 {
     double sum = 0;
@@ -778,7 +784,10 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
     const float spatial = float(std::max(0.0, options.spatialStrength));
     const float floor = float(std::max(0.0, std::min(1.0, options.spatialFloor)));
     const float pilot = float(std::max(0.0, options.spatialPilot));
+    const float *tileNoise = options.tileNoise && options.tileNoise->size() == std::size_t(tilesX) * tilesY
+            ? options.tileNoise->data() : nullptr;
     std::vector<double> rowRejection(tilesY, 0.0);
+    std::vector<float> tileFrames(std::size_t(tilesX) * tilesY, float(frameCount));
 
     // Tile rows two apart never overlap, so each pass can run in parallel.
     for (int pass = 0; pass < 2; ++pass) {
@@ -796,12 +805,23 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
                     for (int i = 0; i < 256; ++i) mean += tile[p][i];
                     // Variance of an unnormalised 256-point DFT coefficient.
                     sigma2[p] = float(noise.variance(p, mean / 256) * 256.0);
+                    if (tileNoise) sigma2[p] *= tileNoise[ty * tilesX + tx];
                 }
                 forwardPair(tile[0], tile[1], rr[0], ri[0], rr[1], ri[1]);
                 forwardPair(tile[2], tile[3], rr[2], ri[2], rr[3], ri[3]);
                 for (int p = 0; p < 4; ++p) {
                     std::copy(rr[p], rr[p] + 256, mr[p]);
                     std::copy(ri[p], ri[p] + 256, mi[p]);
+                }
+                // Per coefficient the merge is ((1 + sum a) reference
+                // + sum (1 - a) alternate) / N, so its noise variance is that
+                // of one frame times ((1 + sum a)^2 + sum (1 - a)^2) / N^2;
+                // the tile's is the mean over its coefficients.
+                float pulled[4][256], kept2[4][256];
+                const bool trackFrames = frameCount > 1;
+                if (trackFrames) {
+                    std::fill(&pulled[0][0], &pulled[0][0] + 4 * 256, 1.0f);
+                    std::fill(&kept2[0][0], &kept2[0][0] + 4 * 256, 0.0f);
                 }
                 for (int z = 1; z < frameCount; ++z) {
                     const TileOffset offset = z - 1 < int(alignments.size())
@@ -820,9 +840,17 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
                             mr[p][i] += ar[p][i] + a * dr;
                             mi[p][i] += ai[p][i] + a * di;
                             weightSum += a;
+                            pulled[p][i] += a;
+                            kept2[p][i] += (1.0f - a) * (1.0f - a);
                         }
                         rejection += weightSum / 256;
                     }
+                }
+                if (trackFrames) {
+                    double variance = 0;
+                    for (int p = 0; p < 4; ++p)
+                        for (int i = 0; i < 256; ++i) variance += pulled[p][i] * pulled[p][i] + kept2[p][i];
+                    tileFrames[std::size_t(ty) * tilesX + tx] = float(4.0 * 256.0 * frameCount * frameCount / variance);
                 }
                 const float inverseCount = 1.0f / frameCount;
                 for (int p = 0; p < 4; ++p) {
@@ -871,11 +899,49 @@ Planes mergeFrames(int width, int height, float clip, int frameCount, Load load,
         for (double r : rowRejection) total += r;
         const double count = double(tilesX) * tilesY * 4 * std::max(1, frameCount - 1);
         stats->rejection = frameCount > 1 ? total / count : 0;
+        stats->tilesX = tilesX;
+        stats->tilesY = tilesY;
+        stats->tileFrames = std::move(tileFrames);
     }
     return out;
 }
 
 } // namespace
+
+std::vector<float> relativeTileNoise(const MergeStats &stats)
+{
+    const std::size_t n = stats.tileFrames.size();
+    std::vector<float> variance(n);
+    for (std::size_t i = 0; i < n; ++i) variance[i] = 1.0f / std::max(1.0f, stats.tileFrames[i]);
+    if (n == 0) return variance;
+    std::vector<float> sorted = variance;
+    std::nth_element(sorted.begin(), sorted.begin() + n / 2, sorted.end());
+    const float typical = sorted[n / 2];
+    for (float &v : variance) v = std::max(1.0f, v / typical);
+    return variance;
+}
+
+std::vector<float> tileMapToPixels(const std::vector<float> &tiles, int width, int height)
+{
+    const int tilesX = mergeTileCount(width), tilesY = mergeTileCount(height);
+    std::vector<float> out(std::size_t(width) * height, 1.0f);
+    if (tiles.size() != std::size_t(tilesX) * tilesY) return out;
+    const float *window = tileTables().window;
+    // Each pixel lies in two tiles per axis (stride 8, size 16), whose
+    // windows sum to 1.
+    parallelFor(0, height, [&](int y) {
+        const int ty = (y + MergeTileStride) / MergeTileStride;
+        const float wy1 = window[y + MergeTileStride - ty * MergeTileStride], wy0 = 1.0f - wy1;
+        const float *row0 = &tiles[std::size_t(ty - 1) * tilesX], *row1 = &tiles[std::size_t(ty) * tilesX];
+        float *dst = &out[std::size_t(y) * width];
+        for (int x = 0; x < width; ++x) {
+            const int tx = (x + MergeTileStride) / MergeTileStride;
+            const float wx1 = window[x + MergeTileStride - tx * MergeTileStride], wx0 = 1.0f - wx1;
+            dst[x] = wy0 * (wx0 * row0[tx - 1] + wx1 * row0[tx]) + wy1 * (wx0 * row1[tx - 1] + wx1 * row1[tx]);
+        }
+    });
+    return out;
+}
 
 Planes merge(const std::vector<const Planes *> &frames, const std::vector<Alignment> &alignments,
              const NoiseModel &noise, const MergeOptions &options, MergeStats *stats)
@@ -908,6 +974,76 @@ Planes merge(const std::vector<const BayerFrame *> &frames, const std::vector<do
                            loadMosaicTiles(*frames[z], black[z].data(), scale[z].data(), x, y, tiles);
                        },
                        alignments, noise, options, stats);
+}
+
+namespace {
+std::vector<float> gaussianBlur(const std::vector<float> &source, int width, int height, double sigma);
+} // namespace
+
+void shadowCleanup(Planes *planes, const NoiseModel &residual, double strength, double fullBelow,
+                   double noneAbove, const std::vector<float> *tileNoise)
+{
+    if (!(strength > 0) || !(noneAbove > fullBelow)) return;
+    MergeOptions shrink;
+    shrink.spatialStrength = strength;
+    shrink.spatialFloor = 0.5;
+    shrink.spatialPilot = 2.5 * strength;
+    shrink.tileNoise = tileNoise;
+    // A bright light (a lamp, a display) dominates the spectrum of every tile
+    // it touches, so the shrinkage would leave the dark surroundings in those
+    // tiles as they were: a square of grain around small lights. It runs on
+    // a copy where pixels from noneAbove up (which it leaves alone anyway)
+    // are filled in from their dark surroundings, and each dark pixel takes
+    // the change it made there.
+    const int width = planes->width, height = planes->height;
+    const std::size_t count = std::size_t(width) * height;
+    const float ceiling = float(noneAbove);
+    std::vector<float> dark(count);
+    bool anyBright = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        const bool below = planes->phase[0][i] < ceiling && planes->phase[1][i] < ceiling
+                && planes->phase[2][i] < ceiling && planes->phase[3][i] < ceiling;
+        dark[i] = below ? 1.0f : 0.0f;
+        anyBright = anyBright || !below;
+    }
+    Planes filled = *planes;
+    if (anyBright) {
+        // Normalised convolution: the blurred dark pixels over the blurred
+        // mask; the cap where no dark pixel is near.
+        const std::vector<float> weight = gaussianBlur(dark, width, height, 3.0);
+        for (int p = 0; p < 4; ++p) {
+            std::vector<float> &plane = filled.phase[p];
+            std::vector<float> sum(count);
+            for (std::size_t i = 0; i < count; ++i) sum[i] = plane[i] * dark[i];
+            sum = gaussianBlur(sum, width, height, 3.0);
+            for (std::size_t i = 0; i < count; ++i)
+                if (dark[i] == 0.0f)
+                    plane[i] = std::min(ceiling, (sum[i] + 1e-3f * ceiling) / (weight[i] + 1e-3f));
+        }
+    }
+    const Planes cleaned = merge(std::vector<const Planes *>{&filled}, std::vector<Alignment>(), residual, shrink,
+                                 nullptr);
+    std::vector<float> level(count);
+    parallelFor(0, height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t i = std::size_t(y) * width + x;
+            level[i] = 0.25f * (cleaned.phase[0][i] + cleaned.phase[1][i] + cleaned.phase[2][i] + cleaned.phase[3][i]);
+        }
+    });
+    level = gaussianBlur(level, width, height, 2.0);
+    const float low = float(fullBelow), range = float(noneAbove - fullBelow);
+    parallelFor(0, height, [&](int y) {
+        for (int x = 0; x < width; ++x) {
+            const std::size_t i = std::size_t(y) * width + x;
+            if (dark[i] == 0.0f) continue;
+            float t = std::max(0.0f, std::min(1.0f, (level[i] - low) / range));
+            const float w = 1.0f - t * t * (3.0f - 2.0f * t);
+            for (int p = 0; p < 4; ++p) {
+                float &v = planes->phase[p][i];
+                v += w * (cleaned.phase[p][i] - v);
+            }
+        }
+    });
 }
 
 std::vector<float> greenImage(const BayerFrame &frame, double exposureGain)
@@ -997,12 +1133,21 @@ BurstPlan planBurst(int64_t meteredExposureNs, int meteredIso, double clippedFra
     if (wanted / limit > 800) limit = 1e9 / 30;
     if (wanted / limit > 3200) limit = 1e9 / 15;
     if (night) limit = 1e9 / 5;
-    if (scene.motion >= 0) {
+    // Night mode measures the hand with the gyroscope when there is one:
+    // in the dark the viewfinder's shift estimate also sees noise.
+    const double motion = night && scene.gyroMotion >= 0 ? scene.gyroMotion : scene.motion;
+    // Still for a second (tripod, table) with nothing moving in the frame:
+    // the blur budget no longer applies, frames of up to 1 s.
+    const bool tripod = night && scene.gyroMotion >= 0 && scene.stillSeconds >= TripodStillSeconds
+            && scene.subjectMotion <= 0.05;
+    if (tripod) {
+        limit = 1e9 * TripodMaxFrameSeconds;
+    } else if (motion >= 0) {
         // Blur budget in frame widths (1.5 px of a 4096 px frame), against
         // the measured motion; a floor so a quiet reading never trusts more
         // than about a tripod's steadiness.
         const double budget = (night ? 2.5 : 1.5) / 4096;
-        const double speed = std::max(scene.motion, night ? 0.0015 : 0.004);
+        const double speed = std::max(motion, night ? 0.0015 : 0.004);
         double seconds = budget / speed;
         // Moving subjects: short frames whatever the hand does.
         if (scene.subjectMotion > 0.05) seconds = std::min(seconds, night ? 1.0 / 15 : 1.0 / 60);
@@ -1020,6 +1165,12 @@ BurstPlan planBurst(int64_t meteredExposureNs, int meteredIso, double clippedFra
     plan.frames = night ? maxFrames
                         : std::max(2, std::min(maxFrames, 4 + int(std::lround(under)) + (iso >= 400 ? 2 : 0)
                                                           + (iso >= 1600 ? 2 : 0)));
+    if (tripod) {
+        // Long frames, fewer: about TripodTotalSeconds of light in all.
+        plan.tripod = true;
+        plan.frames = std::max(std::min(4, maxFrames),
+                               std::min(maxFrames, int(TripodTotalSeconds * 1e9 / double(plan.exposureNs))));
+    }
     return plan;
 }
 
@@ -1368,6 +1519,22 @@ struct Exposure {
     float s, l, w; // gamma-encoded short/long exposure, weight of short
 };
 
+// Where the long exposure approaches white it is blended toward the short
+// one before fusion (the weights still come from the real long exposure, and
+// the short one has all the weight there, so flat areas come out the same):
+// otherwise its clipped white reaches the coarse pyramid levels around a dark
+// object and lightens a wide halo of sky around it (a tree against fog or an
+// overcast sky, the gaps between bare branches).
+const float LongRolloffKnee = 0.9f;
+
+inline float blendedLong(float s, float l)
+{
+    if (l <= LongRolloffKnee || s >= l) return l;
+    float t = std::min(1.0f, (l - LongRolloffKnee) / (1.0f - LongRolloffKnee));
+    t = t * t * (3 - 2 * t);
+    return l + t * (s - l);
+}
+
 // Mertens weights; they depend only on the gamma-encoded exposures, so they
 // are tabulated.
 struct FusionWeights {
@@ -1513,7 +1680,11 @@ std::vector<float> fuseExposures(const std::vector<float> &luma, int width, int 
     const Curve &c = curve();
     const float gs = float(shortGain), gl = float(longGain);
     const FusionWeights weights;
-    return fuse(luma, width, height, [&](float y) { return weights(c.toGamma(y * gs), c.toGamma(y * gl)); });
+    return fuse(luma, width, height, [&](float y) {
+        Exposure e = weights(c.toGamma(y * gs), c.toGamma(y * gl));
+        e.l = blendedLong(e.s, e.l);
+        return e;
+    });
 }
 
 std::vector<float> fuseCameraExposures(const std::vector<float> &luma, int width, int height,
@@ -2062,7 +2233,8 @@ static double fusedLevel(double y, double shortGain, double longGain)
     const double takeover = 0.15 + 0.85 * std::min(1.0, std::max(0.0, (l - 0.5) / 0.45));
     const double ws = wellExposed(s) * takeover + 1e-4;
     const double wl = wellExposed(l) * std::min(1.0, std::max(0.0, (1.0 - l) * 25.0)) + 1e-4;
-    return l + ws / (ws + wl) * (s - l);
+    const double blended = blendedLong(float(s), float(l));
+    return blended + ws / (ws + wl) * (s - blended);
 }
 
 // Short and long gains closest to the given ones (in exposure stops; moving
@@ -2466,8 +2638,20 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
     // exposure, so a single frame and an underexposed burst of the same
     // scene come out equally bright.
     // Night mode lifts further but aims lower, so a night still looks like
-    // night (dusk), not day.
-    const double keyLift = options.night ? std::max(1.25, std::min(8.0, 0.15 / std::max(key, 1e-6)))
+    // night (dusk), not day; with little light, less (nightLiftCap), as
+    // the stock camera keeps such a scene dark rather than showing grain.
+    double keySnr = -1, liftCap = 8.0;
+    if (options.night) {
+        const NoiseModel &n = options.mergedNoise;
+        bool known = false;
+        for (int p = 0; p < 4; ++p) known = known || n.scale[p] > 0 || n.offset[p] > 0;
+        if (known) {
+            const double signal = key / targetGain;
+            keySnr = signal / std::sqrt(n.meanVariance(signal));
+            liftCap = nightLiftCap(keySnr);
+        }
+    }
+    const double keyLift = options.night ? std::max(1.25, std::min(liftCap, 0.15 / std::max(key, 1e-6)))
                                          : std::max(1.25, std::min(3.0, 0.22 / std::max(key, 1e-6)));
     const double lift = std::max(1.0, keyLift * std::max(0.5, std::min(1.0, shortGain / targetGain)));
     double longGain = shortGain;
@@ -2502,6 +2686,8 @@ RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats 
         stats->longGain = longGain;
         stats->highlightLevel = highlight;
         stats->keyLevel = key;
+        stats->keySnr = keySnr;
+        stats->nightLiftCap = options.night ? liftCap : 0.0;
         stats->faceLevel = faceLevel;
         stats->faceBright = faceBright;
     }

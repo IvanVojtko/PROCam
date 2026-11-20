@@ -57,8 +57,12 @@ NoiseEstimate estimateNoise(const Tensor &planes, const std::array<double, 4> &s
 
 // Network input z (8 channels) for planes x (4 channels, white 1): x and its
 // expected noise std, times `gain`, divided by norm = level * gain.
+// noiseScale optionally multiplies the expected noise variance per pixel
+// (width x height of the planes): where the merge averaged fewer frames
+// than in most of the image (relativeTileNoise).
 Tensor networkInput(const Tensor &planes, const std::array<double, 4> &scale, const std::array<double, 4> &offset,
-                    const NoiseEstimate &noise, double gain, double *norm);
+                    const NoiseEstimate &noise, double gain, double *norm,
+                    const std::vector<float> *noiseScale = nullptr);
 
 // The network's output for z: the denoised planes in z's units times norm
 // (the rendered brightness). Width and height must be multiples of 4.
@@ -74,7 +78,9 @@ bool gpuAvailable(QString *error = nullptr);
 
 // Denoises planes in place (white 1, black 0): estimate the noise, run the
 // network on the GPU at gain, convert back. info receives timing and noise.
+// noiseScale as for networkInput, for the planes' full size.
 bool denoisePlanes(const Model &model, Tensor *planes, const std::array<double, 4> &scale,
-                   const std::array<double, 4> &offset, double gain, QJsonObject *info, QString *error);
+                   const std::array<double, 4> &offset, double gain, QJsonObject *info, QString *error,
+                   const std::vector<float> *noiseScale = nullptr);
 
 }

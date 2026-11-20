@@ -2,6 +2,7 @@
 #define CAMERA2PREVIEW_H
 
 #include "previewanalysis.h"
+#include "scenescan.h"
 
 #include <QElapsedTimer>
 #include <QImage>
@@ -10,6 +11,7 @@
 #include <QProcess>
 #include <QQuickItem>
 #include <QSize>
+#include <QThreadPool>
 #include <QTimer>
 #include <QVariant>
 
@@ -27,8 +29,9 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(QString rawCaptureSize READ rawCaptureSize WRITE setRawCaptureSize NOTIFY rawCaptureSizeChanged)
     // "raw16", or "yuv" for cameras without RAW output (I420 burst frames).
     Q_PROPERTY(QString rawCaptureFormat READ rawCaptureFormat WRITE setRawCaptureFormat NOTIFY rawCaptureFormatChanged)
-    // Photo mode frame rate cap for the camera session, 0 for none: a camera
-    // that wrote damaged (binned) RAW frames is retried with it.
+    // Photo mode frame rate cap for the camera session, 0 for none
+    // (CameraExtensions.camera2PhotoMaxFps): faster sessions wrote binned
+    // frames into the RAW buffer on an Xperia 10 III.
     Q_PROPERTY(int maxFrameRate READ maxFrameRate WRITE setMaxFrameRate NOTIFY maxFrameRateChanged)
     // The helper's last RAW/YUV stream report ("raw=0 raw_error=session:-10003 ..."), for diagnostics.
     Q_PROPERTY(QString rawStreamStatus READ rawStreamStatus NOTIFY rawCaptureReadyChanged)
@@ -90,6 +93,18 @@ class Camera2Preview : public QQuickItem
     Q_PROPERTY(QString videoCodec READ videoCodec WRITE setVideoCodec NOTIFY videoCodecChanged)
     Q_PROPERTY(bool videoReady READ videoReady NOTIFY videoReadyChanged)
     Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
+    // Viewfinder scanning, a few times a second on a worker thread: QR codes
+    // and documents (SceneScan).
+    Q_PROPERTY(bool qrDetection READ qrDetection WRITE setQrDetection NOTIFY qrDetectionChanged)
+    Q_PROPERTY(bool documentDetection READ documentDetection WRITE setDocumentDetection NOTIFY documentDetectionChanged)
+    // The QR code in view ("" for none; kept 1.5 s after it was last read,
+    // as a moving phone blurs it now and then), and where it is drawn
+    // (item coordinates).
+    Q_PROPERTY(QString qrCode READ qrCode NOTIFY qrCodeChanged)
+    Q_PROPERTY(QRectF qrRect READ qrRect NOTIFY qrCodeChanged)
+    // The document in view, once seen in two scans running: its corners as
+    // drawn (item coordinates, points), empty without one.
+    Q_PROPERTY(QVariantList documentCorners READ documentCorners NOTIFY documentChanged)
 
 public:
     explicit Camera2Preview(QQuickItem *parent = nullptr);
@@ -122,6 +137,9 @@ public:
     // For the burst plan: motion (frame widths per second, -1 unknown),
     // subjectMotion (0..1), faceLuma (0..1, -1 without a face), faceClipped.
     Q_INVOKABLE QVariantMap sceneInfo() const;
+    // A gyroscope reading in degrees per second (QML Gyroscope), for the
+    // night burst plan (PreviewAnalysis::GyroMeter).
+    Q_INVOKABLE void addGyroReading(qreal x, qreal y, qreal z);
     void setRawCaptureFormat(const QString &rawCaptureFormat);
     void setMaxFrameRate(int maxFrameRate);
 
@@ -216,6 +234,21 @@ public:
     void setVideoCodec(const QString &videoCodec);
     bool videoReady() const { return m_videoReady; }
     bool recording() const { return m_recording; }
+    bool qrDetection() const { return m_qrDetection; }
+    void setQrDetection(bool enabled);
+    bool documentDetection() const { return m_documentDetection; }
+    void setDocumentDetection(bool enabled);
+    QString qrCode() const { return m_qrCode; }
+    QRectF qrRect() const;
+    QVariantList documentCorners() const;
+    // Whether an item point lies on the document shown.
+    Q_INVOKABLE bool documentContains(qreal x, qreal y) const;
+    // The document's corners on the photo a capture now saves (rotated by
+    // captureRotation, mirrored, cropped to the photo shape and zoom as
+    // saveThumbnail() does): [x0, y0, ... x3, y3], normalised and clockwise
+    // from the top-left; empty without a document.
+    Q_INVOKABLE QVariantList documentPhotoCorners(int captureRotation) const;
+
     // Records to path (an .mp4 that must not exist yet); orientation is the
     // clockwise rotation players apply (0, 90, 180, 270). recordingStarted
     // or recordingFinished(success false) follows.
@@ -288,6 +321,11 @@ protected:
 
 private:
     bool frameGeometry(const QSizeF &imageSize, QRectF *drawRect, QRectF *sourceRect) const;
+    // Normalised frame (sensor orientation) point to item coordinates, the
+    // inverse of mapToSensor().
+    QPointF mapFromFrame(const QPointF &point) const;
+    void startScan();
+    void clearScan();
     qreal frameCropZoom() const;
     bool startRawFrameSet(const QByteArray &command, const QVariantList &rawPaths,
                           const QVariantList &metadataPaths);
@@ -360,6 +398,10 @@ signals:
     // The camera refused the encoder next to the viewfinder (error: the
     // bridge's stage); the app records through gst-droid instead.
     void videoStreamUnavailable(const QString &error);
+    void qrDetectionChanged();
+    void documentDetectionChanged();
+    void qrCodeChanged();
+    void documentChanged();
 
 private slots:
     void readFrames();
@@ -465,6 +507,7 @@ private:
     quint64 m_drawnSerial = 0;
     QElapsedTimer m_histogramTimer;
     PreviewAnalysis::MotionMeter m_motionMeter;
+    PreviewAnalysis::GyroMeter m_gyroMeter;
     QElapsedTimer m_motionClock;
     std::vector<std::array<float, 4>> m_faces;
     // The last detected faces, kept for 1.5 s after detection drops out
@@ -480,6 +523,8 @@ private:
     QElapsedTimer m_statsTimer;
     int m_statsFrames = 0;
     qint64 m_statsParseNs = 0;
+    int m_statsQrScans = 0, m_statsDocumentScans = 0;
+    qint64 m_statsQrNs = 0, m_statsDocumentNs = 0;
     QByteArray m_buffer;
     QMap<QString, QString> m_lastCaptureResultFields;
     bool m_previewCaptureRunning = false;
@@ -517,6 +562,23 @@ private:
     QElapsedTimer m_helperClock;
     bool m_firstFrameLogged = false;
     QElapsedTimer m_captureClock;
+
+    bool m_qrDetection = false;
+    bool m_documentDetection = false;
+    // One scan at a time; results of a scan started before clearScan()
+    // (another camera, detection off) are dropped by generation.
+    QThreadPool m_scanPool;
+    bool m_scanRunning = false;
+    quint64 m_scanGeneration = 0;
+    int m_scanCount = 0;
+    QElapsedTimer m_scanTimer;
+    QString m_qrCode;
+    SceneScan::Quad m_qrCorners; // normalised frame coordinates
+    QElapsedTimer m_qrSeen;
+    // Smoothed over the scans that find it; shown from the second.
+    SceneScan::Quad m_document;
+    int m_documentHits = 0;
+    int m_documentMisses = 0;
 };
 
 #endif

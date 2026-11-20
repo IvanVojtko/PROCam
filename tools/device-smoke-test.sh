@@ -141,6 +141,9 @@ press_shutter() {
     remote "dbus-send --session --print-reply --dest=com.procam.camera / com.procam.camera.ui.capture" 2>&1 | grep -q 'boolean true'
 }
 
+# ProCam's photos and videos: yyyyMMdd_HHmmss[_NNN] (ProCam_ before 1.4.0-beta.7).
+photo_name='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]*'
+
 saved_dconf=()
 restore() {
     if [ ${#saved_dconf[@]} -gt 0 ]; then
@@ -151,7 +154,7 @@ restore() {
     fi
     if [ "$keep" = 0 ] && [ "$app_tests" = 1 ]; then
         remote "[ -e $remote_dir/marker ] && find \$HOME/Pictures \$HOME/Videos /run/media/\$USER -newer $remote_dir/marker \
-                    -type f -name 'ProCam_*' ! -name 'ProCam_camera2_compatibility_*' -delete 2>/dev/null; true"
+                    -type f \( -name '$photo_name' -o -name 'ProCam_*' \) ! -name 'ProCam_camera2_compatibility_*' -delete 2>/dev/null; true"
     fi
     remote "rm -rf $remote_dir" >/dev/null 2>&1
     ssh "${ssh_opts[@]}" -O exit "$device" >/dev/null 2>&1
@@ -261,7 +264,8 @@ fi
 if [ "$app_tests" = 1 ]; then
     save_dconf /apps/procam/smokeTestCapture
     save_dconf /apps/procam/captureMode
-    remote "dconf write /apps/procam/smokeTestCapture true; dconf write /apps/procam/captureMode \"'image'\"; touch $remote_dir/marker"
+    save_dconf /apps/procam/savePhotoInfo # the photo's JSON gives the merge timing
+    remote "dconf write /apps/procam/smokeTestCapture true; dconf write /apps/procam/captureMode \"'image'\"; dconf write /apps/procam/savePhotoInfo true; touch $remote_dir/marker"
 
     for run in $(seq "$runs"); do
         stop_app
@@ -305,8 +309,8 @@ if [ "$app_tests" = 1 ]; then
             renders+=("$render")
             wait=$(field "$line" wait_ms); [ -n "$wait" ] && waits+=("$wait")
             sleep 1
-            sidecar=$(remote "find \$HOME/Pictures \$HOME/Videos /run/media/\$USER -newer $remote_dir/marker -name 'ProCam_*.json' \
-                              ! -name '*_burst*' ! -name 'ProCam_camera2_compatibility_*' 2>/dev/null | xargs -r ls -t | head -n 1")
+            sidecar=$(remote "find \$HOME/Pictures \$HOME/Videos /run/media/\$USER -newer $remote_dir/marker -name '$photo_name.json' \
+                              ! -name '*_burst*' 2>/dev/null | xargs -r ls -t | head -n 1")
             if [ -n "$sidecar" ] && fetch "$sidecar" "$work/photo$shot.json"; then
                 merge=$(json "$work/photo$shot.json" "int(sum(d['raw_pipeline']['timing_ms'].get(k, 0) for k in $stages))")
                 [ -n "$merge" ] && merges+=("$merge")
@@ -326,7 +330,7 @@ if [ "$app_tests" = 1 ]; then
         sleep 3
         press_shutter
         sleep 3
-        video=$(remote "find \$HOME/Videos \$HOME/Pictures /run/media/\$USER -newer $remote_dir/marker -name 'ProCam_*.mp4' 2>/dev/null | xargs -r ls -t | head -n 1")
+        video=$(remote "find \$HOME/Videos \$HOME/Pictures /run/media/\$USER -newer $remote_dir/marker -name '$photo_name.mp4' 2>/dev/null | xargs -r ls -t | head -n 1")
         size=$([ -n "$video" ] && remote "stat -c %s '$video'")
         if [ -n "$video" ] && [ "${size:-0}" -gt 100000 ]; then
             video_result="$((size / 1024)) KB"

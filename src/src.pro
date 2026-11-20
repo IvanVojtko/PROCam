@@ -29,6 +29,8 @@ QMAKE_CXXFLAGS_RELEASE += -O3 -fno-math-errno
 # Falling off the end of a value-returning function is undefined; with
 # optimisation GCC runs on into whatever code follows.
 QMAKE_CXXFLAGS += -Werror=return-type
+# quirc (QR decoding, src/3rdparty/quirc) is built through quirc.c.
+OTHER_FILES += 3rdparty/quirc/*
 
 SOURCES += rawbracket.cpp \
         rawpipeline.cpp \
@@ -36,6 +38,8 @@ SOURCES += rawbracket.cpp \
         raisr.cpp \
         mldenoise.cpp \
         camera2preview.cpp \
+        scenescan.cpp \
+        quirc.c \
         previewnode.cpp \
         cameraplugin.cpp \
         capturemodel.cpp \
@@ -51,6 +55,7 @@ HEADERS += rawbracket.h rawbracketmath.h \
         rawpipeline.h rawpipelinemath.h rawframecheck.h raisr.h mldenoise.h \
         previewsize.h previewaids.h videoencoderlimits.h storagefolders.h \
         camera2preview.h \
+        scenescan.h \
         previewnode.h \
         capturemodel.h \
         declarativecameraextensions.h \

@@ -68,7 +68,7 @@ jobs:
       - name: RAW pipeline and helper unit tests
         run: |
           set -euo pipefail
-          for project in rawpipeline rawbracket previewaids previewsize previewanalysis videoencoderlimits storagefolders; do
+          for project in rawpipeline rawbracket previewaids previewsize previewanalysis videoencoderlimits storagefolders scenescan; do
             echo "::group::${project}"
             mkdir -p "build/host-${project}"
             (

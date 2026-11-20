@@ -270,6 +270,14 @@ SettingsOverlay {
     }
 
     onClicked: {
+        // A tap on the outlined document takes it.
+        if (documentOutline.shown) {
+            var onViewfinder = settingsOverlay.mapToItem(captureView.camera2Viewfinder, mouse.x, mouse.y)
+            if (captureView.camera2Viewfinder.documentContains(onViewfinder.x, onViewfinder.y)) {
+                captureView.captureDocument()
+                return
+            }
+        }
         if (!captureView._captureOnFocus && captureView.touchFocusSupported) {
             var focusPoint
             if (captureView._camera2ViewfinderActive) {
@@ -716,6 +724,165 @@ SettingsOverlay {
             onPressed: apply(mouse.y)
             onPositionChanged: apply(mouse.y)
         }
+    }
+
+    // The document the viewfinder found, outlined; a tap inside it (or on
+    // its chip) saves a flattened photo of just the document.
+    Canvas {
+        id: documentOutline
+
+        readonly property var viewfinder: captureView._camera2ViewfinderActive
+                                          ? captureView.camera2Viewfinder : null
+        readonly property var corners: viewfinder ? viewfinder.documentCorners : []
+        // Where the corners are drawn, in this item.
+        readonly property var points: {
+            var list = []
+            for (var i = 0; i < corners.length; ++i)
+                list.push(settingsOverlay.mapFromItem(viewfinder, corners[i].x, corners[i].y))
+            return list
+        }
+        readonly property bool shown: points.length === 4 && !settingsOverlay._exposed
+                                      && !settingsOverlay.inButtonLayout && !captureView.captureBusy
+                                      && !captureTimer.running
+        // The last outline, kept while it fades out.
+        property var drawnPoints: []
+
+        anchors.fill: parent
+        opacity: shown ? 1.0 : 0.0
+        visible: opacity > 0
+        Behavior on opacity { FadeAnimation { duration: 150 } }
+
+        onPointsChanged: {
+            if (points.length === 4) {
+                drawnPoints = points
+                requestPaint()
+            }
+        }
+        onPaint: {
+            var ctx = getContext("2d")
+            ctx.reset()
+            var p = drawnPoints
+            if (p.length !== 4) return
+            ctx.beginPath()
+            ctx.moveTo(p[0].x, p[0].y)
+            for (var i = 1; i < 4; ++i)
+                ctx.lineTo(p[i].x, p[i].y)
+            ctx.closePath()
+            ctx.fillStyle = Theme.rgba(Theme.highlightBackgroundColor, 0.2)
+            ctx.fill()
+            ctx.lineJoin = "round"
+            ctx.lineWidth = Math.round(3 * Theme.pixelRatio)
+            ctx.strokeStyle = Theme.highlightColor
+            ctx.stroke()
+        }
+    }
+
+    FloatingChip {
+        readonly property var points: documentOutline.drawnPoints
+
+        x: points.length === 4 ? (points[0].x + points[1].x + points[2].x + points[3].x) / 4 - width / 2 : 0
+        y: points.length === 4 ? (points[0].y + points[1].y + points[2].y + points[3].y) / 4 - height / 2 : 0
+        z: 3
+        visible: documentOutline.visible
+        opacity: documentOutline.opacity
+        enabled: documentOutline.shown
+        checked: true
+        text: "Scan document"
+        onClicked: captureView.captureDocument()
+    }
+
+    // A QR code in the viewfinder: its link (or text) in a chip under it.
+    // A tap opens a web link in the browser and shows anything else (with
+    // Copy); nothing opens without that tap.
+    MouseArea {
+        id: qrChip
+
+        readonly property var viewfinder: captureView._camera2ViewfinderActive
+                                          ? captureView.camera2Viewfinder : null
+        readonly property string code: viewfinder ? viewfinder.qrCode : ""
+        readonly property bool webLink: /^https?:\/\/[^\s]+$/i.test(code)
+        // The code's place in this item.
+        readonly property rect codeRect: {
+            if (!viewfinder || code === "") return Qt.rect(0, 0, 0, 0)
+            var r = viewfinder.qrRect
+            var a = settingsOverlay.mapFromItem(viewfinder, r.x, r.y)
+            var b = settingsOverlay.mapFromItem(viewfinder, r.x + r.width, r.y + r.height)
+            return Qt.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y))
+        }
+        readonly property bool shown: code !== "" && !settingsOverlay._exposed
+                                      && !settingsOverlay.inButtonLayout && !captureView.captureBusy
+        // Kept while fading out.
+        property string shownCode
+        onCodeChanged: if (code !== "") shownCode = code
+
+        function label(text) {
+            if (/^https?:\/\//i.test(text))
+                return text.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/$/, "")
+            return text.split("\n")[0]
+        }
+
+        width: Math.min(chipRow.implicitWidth + 2 * Theme.paddingLarge,
+                        settingsOverlay.width - 2 * Theme.horizontalPageMargin)
+        height: Theme.itemSizeExtraSmall
+        x: Math.max(Theme.horizontalPageMargin,
+                    Math.min(settingsOverlay.width - width - Theme.horizontalPageMargin,
+                             codeRect.x + (codeRect.width - width) / 2))
+        // Under the code, or over it when that is too low (the controls).
+        y: {
+            var top = settingsOverlay.floatingTopBarBottom + Theme.paddingLarge
+            var bottom = settingsOverlay.height * 0.72 - height
+            var below = codeRect.y + codeRect.height + Theme.paddingLarge
+            var above = codeRect.y - height - Theme.paddingLarge
+            return Math.max(top, Math.min(bottom, below <= bottom ? below : above))
+        }
+        z: 3
+        enabled: shown
+        opacity: shown ? 1.0 : 0.0
+        visible: opacity > 0
+        Behavior on opacity { FadeAnimation { duration: 150 } }
+
+        onClicked: {
+            extensions.logCaptureEvent("qr opened link=" + webLink)
+            if (webLink)
+                Qt.openUrlExternally(shownCode)
+            else
+                pageStack.push(Qt.resolvedUrl("../settings/QrPage.qml"), { text: shownCode })
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            radius: height / 2
+            color: qrChip.pressed ? Theme.rgba(Theme.highlightBackgroundColor, Theme.highlightBackgroundOpacity)
+                                  : Theme.rgba("black", 0.6)
+            border.width: Math.round(Theme.pixelRatio)
+            border.color: Theme.rgba(Theme.highlightColor, 0.6)
+        }
+
+        Row {
+            id: chipRow
+
+            anchors.centerIn: parent
+            spacing: Theme.paddingSmall
+
+            Image {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Theme.iconSizeSmall
+                height: width
+                sourceSize: Qt.size(width, height)
+                source: "image://theme/icon-camera-qr"
+            }
+            Label {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Math.min(implicitWidth, qrChip.maxLabelWidth)
+                text: qrChip.label(qrChip.shownCode)
+                truncationMode: TruncationMode.Fade
+                font.pixelSize: Theme.fontSizeSmall
+                color: Theme.lightPrimaryColor
+            }
+        }
+
+        readonly property real maxLabelWidth: settingsOverlay.width - 2 * Theme.horizontalPageMargin
+                                              - 2 * Theme.paddingLarge - Theme.iconSizeSmall - Theme.paddingSmall
     }
 
     NonGraphicalFeedback {

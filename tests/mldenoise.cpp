@@ -71,6 +71,34 @@ int main(int argc, char **argv)
         return 1;
     }
     int failures = 0;
+    {
+        // The per-pixel noise factor raises the noise channel (std, so by
+        // its square root) and nothing else.
+        Tensor planes;
+        planes.channels = 4;
+        planes.width = 32;
+        planes.height = 16;
+        planes.data.assign(std::size_t(4) * 32 * 16, 0.02f);
+        const std::array<double, 4> scale{{1e-3, 1e-3, 1e-3, 1e-3}}, offset{{1e-5, 1e-5, 1e-5, 1e-5}};
+        NoiseEstimate level;
+        level.ratio = 0.5;
+        level.level = 0.003;
+        std::vector<float> factor(std::size_t(32) * 16, 1.0f);
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x) factor[std::size_t(y) * 32 + x] = 4.0f;
+        double n0 = 0, n1 = 0;
+        const Tensor plain = networkInput(planes, scale, offset, level, 2.0, &n0);
+        const Tensor raised = networkInput(planes, scale, offset, level, 2.0, &n1, &factor);
+        double worst = 0;
+        for (int c = 0; c < 8; ++c)
+            for (std::size_t i = 0; i < std::size_t(32) * 16; ++i) {
+                const float expected = c >= 4 && i % 32 < 16 ? 2.0f * plain.plane(c)[i] : plain.plane(c)[i];
+                worst = std::max(worst, double(std::abs(raised.plane(c)[i] - expected)) / std::abs(expected));
+            }
+        const bool ok = worst < 1e-6 && n0 == n1;
+        failures += !ok;
+        std::printf("%s noise factor map: max relative error %.2g\n", ok ? "PASS" : "FAIL", worst);
+    }
     const Tensor cpu = runCpu(model, z, norm);
     double cpuAbs = 0;
     const double cpuRel = compare(cpu, expected, &cpuAbs);

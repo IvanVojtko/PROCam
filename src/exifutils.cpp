@@ -475,6 +475,24 @@ QByteArray heicExif(const QString &jpegPath, const QSize &size)
     exif_data_unref(data);
     return result;
 }
+bool copyUprightJpegExif(const QString &sourceJpeg, const QString &targetJpeg, const QSize &size,
+                         QString *error)
+{
+    const QByteArray payload = heicExif(sourceJpeg, size);
+    return payload.isEmpty() || rewriteJpeg(targetJpeg, payload, error);
+}
+int focalLength35mm(const QString &jpegPath)
+{
+    ExifData *data = exif_data_new_from_file(QFile::encodeName(jpegPath).constData());
+    if (!data) return 0;
+    int value = 0;
+    if (ExifEntry *entry = exif_content_get_entry(data->ifd[EXIF_IFD_EXIF], EXIF_TAG_FOCAL_LENGTH_IN_35MM_FILM)) {
+        if (entry->format == EXIF_FORMAT_SHORT && entry->components >= 1 && entry->data)
+            value = exif_get_short(entry->data, exif_data_get_byte_order(data));
+    }
+    exif_data_unref(data);
+    return value;
+}
 bool writeJpegExifFromJsonFile(const QString &path, const QString &metadataPath, QString *error)
 {
     QFile file(metadataPath);

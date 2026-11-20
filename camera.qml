@@ -6,6 +6,7 @@
 
 import QtQuick 2.1
 import QtMultimedia 5.0
+import QtSensors 5.0
 import Amber.QrFilter 1.0
 import Sailfish.Silica 1.0
 import com.procam.camera 1.0
@@ -150,11 +151,8 @@ ApplicationWindow {
         videoSize: videoMode ? Settings.camera2VideoSize(videoResolution) : Qt.size(0, 0)
         videoStabilization: Settings.global.videoStabilization
         videoCodec: Settings.global.camera2VideoCodec
-        // HEVC needs about 30% fewer bits for the same picture; larger
-        // frames need fewer bits per pixel (Android's camera profiles alike).
-        videoBitrate: (videoResolution === "2160p" ? 48000000
-                       : videoResolution === "1440p" ? 32000000 : 20000000)
-                      * (videoCodec === "hevc" ? 0.7 : 1)
+        videoBitrate: Settings.camera2VideoBitrate(videoResolution, videoCodec,
+                                                   Settings.global.camera2VideoBitrateScale)
         // HDR merges RAW16 bursts whatever the capture format; JPEG mode then
         // streams RAW instead of JPEG.
         readonly property bool hdrCapture: Settings.global.hdrBurst || Settings.nightMode
@@ -187,10 +185,34 @@ ApplicationWindow {
         captureMirror: frontFacing && Settings.global.mirrorSelfies
         fill: Settings.global.viewfinderFill
         photoAspect: videoMode ? "16:9" : Settings.photoAspect
+        // Scanning the photo viewfinder, paused while a photo is taken.
+        qrDetection: Settings.global.qrFilterEnabled && !videoMode && !window.camera2CaptureBusy
+        documentDetection: Settings.global.documentDetection && !videoMode && !frontFacing
+                           && tiltSensor.cameraDown && !window.camera2CaptureBusy
 
         Behavior on y {
             enabled: !galleryVisible
             NumberAnimation { duration: 150; easing.type: Easing.InOutQuad }
+        }
+    }
+
+    // Documents lie on a table: they are looked for only while the camera
+    // points down (screen up), so windows, doors and pictures on a wall in
+    // ordinary photos are not outlined as pages.
+    Accelerometer {
+        id: tiltSensor
+
+        // z is gravity along the screen's normal: 9.8 lying screen up.
+        // On from about 45 degrees below the horizon, off above about 30.
+        property bool cameraDown
+
+        active: camera2Preview.active && !camera2Preview.videoMode && Settings.global.documentDetection
+        onActiveChanged: if (!active) cameraDown = false
+        onReadingChanged: {
+            if (!cameraDown && reading.z > 6.9)
+                cameraDown = true
+            else if (cameraDown && reading.z < 4.9)
+                cameraDown = false
         }
     }
 

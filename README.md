@@ -48,6 +48,9 @@ between frames.
   queue so you can keep shooting while earlier photos are processed.
 - **Normal and Pro modes.** Pro adds the live histogram, manual ISO, shutter
   and focus, white balance, RAW bracketing and more.
+- **QR codes and documents.** A QR code in the viewfinder shows its link in a
+  chip to open. A page, receipt or card seen from above is outlined; tap it to
+  save a flattened, straightened photo of just the document.
 
 ## Where ProCam comes from
 
@@ -112,6 +115,8 @@ Settings live in the app's menu and under **Settings → Apps → ProCam**.
 | **1x / 2x** | Zoom presets; 2x is a super-resolved crop, not a blurry upscale |
 | **⋯ menu** | Timer, aspect ratio (4:3 / 16:9), RAW files, grid, advanced options |
 | **Tap** | Focus and brightness at that point; drag the sun to adjust |
+| **QR chip** | Shown under a QR code; opens its link (or shows its text) |
+| **Document outline** | Shown around a page with the camera pointing down; a tap saves just the page, straightened |
 
 ## How the photo pipeline works
 
@@ -223,6 +228,8 @@ pre-releases.
   RAWfish's rough edges, valuable feedback and the lens shading calibration.
 - Tadi, for RAW bracketing
   ([licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt)).
+- Daniel Beer, for [quirc](https://github.com/dlbeer/quirc), which reads QR
+  codes in the viewfinder ([licenses/quirc-ISC.txt](licenses/quirc-ISC.txt)).
 - Jolla, for Jolla Camera.
 
 ## AI usage
@@ -236,5 +243,7 @@ welcome under the [AI Usage Policy](AI_USAGE_POLICY.md).
 
 BSD-3-Clause, inherited from Jolla Camera and RAWfish; the original copyright
 notices are kept in every file. RAW bracketing is MIT-licensed
-([licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt)). Full texts are
+([licenses/RawBracket-MIT.txt](licenses/RawBracket-MIT.txt)), quirc
+(`src/3rdparty/quirc`) ISC-licensed
+([licenses/quirc-ISC.txt](licenses/quirc-ISC.txt)). Full texts are
 in [LICENSES/](LICENSES) and [licenses/](licenses).

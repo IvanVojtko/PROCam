@@ -155,8 +155,9 @@ SettingsBase {
         // of switching to YUV frames (CameraExtensions.keepTryingRaw); for
         // testers collecting damaged frames.
         property bool keepTryingRaw: false
-        // Learned GPU denoise for noisy HDR and night photos (experimental).
-        property bool learnedDenoise: false
+        // Learned GPU denoise for noisy HDR and night photos; on by default
+        // from 1.4.0-beta.7 (an explicit off is kept).
+        property bool learnedDenoise: true
         property bool estimatedExposureMetering: false
         property bool showExposureStatus: false
         property bool focusPeaking: false
@@ -181,6 +182,11 @@ SettingsBase {
         // hardware HEIC encoder once finished). RAW mode keeps RAW files
         // next to the photo in this format.
         property string photoFormat: "jpeg"
+        // A JSON file next to each photo with its capture and processing
+        // details. It is always written (the EXIF comes from it); without
+        // this it is removed once the photo is finished. RAW + JSON files
+        // keep theirs (CameraExtensions.removePhotoInfo).
+        property bool savePhotoInfo: true
         // Lets tools/device-smoke-test.sh press the shutter over D-Bus
         // (com.procam.camera.ui.capture). Off unless the script runs.
         property bool smokeTestCapture: false
@@ -191,6 +197,10 @@ SettingsBase {
         // camera2Video size: "1080p", "1440p" or "2160p" (4K) where the camera
         // and the encoder take it (camera2VideoResolutions); otherwise 1080p.
         property string camera2VideoResolution: "1080p"
+        // camera2Video bitrate as a share of the full rate for the size and
+        // codec (camera2VideoBitrate): 1, 0.5, 0.25 or 0.125. Lower rates
+        // make smaller files, e.g. for sharing short clips.
+        property real camera2VideoBitrateScale: 1
         property bool advancedMode: false
         property string advancedCamera2CaptureFormat: "jpeg"
         property string advancedRawCaptureSize: "4096x3072"
@@ -215,7 +225,12 @@ SettingsBase {
         property int advancedRawCaptureColorTemperature: 0
         property int advancedRawCaptureColorTint: 0
 
-        property bool qrFilterEnabled: false
+        // QR codes in the photo viewfinder: a chip with the link (or text)
+        // to open.
+        property bool qrFilterEnabled: true
+        // Documents in the photo viewfinder (camera pointing down): outlined,
+        // a tap on the outline takes a flattened photo of just the page.
+        property bool documentDetection: true
         property bool colorFiltersEnabled: false
         property bool colorFiltersAllowed: true
 
@@ -478,8 +493,8 @@ SettingsBase {
         return camera2Capabilities.camera2BurstFormat(cameraId !== undefined ? cameraId : deviceId)
     }
 
-    // Frame rate cap while a camera with damaged RAW frames is retried
-    // (CameraExtensions.camera2PhotoMaxFps), 0 for none.
+    // Photo session frame rate cap (CameraExtensions.camera2PhotoMaxFps),
+    // 0 for none.
     function camera2PhotoMaxFps(cameraId) {
         void camera2RawRevision
         return camera2Capabilities.camera2PhotoMaxFps(cameraId !== undefined ? cameraId : deviceId)
@@ -525,6 +540,17 @@ SettingsBase {
         return resolution === "2160p" ? Qt.size(3840, 2160)
              : resolution === "1440p" ? Qt.size(2560, 1440)
              : Qt.size(1920, 1080)
+    }
+
+    // Encoder bitrate (bit/s) for a camera2Video recording: the full rate for
+    // the size and codec, times `scale` (camera2VideoBitrateScale; anything
+    // outside 0..1 counts as 1). HEVC needs about 30% fewer bits for the same
+    // picture; larger frames need fewer bits per pixel (Android's camera
+    // profiles alike).
+    function camera2VideoBitrate(resolution, codec, scale) {
+        var full = (resolution === "2160p" ? 48000000 : resolution === "1440p" ? 32000000 : 20000000)
+                * (codec === "hevc" ? 0.7 : 1)
+        return Math.round(full * (scale > 0 && scale <= 1 ? scale : 1))
     }
 
     function camera2PreviewOrientation(cameraId, fallback) {

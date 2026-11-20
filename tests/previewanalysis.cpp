@@ -121,6 +121,32 @@ int main()
     std::vector<uint8_t> even(W * H, 120), dark(W * H, 12);
     assert(!backlitSubject(view(even), &centre));
     assert(!backlitSubject(view(dark), &centre));
+    // Gyroscope: a hand's tremor (about 1 degree per second, alternating)
+    // is never still; a phone on a table (sensor noise of a few hundredths
+    // of a degree per second) is still after a second; a nudge starts over,
+    // and so does a gap in the readings.
+    const double pi = 3.14159265358979323846;
+    GyroMeter hand;
+    for (int i = 0; i < 100; ++i) {
+        const double s = std::sin(2 * pi * 9 * i / 50.0);
+        hand.update(0.8 * s, 0.6 * s, 0.2 * s, i * 20);
+    }
+    std::printf("gyro hand: tilt %.4f roll %.4f rad/s, still %lld ms\n", hand.tiltSpeed(), hand.rollSpeed(),
+                hand.stillMs());
+    assert(hand.tiltSpeed() > 0.005 && hand.tiltSpeed() < 0.02 && hand.stillMs() == 0);
+    GyroMeter table;
+    assert(table.tiltSpeed() < 0 && table.stillMs() == 0);
+    for (int i = 0; i < 75; ++i) table.update(0.03 * ((i % 3) - 1), 0.02, 0.01 * (i % 2), i * 20);
+    std::printf("gyro table: tilt %.4f rad/s, still %lld ms\n", table.tiltSpeed(), table.stillMs());
+    assert(table.tiltSpeed() < 0.003 && table.stillMs() >= 1400);
+    table.update(5, 0, 0, 1500);
+    table.update(5, 0, 0, 1520);
+    assert(table.stillMs() == 0);
+    table.reset();
+    table.update(0, 0, 0, 0);
+    table.update(0, 0, 0, 20);
+    table.update(0, 0, 0, 2000); // a gap: the sensor paused
+    assert(table.stillMs() == 0);
     std::printf("Preview analysis tests passed\n");
     return 0;
 }

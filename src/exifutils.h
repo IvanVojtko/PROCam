@@ -19,6 +19,13 @@ QByteArray originalJpegExif(const QString &path);
 // has no EXIF capture date.
 QByteArray heicExif(const QString &jpegPath, const QSize &size);
 bool writeJpegExifFromJsonFile(const QString &jpegPath, const QString &metadataPath, QString *error);
+// sourceJpeg's EXIF (as heicExif() makes it: GPS kept, orientation 1, the
+// given size) written into targetJpeg, a new upright image made from it.
+// True without writing when the source has no EXIF capture date.
+bool copyUprightJpegExif(const QString &sourceJpeg, const QString &targetJpeg, const QSize &size,
+                         QString *error);
+// The JPEG's 35 mm equivalent focal length (EXIF), 0 without one.
+int focalLength35mm(const QString &jpegPath);
 bool writeDngMetadata(TIFF *tiff, const QJsonObject &metadata, QString *error);
 }
 #endif

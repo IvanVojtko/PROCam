@@ -41,8 +41,8 @@ class DeclarativeCameraExtensions : public QObject
     Q_PROPERTY(bool keepBurstFrames MEMBER m_keepBurstFrames NOTIFY keepBurstFramesChanged)
     // Learned GPU denoise for noisy RAW merges (RawPipeline::RenderSettings).
     Q_PROPERTY(bool learnedDenoise MEMBER m_learnedDenoise NOTIFY learnedDenoiseChanged)
-    // A camera whose RAW frames came out damaged keeps taking RAW photos (at
-    // the retry frame rate) instead of switching to YUV frames: for testers.
+    // A camera whose RAW frames came out damaged keeps taking RAW photos
+    // instead of switching to YUV frames: for testers.
     // One value for the whole app, whichever instance sets it.
     Q_PROPERTY(bool keepTryingRaw READ keepTryingRaw WRITE setKeepTryingRaw NOTIFY keepTryingRawChanged)
 
@@ -82,7 +82,8 @@ public:
     Q_INVOKABLE QVariantMap camera2CameraRoles();
     // Burst input for HDR: "raw16", "yuv" (cameras without RAW) or "".
     Q_INVOKABLE QString camera2BurstFormat(const QString &cameraId);
-    // Session frame rate cap while damaged RAW output is retried, else 0.
+    // Photo session frame rate cap: 30 for a camera that can stream faster
+    // (or while damaged RAW output from an uncapped session is retried), else 0.
     Q_INVOKABLE int camera2PhotoMaxFps(const QString &cameraId);
     Q_INVOKABLE QStringList camera2FocusModeModel(const QString &cameraId);
     Q_INVOKABLE QStringList camera2SceneModel(const QString &cameraId);
@@ -199,6 +200,16 @@ public:
     // A finished JPEG photo becomes <base>.heic (HeicEncode) in the
     // background; heicConverted() follows, also on failure (JPEG kept).
     Q_INVOKABLE void convertToHeic(const QString &path, int jpegQuality);
+    // A document photo: the document at corners (normalised on the photo
+    // as saved, [x0, y0, ... x3, y3] clockwise from the top-left, as
+    // Camera2Preview.documentPhotoCorners() gives them) found again in the
+    // JPEG at path, flattened into an upright rectangle and saved in its
+    // place, EXIF kept. documentCropped follows (error empty on success;
+    // the photo stays whole otherwise).
+    Q_INVOKABLE void cropDocument(const QString &path, const QVariantList &corners, int jpegQuality);
+    // Removes the finished photo's <base>.json (its capture details, written
+    // for the EXIF) unless a RAW file of the same name needs it.
+    Q_INVOKABLE void removePhotoInfo(const QString &path);
 signals:
     void captureMirrorChanged();
     void rawBracketFrameReady(const QString &path);
@@ -211,6 +222,7 @@ signals:
     void burstRenderFailed(const QString &error);
     // heicPath is empty when the conversion failed and the JPEG stays.
     void heicConverted(const QString &jpegPath, const QString &heicPath, const QString &error);
+    void documentCropped(const QString &path, const QString &error);
     // The camera's RAW frames were found damaged: it now takes its photos
     // from YUV frames, so bindings on its capabilities must be re-read.
     void camera2RawDamaged(const QString &cameraId);
@@ -259,6 +271,7 @@ private:
     bool preserveRawCaptureFiles();
     bool stageRawBracketFrame();
     void clearRawImageCapture();
+    void removeWarmRawFrame();
     bool loadCamera2Capabilities(const QString &cameraId);
 
     enum RawCaptureStage {

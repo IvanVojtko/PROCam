@@ -2568,9 +2568,9 @@ struct preview_video_options {
 static struct preview_video_options g_preview_video;
 
 // Photo sessions: cap the frame rate (AE target range, also as session
-// parameters, when the sensor mode is chosen). The app sets it for a camera
-// that wrote damaged RAW frames: an Xperia 10 III streaming its viewfinder at
-// up to 45 fps wrote binned 2016x1136 frames into its full-size RAW buffer.
+// parameters, when the sensor mode is chosen). The app sets 30 for cameras
+// that can stream faster: an Xperia 10 III streaming its viewfinder at up to
+// 48 fps wrote binned 2016x1136 frames into its full-size RAW buffer.
 static int g_preview_max_fps;
 
 SFOS_CAMERA2_EXPORT void sfos_camera2_preview_set_max_fps(int fps)

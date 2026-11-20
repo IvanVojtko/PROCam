@@ -12,6 +12,7 @@
 #include "rawbracket.h"
 #include "rawpipeline.h"
 #include "rawpipelinemath.h"
+#include "scenescan.h"
 #include "videoencoderlimits.h"
 
 #include <QDir>
@@ -183,7 +184,7 @@ qint64 procamMsSinceProcessStart(); // camera2preview.cpp
 static const int Camera2RawDamageCheckVersion = 1;
 static int camera2RawDamageRevision = 0;
 // "Keep trying RAW" (Settings, for testers): a camera whose RAW came out
-// damaged stays with RAW, at the retry frame rate, instead of YUV frames.
+// damaged stays with RAW instead of YUV frames.
 static bool camera2KeepTryingRaw = false;
 
 static QString camera2RawDamagePath()
@@ -208,15 +209,21 @@ static QString camera2RawDamageFingerprint()
     return parts.join(QLatin1Char('|'));
 }
 
+// Photo sessions of a camera that can stream faster than this run capped at
+// it (camera2PhotoMaxFps): an Xperia 10 III streaming its viewfinder at up
+// to 48 fps wrote binned 2016x1136 frames into its full-size RAW buffer, from
+// a fast binned sensor mode, and applied a burst's exposure a few frames
+// late; at 30 fps both were fine. Cameras that never stream faster (Jolla
+// Phone 2) are not capped, so their sessions are as before.
+static const int Camera2PhotoFpsCap = 30;
+static int camera2AdvertisedMaxFps(const QString &cameraId);
+
 // Camera id -> why its RAW output was found damaged: {"reason", "fps_capped"}.
-// The first damaged frame starts a retry of RAW with the session capped at
-// Camera2RawRetryFps (an Xperia 10 III that streams its viewfinder at up to
-// 45 fps wrote binned 2016x1136 frames into its full-size RAW buffer, likely
-// from a fast binned sensor mode); damage again during that retry is final
-// and photos come from YUV frames. An entry from before the retry existed
-// (a plain reason string) counts as the first damage. Cameras whose RAW was
-// never damaged (Jolla Phone 2) have no entry and are never capped.
-static const int Camera2RawRetryFps = 30;
+// Damage at up to Camera2PhotoFpsCap (fps_capped) is final: photos come from
+// YUV frames. Damage from a faster session (a camera whose frame rates the
+// probe does not list, or an entry written before the cap was the default)
+// is retried capped first. An entry from before the retry existed (a plain
+// reason string) counts as damage from a faster session.
 static QJsonObject &camera2RawDamagedCameras()
 {
     static QJsonObject cameras;
@@ -242,17 +249,22 @@ static bool camera2RawUnusable(const QString &cameraId)
 }
 
 // Records damaged RAW output from frames captured with the session capped at
-// cappedFps (0: uncapped); true if it was damaged at the capped rate too, so
-// RAW is given up for the camera unless Keep trying RAW is on. Frames from
-// before the retry started (a burst still rendering) do not end it.
+// cappedFps (0: uncapped); true if the session ran at up to the cap, so RAW is
+// given up for the camera unless Keep trying RAW is on. A camera that never
+// streams faster than the cap ran at it anyway: a retry would change nothing.
+// Uncapped frames from before a retry started (a burst still rendering) do
+// not end it.
 static bool markCamera2RawDamaged(const QString &cameraId, const QString &reason, int cappedFps)
 {
     QJsonObject &cameras = camera2RawDamagedCameras();
     if (cameraId.isEmpty() || camera2RawUnusable(cameraId))
         return true;
-    if (cameras.contains(cameraId) && cappedFps <= 0)
+    const int advertised = camera2AdvertisedMaxFps(cameraId);
+    const int sessionFps = cappedFps > 0 ? cappedFps
+            : advertised > 0 && advertised <= Camera2PhotoFpsCap ? advertised : 0;
+    if (cameras.contains(cameraId) && sessionFps <= 0)
         return false;
-    const bool final = cameras.contains(cameraId);
+    const bool final = cameras.contains(cameraId) || sessionFps > 0;
     QJsonObject entry;
     entry.insert(QStringLiteral("reason"), reason);
     entry.insert(QStringLiteral("fps_capped"), final);
@@ -260,12 +272,12 @@ static bool markCamera2RawDamaged(const QString &cameraId, const QString &reason
     ++camera2RawDamageRevision;
     appendRawCaptureLog(!final
             ? QStringLiteral("raw-damaged camera=%1 reason=\"%2\" retrying RAW at up to %3 fps")
-                  .arg(cameraId, reason).arg(Camera2RawRetryFps)
+                  .arg(cameraId, reason).arg(Camera2PhotoFpsCap)
             : camera2KeepTryingRaw
-            ? QStringLiteral("raw-damaged camera=%1 reason=\"%2\" also at %3 fps, keep trying RAW is on")
-                  .arg(cameraId, reason).arg(Camera2RawRetryFps)
-            : QStringLiteral("raw-damaged camera=%1 reason=\"%2\" also at %3 fps, photos now from YUV frames")
-                  .arg(cameraId, reason).arg(Camera2RawRetryFps));
+            ? QStringLiteral("raw-damaged camera=%1 reason=\"%2\" at up to %3 fps, keep trying RAW is on")
+                  .arg(cameraId, reason).arg(sessionFps)
+            : QStringLiteral("raw-damaged camera=%1 reason=\"%2\" at up to %3 fps, photos now from YUV frames")
+                  .arg(cameraId, reason).arg(sessionFps));
     QJsonObject stored;
     stored.insert(QStringLiteral("fingerprint"), camera2RawDamageFingerprint());
     stored.insert(QStringLiteral("cameras"), cameras);
@@ -305,7 +317,7 @@ static const char *const Camera2RawRetryMessage =
         "This camera delivered damaged RAW frames. ProCam retries RAW at a lower "
         "frame rate; please take the photo again.";
 static const char *const Camera2RawKeepTryingMessage =
-        "This camera delivered damaged RAW frames again. Keep trying RAW is on, so "
+        "This camera delivered damaged RAW frames. Keep trying RAW is on, so "
         "ProCam stays with RAW; turn it off in Settings for photos from YUV frames.";
 
 // What the photo's failure tells the user: final is markCamera2RawDamaged's
@@ -682,6 +694,21 @@ static QJsonObject camera2ProbeCamera(const QByteArray &json,
         }
     }
     return QJsonObject();
+}
+
+// The highest frame rate among the camera's advertised auto-exposure target
+// ranges (the probe's video.ae_target_fps_ranges), 0 if not listed.
+static int camera2AdvertisedMaxFps(const QString &cameraId)
+{
+    const Camera2ProbeResult &probe = camera2Probe();
+    if (!probe.ok) return 0;
+    const QJsonArray ranges = camera2ProbeCamera(probe.json, cameraId.isEmpty() ? QStringLiteral("0") : cameraId)
+            .value(QStringLiteral("video")).toObject()
+            .value(QStringLiteral("ae_target_fps_ranges")).toArray();
+    int highest = 0;
+    for (const QJsonValue &range : ranges)
+        highest = std::max(highest, range.toArray().at(1).toInt());
+    return highest;
 }
 
 static QString camera2FocalLengthLabel(const QJsonObject &camera)
@@ -1962,8 +1989,11 @@ void DeclarativeCameraExtensions::setKeepTryingRaw(bool keep)
 
 int DeclarativeCameraExtensions::camera2PhotoMaxFps(const QString &cameraId)
 {
+    if (camera2AdvertisedMaxFps(cameraId) > Camera2PhotoFpsCap)
+        return Camera2PhotoFpsCap;
+    // Frame rates unknown: capped only to retry after damaged RAW.
     return camera2RawDamagedCameras().contains(cameraId) && !camera2RawUnusable(cameraId)
-            ? Camera2RawRetryFps : 0;
+            ? Camera2PhotoFpsCap : 0;
 }
 
 QString DeclarativeCameraExtensions::camera2BurstFormat(const QString &cameraId)
@@ -2075,6 +2105,21 @@ QVariantMap DeclarativeCameraExtensions::camera2BurstPlan(
     burstScene.subjectMotion = scene.value(QStringLiteral("subjectMotion"), 0.0).toDouble();
     burstScene.faceLuma = scene.value(QStringLiteral("faceLuma"), -1.0).toDouble();
     burstScene.faceClipped = scene.value(QStringLiteral("faceClipped"), 0.0).toDouble();
+    // Gyroscope speeds (radians per second) as image motion in frame widths
+    // per second: focal length over sensor width; turning about the lens
+    // axis moves the corners by about 0.6 frame widths per radian (half a
+    // 4:3 frame's diagonal). A typical main camera's ratio when the probe
+    // has no sensor size.
+    const double gyroTilt = scene.value(QStringLiteral("gyroTilt"), -1.0).toDouble();
+    const double gyroRoll = scene.value(QStringLiteral("gyroRoll"), -1.0).toDouble();
+    if (gyroTilt >= 0 && gyroRoll >= 0) {
+        const QJsonObject lens = cameraLensObject(m_camera2SelectedCamera);
+        const double focal = lens.value(QStringLiteral("focal_length_mm")).toDouble();
+        const double sensorWidth = lens.value(QStringLiteral("sensor_physical_size_mm")).toArray().at(0).toDouble();
+        const double frameScale = focal > 0 && sensorWidth > 0 ? focal / sensorWidth : 0.75;
+        burstScene.gyroMotion = std::hypot(gyroTilt * frameScale, gyroRoll * 0.625);
+        burstScene.stillSeconds = scene.value(QStringLiteral("stillMs"), 0.0).toDouble() / 1000.0;
+    }
     const RawPipeline::BurstPlan plan = RawPipeline::planBurst(
                 meteredShutterNs.toLongLong(), meteredIso, clipped, qint64(range[0].toDouble()),
                 maxShutter, int(camera2IsoMin(m_camera2SelectedCamera)),
@@ -2089,6 +2134,9 @@ QVariantMap DeclarativeCameraExtensions::camera2BurstPlan(
     result.insert(QStringLiteral("underexposureEv"), plan.underexposureEv);
     result.insert(QStringLiteral("clippedFraction"), clipped);
     result.insert(QStringLiteral("night"), night);
+    result.insert(QStringLiteral("tripod"), plan.tripod);
+    result.insert(QStringLiteral("gyroMotion"), burstScene.gyroMotion);
+    result.insert(QStringLiteral("stillSeconds"), burstScene.stillSeconds);
     return result;
 }
 
@@ -2790,6 +2838,7 @@ bool DeclarativeCameraExtensions::processRawImage(
 
     if (!preserveRawCaptureFiles()) {
         const QString error = m_rawCaptureErrors;
+        removeWarmRawFrame();
         clearRawImageCapture();
         emit rawImageCaptureFailed(error);
         return false;
@@ -2900,6 +2949,20 @@ int DeclarativeCameraExtensions::pendingRenders() const
     return m_burstJobs.size();
 }
 
+void DeclarativeCameraExtensions::removePhotoInfo(const QString &path)
+{
+    const QUrl url(path);
+    const QString photoPath = url.isLocalFile() ? url.toLocalFile() : path;
+    const QFileInfo info(photoPath);
+    const QString base = info.absolutePath() + QLatin1Char('/') + info.completeBaseName();
+    // RAW + JSON saving: the JSON describes the RAW file (preserveRawCaptureFiles).
+    for (const char *raw : {".raw16", ".raw10", ".yuv"}) {
+        if (QFileInfo::exists(base + QLatin1String(raw)))
+            return;
+    }
+    QFile::remove(jsonSidecarPath(photoPath));
+}
+
 void DeclarativeCameraExtensions::convertToHeic(const QString &path, int jpegQuality)
 {
     const QUrl url(path);
@@ -2926,6 +2989,95 @@ void DeclarativeCameraExtensions::convertToHeic(const QString &path, int jpegQua
         if (!HeicEncode::convertJpeg(jpegPath, helper, quality, &heicPath, &error))
             heicPath.clear();
         return QStringList{ heicPath, error, QString::number(timer.elapsed()) };
+    }));
+}
+
+// The document cut out of the JPEG at path and flattened (see
+// cropDocument()); an error, or empty when the JPEG was replaced.
+static QString cropDocumentFile(const QString &path, const SceneScan::Quad &shown, int quality,
+                                QString *details)
+{
+    QImageReader reader(path);
+    reader.setAutoTransform(true); // the corners are on the photo as seen
+    const QImage photo = reader.read();
+    if (photo.isNull())
+        return reader.errorString();
+    // Edges are found on a gray copy of at most 2048 px.
+    const QImage small = qMax(photo.width(), photo.height()) > 2048
+            ? photo.scaled(2048, 2048, Qt::KeepAspectRatio, Qt::SmoothTransformation) : photo;
+    const QImage gray = small.convertToFormat(QImage::Format_Grayscale8);
+    const PreviewAnalysis::LumaView luma{gray.constBits(), gray.width(), gray.height(),
+                                         int(gray.bytesPerLine()), 1};
+    // The phone may have moved between the tap and the exposure: the
+    // document the viewfinder outlined is looked for again near where it
+    // was, then fitted to its edges.
+    SceneScan::Document document;
+    const bool found = SceneScan::findDocument(luma, &document, &shown, 480);
+    SceneScan::Quad corners;
+    for (int i = 0; i < 4; ++i) {
+        const QPointF &p = found ? document.corners[i] : shown[i];
+        corners[i] = QPointF(p.x() * gray.width(), p.y() * gray.height());
+    }
+    const SceneScan::Quad rough = corners;
+    corners = SceneScan::refineCorners(gray, corners);
+    const bool refined = corners != rough;
+    for (QPointF &corner : corners)
+        corner = QPointF(corner.x() * photo.width() / gray.width(), corner.y() * photo.height() / gray.height());
+    // The camera's focal length gives the page its proportions even when
+    // seen almost straight on (35 mm equivalent: 43.27 mm diagonal).
+    const int focal35 = ExifUtils::focalLength35mm(path);
+    const double focal = focal35 > 0 ? focal35 / 43.2666 * std::hypot(photo.width(), photo.height()) : 0;
+    const QImage scan = SceneScan::rectified(photo, corners, qint64(photo.width()) * photo.height(), focal);
+    if (scan.isNull())
+        return QStringLiteral("Could not flatten the document");
+    *details = QStringLiteral("found=%1 refined=%2 focal35=%3 size=%4x%5")
+            .arg(found ? 1 : 0).arg(refined ? 1 : 0).arg(focal35).arg(scan.width()).arg(scan.height());
+    // Written beside the photo with its EXIF, then moved over it.
+    const QString part = path + QStringLiteral(".document");
+    QImageWriter writer(part, "jpeg");
+    writer.setQuality(quality);
+    QString error;
+    if (!writer.write(scan)) {
+        error = writer.errorString();
+    } else if (!ExifUtils::copyUprightJpegExif(path, part, scan.size(), &error)) {
+        if (error.isEmpty()) error = QStringLiteral("Could not copy the photo metadata");
+    } else if (::rename(QFile::encodeName(part).constData(), QFile::encodeName(path).constData()) != 0) {
+        error = QStringLiteral("Could not replace the photo");
+    }
+    if (!error.isEmpty())
+        QFile::remove(part);
+    return error;
+}
+
+void DeclarativeCameraExtensions::cropDocument(const QString &path, const QVariantList &corners, int jpegQuality)
+{
+    const QUrl url(path);
+    const QString jpegPath = url.isLocalFile() ? url.toLocalFile() : path;
+    SceneScan::Quad shown;
+    const bool valid = corners.size() == 8;
+    for (int i = 0; valid && i < 4; ++i)
+        shown[i] = QPointF(corners.at(2 * i).toDouble(), corners.at(2 * i + 1).toDouble());
+    const int quality = qBound(50, jpegQuality, 100);
+    // Behind HEIC conversions, at background priority, like them.
+    m_heicPool.setMaxThreadCount(1);
+    auto *watcher = new QFutureWatcher<QStringList>(this);
+    connect(watcher, &QFutureWatcher<QStringList>::finished, this, [this, watcher, jpegPath]() {
+        const QStringList result = watcher->result();
+        watcher->deleteLater();
+        const QString error = result.value(0);
+        appendRawCaptureLog(error.isEmpty()
+                            ? QStringLiteral("timing document ms=%1 %2 %3").arg(result.value(2), result.value(1), jpegPath)
+                            : QStringLiteral("document failed %1: %2").arg(jpegPath, error));
+        emit documentCropped(jpegPath, error);
+    });
+    watcher->setFuture(QtConcurrent::run(&m_heicPool, [jpegPath, shown, valid, quality]() {
+        setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 5);
+        QElapsedTimer timer;
+        timer.start();
+        QString details;
+        const QString error = valid ? cropDocumentFile(jpegPath, shown, quality, &details)
+                                    : QStringLiteral("No document corners");
+        return QStringList{ error, details, QString::number(timer.elapsed()) };
     }));
 }
 
@@ -3172,6 +3324,7 @@ void DeclarativeCameraExtensions::finishRawImageRender()
             emit camera2RawDamaged(cameraId);
             error = camera2RawDamageMessage(final, saved);
         }
+        removeWarmRawFrame();
         clearRawImageCapture();
         emit rawImageCaptureFailed(error);
         return;
@@ -3185,6 +3338,7 @@ void DeclarativeCameraExtensions::finishRawImageRender()
     const QString targetPath = m_rawCaptureTargetPath;
     QString imageError;
     if (!readableImageExists(targetPath, &imageError)) {
+        removeWarmRawFrame();
         clearRawImageCapture();
         emit rawImageCaptureFailed(imageError);
         return;
@@ -3194,6 +3348,7 @@ void DeclarativeCameraExtensions::finishRawImageRender()
         const QString error = m_rawCaptureErrors.isEmpty()
                 ? QStringLiteral("Could not save RAW metadata sidecar")
                 : m_rawCaptureErrors;
+        removeWarmRawFrame();
         clearRawImageCapture();
         emit rawImageCaptureFailed(error);
         return;
@@ -3202,12 +3357,14 @@ void DeclarativeCameraExtensions::finishRawImageRender()
     if (!ExifUtils::writeJpegExifFromJsonFile(targetPath,
                                               jsonSidecarPath(targetPath),
                                               &exifError)) {
+        removeWarmRawFrame();
         clearRawImageCapture();
         emit rawImageCaptureFailed(exifError);
         return;
     }
     qDebug() << "capture-timing app raw complete"
              << "t" << m_rawCaptureTimer.elapsed();
+    removeWarmRawFrame();
     clearRawImageCapture();
     emit rawImageCaptured(targetPath, QStringLiteral("image/jpeg"));
 }
@@ -4224,6 +4381,24 @@ bool DeclarativeCameraExtensions::stageRawBracketFrame()
         if (m_rawBracketDirectory && QFileInfo::exists(metadata)) emit rawBracketFrameReady(metadata);
     });
     return true;
+}
+
+// A single warm RAW frame is written next to the photo as
+// <photo>.warm.raw16 with its .warm.json and is done with once its render
+// finished or failed: a RAW the user keeps is a copy
+// (preserveRawCaptureFiles), so is a saved damaged frame. Bracket frames are
+// moved away when staged (stageRawBracketFrame).
+void DeclarativeCameraExtensions::removeWarmRawFrame()
+{
+    if (m_rawCaptureDirectory || !m_rawCapturePrefix.endsWith(QLatin1String(".warm")))
+        return;
+    const QString metadata = m_rawCapturePrefix + QLatin1String(".json");
+    QString error;
+    const QString raw = rawPathFromMetadata(metadata, &error);
+    if (error.isEmpty() && raw.startsWith(m_rawCapturePrefix + QLatin1Char('.')))
+        QFile::remove(raw);
+    QFile::remove(m_rawCapturePrefix + QLatin1String(".raw16"));
+    QFile::remove(metadata);
 }
 
 void DeclarativeCameraExtensions::clearRawImageCapture()

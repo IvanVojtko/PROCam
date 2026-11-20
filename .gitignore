@@ -74,6 +74,8 @@ ProCam_*.jpg
 ProCam_*.heic
 ProCam_*.mp4
 ProCam_*.json
+# Unprefixed names (yyyyMMdd_HHmmss) from 1.4.0-beta.7 on; tests/auto keeps its own.
+/[12][0-9][0-9][0-9][01][0-9][0-3][0-9]_[0-9]*
 /*.jpg
 /*.jpeg
 *.heic

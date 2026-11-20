@@ -985,6 +985,49 @@ private slots:
         QVERIFY(nightStill.exposureNs > 200000000 && nightStill.exposureNs <= 333333334);
         QVERIFY(nightSteady.exposureNs >= nightShaky.exposureNs);
         QVERIFY(nightShaky.exposureNs >= 66666666);
+        QVERIFY(!nightStill.tripod && !nightShaky.tripod);
+        // The gyroscope takes over in night mode: a steady hand by the
+        // gyroscope gets longer frames even when the dark viewfinder's
+        // shift estimate reads shaky (noise), and the reverse.
+        BurstScene gyroSteady = shaky;
+        gyroSteady.gyroMotion = 0.002;
+        BurstScene gyroShaky = steady;
+        gyroShaky.gyroMotion = 0.03;
+        BurstPlan nightGyroSteady = planBurst(70000000, 17912, 0.0, minT, maxT, 100, 19200, 16, false, true, gyroSteady);
+        BurstPlan nightGyroShaky = planBurst(70000000, 17912, 0.0, minT, maxT, 100, 19200, 16, false, true, gyroShaky);
+        QCOMPARE(nightGyroSteady.exposureNs, nightSteady.exposureNs);
+        QCOMPARE(nightGyroShaky.exposureNs, nightShaky.exposureNs);
+        // Outside night mode the viewfinder still decides.
+        QCOMPARE(planBurst(10000000, 3200, 0.0, minT, maxT, 50, 6400, 8, false, false, gyroSteady).exposureNs,
+                 roomShaky.exposureNs);
+        // On a tripod (still for a second by the gyroscope): frames of up
+        // to 1 s, about 10 s in all, at a lower ISO for the same light.
+        BurstScene tripod;
+        tripod.motion = 0.01;      // dark viewfinder, noisy shift estimate
+        tripod.gyroMotion = 0.001;
+        tripod.stillSeconds = 1.5;
+        BurstPlan nightTripod = planBurst(70000000, 17912, 0.0, minT, maxT, 100, 19200, 16, false, true, tripod);
+        qInfo("night tripod: %d frames of %.0f ms at ISO %d (handheld: %d of %.0f ms at ISO %d)", nightTripod.frames,
+              nightTripod.exposureNs / 1e6, nightTripod.iso, nightShaky.frames, nightShaky.exposureNs / 1e6,
+              nightShaky.iso);
+        QVERIFY(nightTripod.tripod);
+        QVERIFY(nightTripod.exposureNs > 333333334 && nightTripod.exposureNs <= 1000000000);
+        QVERIFY(nightTripod.iso < nightStill.iso);
+        QVERIFY(nightTripod.frames >= 4 && nightTripod.frames <= 16);
+        QVERIFY(nightTripod.frames * nightTripod.exposureNs / 1e9 <= 10.5);
+        // Not yet still long enough, a subject moving, or not night mode: no
+        // tripod schedule.
+        BurstScene settling = tripod;
+        settling.stillSeconds = 0.5;
+        BurstScene moving = tripod;
+        moving.subjectMotion = 0.2;
+        QVERIFY(!planBurst(70000000, 17912, 0.0, minT, maxT, 100, 19200, 16, false, true, settling).tripod);
+        BurstPlan nightMoving = planBurst(70000000, 17912, 0.0, minT, maxT, 100, 19200, 16, false, true, moving);
+        QVERIFY(!nightMoving.tripod && nightMoving.exposureNs <= 66666667);
+        QVERIFY(!planBurst(70000000, 17912, 0.0, minT, maxT, 100, 19200, 16, false, false, tripod).tripod);
+        // A camera whose longest exposure is shorter keeps to it.
+        BurstPlan shortSensor = planBurst(70000000, 17912, 0.0, minT, 400000000, 100, 19200, 16, false, true, tripod);
+        QVERIFY(shortSensor.tripod && shortSensor.exposureNs <= 400000000 && shortSensor.frames == 16);
         // A face in hard light gets headroom (a front-camera YUV selfie).
         BurstScene blownFace;
         blownFace.faceLuma = 0.9;
@@ -1113,6 +1156,155 @@ private slots:
         QVERIFY2(burstNear > 0.8 * burstFar, "dark halo next to the window");
     }
 
+    void noLightHaloAroundDarkObject()
+    {
+        // A dark tree against a bright overcast sky (device capture
+        // 2026-11-10, fog, exposures 3x apart): the sky next to it must be
+        // as bright as the sky far away, not lightened by the fusion.
+        const int w = 1024, h = 576;
+        const double shortGain = 5.66, longGain = 3 * shortGain;
+        const float sky = float(srgbDecode(0.65) / shortGain), tree = float(srgbDecode(0.2) / shortGain);
+        std::vector<float> luma(std::size_t(w) * h);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                luma[std::size_t(y) * w + x] = x >= 448 && x < 576 && y >= 160 ? tree : sky;
+        const std::vector<float> fused = fuseExposures(luma, w, h, shortGain, longGain);
+        auto mean = [&](int x0, int x1, int y0, int y1) {
+            double sum = 0;
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x) sum += fused[std::size_t(y) * w + x];
+            return sum / ((x1 - x0) * (y1 - y0));
+        };
+        const double far = mean(16, 112, 300, 400);
+        const double beside = mean(400, 440, 300, 400); // 8-48 px left of the tree
+        const double above = mean(480, 544, 100, 150);  // 10-60 px above it
+        const double treeLevel = mean(480, 544, 300, 400);
+        qInfo("sky far %.3f, beside the tree %.3f, above it %.3f; tree %.3f", far, beside, above, treeLevel);
+        QVERIFY2(std::abs(far - 0.65) < 0.02, "flat sky changed");
+        QVERIFY2(beside - far < 0.02, "light halo beside a dark object");
+        QVERIFY2(above - far < 0.02, "light halo above a dark object");
+        QVERIFY2(treeLevel > 0.3, "dark object no longer lifted");
+    }
+
+    void tileNoiseFollowsRejection()
+    {
+        // A static noisy scene with a small light that is on only in some
+        // frames: the tiles around it average fewer frames, the rest about
+        // as many as robust merging of pure noise does.
+        const int w = 256, h = 192, count = 8;
+        const double s = 1e-3, o = 4e-5;
+        std::mt19937 random(5);
+        std::normal_distribution<double> normal(0.0, 1.0);
+        std::vector<Planes> frames(count);
+        for (int z = 0; z < count; ++z) {
+            Planes &f = frames[z];
+            f.width = w;
+            f.height = h;
+            f.clip = 1.0f;
+            for (int p = 0; p < 4; ++p) {
+                f.phase[p].resize(std::size_t(w) * h);
+                for (int y = 0; y < h; ++y)
+                    for (int x = 0; x < w; ++x) {
+                        const bool lit = z % 2 == 0 && y >= 92 && y < 100 && x >= 124 && x < 132;
+                        const double signal = lit ? 0.6 : 0.02 + 0.01 * std::sin(x * 0.2) * std::cos(y * 0.15);
+                        f.phase[p][std::size_t(y) * w + x] = float(signal + std::sqrt(s * signal + o) * normal(random));
+                    }
+            }
+        }
+        std::vector<const Planes *> pointers;
+        for (const Planes &f : frames) pointers.push_back(&f);
+        NoiseModel noise;
+        QVERIFY(noiseFromProfile({s, o}, &noise));
+        MergeOptions options;
+        options.spatialStrength = 0;
+        MergeStats stats;
+        merge(pointers, std::vector<Alignment>(count - 1), noise, options, &stats);
+        QCOMPARE(stats.tilesX, mergeTileCount(w));
+        QCOMPARE(stats.tilesY, mergeTileCount(h));
+        QCOMPARE(int(stats.tileFrames.size()), stats.tilesX * stats.tilesY);
+        std::vector<float> sorted = stats.tileFrames;
+        std::sort(sorted.begin(), sorted.end());
+        const float median = sorted[sorted.size() / 2];
+        // Tile (16, 12) is centred on the light (plane 128, 96).
+        const float atLight = stats.tileFrames[std::size_t(12) * stats.tilesX + 16];
+        qInfo("tile frames: median %.2f of %d, at the light %.2f", median, count, atLight);
+        QVERIFY(median > 0.6 * count && median <= count);
+        // Not 1: at frequencies where the square's difference has zeros the
+        // frames still merge.
+        QVERIFY(atLight < 0.75 * median);
+        const std::vector<float> relative = relativeTileNoise(stats);
+        QVERIFY(*std::min_element(relative.begin(), relative.end()) >= 1.0f);
+        QVERIFY(relative[std::size_t(12) * stats.tilesX + 16] > 1.3f);
+        QVERIFY(relative[std::size_t(3) * stats.tilesX + 3] < 1.3f);
+
+        // Per pixel: the windows sum to 1, so a flat map stays flat and one
+        // raised tile raises its centre most.
+        const std::vector<float> flat = tileMapToPixels(std::vector<float>(relative.size(), 1.5f), w, h);
+        for (float v : flat) QVERIFY(std::abs(v - 1.5f) < 1e-5f);
+        std::vector<float> one(relative.size(), 1.0f);
+        one[std::size_t(12) * stats.tilesX + 16] = 3.0f;
+        const std::vector<float> pixels = tileMapToPixels(one, w, h);
+        QVERIFY(pixels[std::size_t(96) * w + 128] > 2.9f); // its centre: origin (120, 88) + 8
+        QCOMPARE(pixels[std::size_t(88) * w + 100], 1.0f);
+        QCOMPARE(pixels[std::size_t(60) * w + 120], 1.0f);
+    }
+
+    void shadowCleanupReachesSmallLights()
+    {
+        // A dark noisy wall with a small bright light: the cleanup must clean
+        // the wall right next to it about as well as far from it (a light
+        // dominates its tiles' spectra), and leave the light as it was.
+        const int w = 256, h = 192;
+        const double s = 2e-3, o = 1e-4, dark = 0.01;
+        Planes planes;
+        planes.width = w;
+        planes.height = h;
+        planes.clip = 1.0f;
+        std::mt19937 random(12);
+        std::normal_distribution<double> normal(0.0, 1.0);
+        auto lit = [](int x, int y) { return x >= 124 && x < 132 && y >= 92 && y < 100; };
+        for (int p = 0; p < 4; ++p) {
+            planes.phase[p].resize(std::size_t(w) * h);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const double signal = lit(x, y) ? 0.8 : dark;
+                    planes.phase[p][std::size_t(y) * w + x] = float(signal + std::sqrt(s * signal + o) * normal(random));
+                }
+        }
+        const Planes before = planes;
+        NoiseModel noise;
+        QVERIFY(noiseFromProfile({s, o}, &noise));
+        shadowCleanup(&planes, noise, 0.5, 0.05, 0.2);
+        // Grain in a ring 3-11 pixels from the light, and far from it.
+        auto spread = [&](const Planes &p, bool nearLight) {
+            double sum = 0, sum2 = 0;
+            int n = 0;
+            for (int y = 16; y < h - 16; ++y)
+                for (int x = 16; x < w - 16; ++x) {
+                    const int dx = std::max({124 - x, x - 131, 0}), dy = std::max({92 - y, y - 99, 0});
+                    const int d = std::max(dx, dy);
+                    if (nearLight ? (d < 3 || d > 11) : d < 40) continue;
+                    const double v = p.phase[0][std::size_t(y) * w + x];
+                    sum += v;
+                    sum2 += v * v;
+                    ++n;
+                }
+            return std::sqrt(std::max(0.0, sum2 / n - (sum / n) * (sum / n)));
+        };
+        const double nearBefore = spread(before, true), nearAfter = spread(planes, true);
+        const double farBefore = spread(before, false), farAfter = spread(planes, false);
+        qInfo("cleanup next to a small light: grain %.5f -> %.5f, far %.5f -> %.5f", nearBefore, nearAfter,
+              farBefore, farAfter);
+        QVERIFY(farAfter < 0.75 * farBefore);
+        QVERIFY2(nearAfter < 1.15 * farAfter, "the wall next to the light keeps its grain");
+        for (int p = 0; p < 4; ++p)
+            for (int y = 92; y < 100; ++y)
+                for (int x = 124; x < 132; ++x) {
+                    const std::size_t i = std::size_t(y) * w + x;
+                    QCOMPARE(planes.phase[p][i], before.phase[p][i]);
+                }
+    }
+
     void spatialDenoiseSingleFrame()
     {
         const Scene scene = detailScene(512, 384);
@@ -1132,6 +1324,57 @@ private slots:
         qInfo("single-frame spatial denoise rms %.5f -> %.5f (two-step %.5f)", before, after, pilot);
         QVERIFY(after < before * 0.8);
         QVERIFY2(pilot < after * 0.9, "two-step Wiener should beat the light single pass");
+    }
+
+    void shadowCleanupOnlyInShadows()
+    {
+        // Left half a dark wall, right half a bright one, both with grain;
+        // the cleanup removes most of it on the left and leaves the right
+        // half exactly as it was.
+        const int w = 256, h = 128;
+        const double s = 2e-3, o = 1e-4, dark = 0.01, bright = 0.4;
+        Planes planes;
+        planes.width = w;
+        planes.height = h;
+        planes.clip = 1.0f;
+        std::mt19937 random(11);
+        std::normal_distribution<double> normal(0.0, 1.0);
+        for (int p = 0; p < 4; ++p) {
+            planes.phase[p].resize(std::size_t(w) * h);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const double signal = x < w / 2 ? dark : bright;
+                    planes.phase[p][std::size_t(y) * w + x] = float(signal + std::sqrt(s * signal + o) * normal(random));
+                }
+        }
+        const Planes before = planes;
+        NoiseModel noise;
+        QVERIFY(noiseFromProfile({s, o}, &noise));
+        shadowCleanup(&planes, noise, 0.5, 0.05, 0.2);
+        auto spread = [&](const Planes &p, int x0, int x1) {
+            double sum = 0, sum2 = 0;
+            int n = 0;
+            for (int y = 16; y < h - 16; ++y)
+                for (int x = x0; x < x1; ++x) {
+                    const double v = p.phase[0][std::size_t(y) * w + x];
+                    sum += v;
+                    sum2 += v * v;
+                    ++n;
+                }
+            return std::sqrt(std::max(0.0, sum2 / n - (sum / n) * (sum / n)));
+        };
+        const double darkBefore = spread(before, 16, w / 2 - 16), darkAfter = spread(planes, 16, w / 2 - 16);
+        qInfo("shadow cleanup: dark grain %.5f -> %.5f", darkBefore, darkAfter);
+        // A light pass: on grain exactly as strong as the noise model it
+        // takes about 40% off (after the learned denoiser, whose output has
+        // far less grain than the model, about two thirds).
+        QVERIFY(darkAfter < 0.75 * darkBefore);
+        for (int p = 0; p < 4; ++p)
+            for (int y = 0; y < h; ++y)
+                for (int x = w / 2 + 16; x < w; ++x) {
+                    const std::size_t i = std::size_t(y) * w + x;
+                    QCOMPARE(planes.phase[p][i], before.phase[p][i]);
+                }
     }
 
     void finishKeepsHighlightsAndLiftsShadows()
@@ -1188,6 +1431,40 @@ private slots:
         const double r = meanRegion(clipped, 0, 0, w, h / 3, 0), g = meanRegion(clipped, 0, 0, w, h / 3, 1),
                 b = meanRegion(clipped, 0, 0, w, h / 3, 2);
         QVERIFY2(std::abs(r - g) < 8 && std::abs(b - g) < 8, qPrintable(QStringLiteral("%1 %2 %3").arg(r).arg(g).arg(b)));
+    }
+
+    void nightLiftFollowsLight()
+    {
+        // The cap itself: full 8x with enough light, about 4x at a
+        // signal-to-noise of 1, never below 1.25x; unknown noise keeps 8x.
+        QCOMPARE(nightLiftCap(-1), 8.0);
+        QCOMPARE(nightLiftCap(8), 8.0);
+        QCOMPARE(nightLiftCap(4), 8.0);
+        QCOMPARE(nightLiftCap(1), 4.0);
+        QCOMPARE(nightLiftCap(0.25), 2.0);
+        QCOMPARE(nightLiftCap(0), 1.25);
+
+        // A room with the lights off (key about 0.002, as in a real 16-frame
+        // ISO 19200 night burst), once with clean merged frames and once
+        // with that burst's measured noise (per frame 3.8e-3 * signal +
+        // 3.7e-5, about 13 frames' worth merged): the noisy one is lifted
+        // less, the clean one keeps night mode's full lift.
+        const Scene scene = detailScene(384, 256);
+        const Planes planes = toPlanes(mosaicFrame(scene, 0, 0, 0, 0.005, 0, 0, 3), 1.0);
+        FinishOptions options = finishOptions(0);
+        options.night = true;
+        FinishStats clean, noisy;
+        QVERIFY(noiseFromProfile({1e-6, 1e-9}, &options.mergedNoise));
+        finish(planes, options, &clean);
+        QVERIFY(noiseFromProfile({3.8e-3 / 13, 3.7e-5 / 13}, &options.mergedNoise));
+        finish(planes, options, &noisy);
+        qInfo("night lift: key %.4f, clean snr %.1f cap %.2f long gain %.2f, noisy snr %.2f cap %.2f long gain %.2f",
+              clean.keyLevel, clean.keySnr, clean.nightLiftCap, clean.longGain, noisy.keySnr, noisy.nightLiftCap,
+              noisy.longGain);
+        QCOMPARE(clean.nightLiftCap, 8.0);
+        QVERIFY(noisy.keySnr > 0 && noisy.keySnr < 4);
+        QVERIFY(noisy.nightLiftCap < 8.0);
+        QVERIFY(noisy.longGain < 0.8 * clean.longGain);
     }
 
     void raisrBeatsBilinear()

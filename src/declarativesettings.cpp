@@ -349,8 +349,9 @@ void DeclarativeSettings::verifyCapturePrefix()
     const QDateTime currentDate = QDateTime::currentDateTime();
     if (m_prefixDate != currentDate) {
         m_prefixDate = currentDate;
-        m_prefix = QLatin1String("ProCam_")
-                + QLocale::c().toString(currentDate, QLatin1String("yyyyMMdd_HHmmss"));
+        // Plain yyyyMMdd_HHmmss, which photo tools read the date from
+        // (before 1.4.0-beta.7: ProCam_yyyyMMdd_HHmmss).
+        m_prefix = QLocale::c().toString(currentDate, QLatin1String("yyyyMMdd_HHmmss"));
     }
 }
 

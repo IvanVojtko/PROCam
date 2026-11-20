@@ -160,9 +160,10 @@ NoiseEstimate estimateNoise(const Tensor &planes, const std::array<double, 4> &s
 }
 
 Tensor networkInput(const Tensor &planes, const std::array<double, 4> &scale, const std::array<double, 4> &offset,
-                    const NoiseEstimate &noise, double gain, double *norm)
+                    const NoiseEstimate &noise, double gain, double *norm, const std::vector<float> *noiseScale)
 {
     const int w = planes.width, h = planes.height;
+    const float *relative = noiseScale && noiseScale->size() == std::size_t(w) * h ? noiseScale->data() : nullptr;
     *norm = noise.level * gain;
     const float toZ = float(gain / *norm);
     Tensor z;
@@ -194,7 +195,9 @@ Tensor networkInput(const Tensor &planes, const std::array<double, 4> &scale, co
                 float sum = 0;
                 for (int k = a; k <= b; ++k) sum += rows[std::size_t(k) * w + i];
                 const float mean = std::max(0.0f, sum / float(b - a + 1));
-                zs[std::size_t(y) * w + i] = std::sqrt(std::max(s * mean + o, 1e-10f)) * ratio * toZ;
+                const float variance = std::max(s * mean + o, 1e-10f)
+                        * (relative ? relative[std::size_t(y) * w + i] : 1.0f);
+                zs[std::size_t(y) * w + i] = std::sqrt(variance) * ratio * toZ;
             }
         }
     });
@@ -736,7 +739,8 @@ bool runGpu(const Model &model, const Tensor &z, double norm, Tensor *out, GpuSt
 }
 
 bool denoisePlanes(const Model &model, Tensor *planes, const std::array<double, 4> &scale,
-                   const std::array<double, 4> &offset, double gain, QJsonObject *info, QString *error)
+                   const std::array<double, 4> &offset, double gain, QJsonObject *info, QString *error,
+                   const std::vector<float> *noiseScale)
 {
     QElapsedTimer timer;
     timer.start();
@@ -745,20 +749,29 @@ bool denoisePlanes(const Model &model, Tensor *planes, const std::array<double, 
     // area, the rest (at most 3 rows and columns) stays as it is.
     const int w = planes->width & ~3, h = planes->height & ~3;
     Tensor crop = *planes;
+    const bool fullScale = noiseScale && noiseScale->size() == std::size_t(planes->width) * planes->height;
+    std::vector<float> cropScale;
     if (w != planes->width || h != planes->height) {
         crop = makeTensor(4, w, h);
         for (int c = 0; c < 4; ++c)
             for (int y = 0; y < h; ++y)
                 std::memcpy(crop.plane(c) + std::size_t(y) * w, planes->plane(c) + std::size_t(y) * planes->width,
                             sizeof(float) * std::size_t(w));
+        if (fullScale) {
+            cropScale.resize(std::size_t(w) * h);
+            for (int y = 0; y < h; ++y)
+                std::memcpy(cropScale.data() + std::size_t(y) * w,
+                            noiseScale->data() + std::size_t(y) * planes->width, sizeof(float) * std::size_t(w));
+        }
     }
+    const std::vector<float> *scaleMap = !fullScale ? nullptr : cropScale.empty() ? noiseScale : &cropScale;
     const NoiseEstimate noise = estimateNoise(crop, scale, offset);
     if (!(noise.level > 0) || !std::isfinite(noise.level)) {
         *error = QStringLiteral("Cannot estimate the noise level");
         return false;
     }
     double norm = 1;
-    const Tensor z = networkInput(crop, scale, offset, noise, gain, &norm);
+    const Tensor z = networkInput(crop, scale, offset, noise, gain, &norm, scaleMap);
     const qint64 prepareMs = timer.restart();
     Tensor result;
     GpuStats stats;

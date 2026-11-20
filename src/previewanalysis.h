@@ -157,6 +157,59 @@ private:
     double m_motion = -1.0, m_subject = 0.0;
 };
 
+// Hand shake from the gyroscope, smoothed over about a quarter of a second
+// like MotionMeter, and how long the phone has been still (a tripod or a
+// table). It measures the hand directly, also in the dark, where
+// MotionMeter's shift estimate also sees noise.
+class GyroMeter
+{
+public:
+    // Below this (radians per second, about 0.17 degrees per second) the
+    // phone counts as still: steadier than a hand holds it.
+    static constexpr double StillSpeed = 0.003;
+
+    void reset()
+    {
+        m_ms = -1;
+        m_tilt = m_roll = -1.0;
+        m_stillMs = 0;
+    }
+
+    // Turning about the two axes across the lens (moves the image) and
+    // about the lens axis (rotates it), radians per second; -1 until the
+    // first reading.
+    double tiltSpeed() const { return m_tilt; }
+    double rollSpeed() const { return m_roll; }
+    // How long the speed has stayed below StillSpeed.
+    long long stillMs() const { return m_stillMs; }
+
+    // One reading in degrees per second (QtSensors' gyroscope): x and y
+    // across the screen, z out of it, along the back camera's axis.
+    void update(double x, double y, double z, long long ms)
+    {
+        const double toRadians = 3.14159265358979323846 / 180.0;
+        const double tilt = std::hypot(x, y) * toRadians, roll = std::abs(z) * toRadians;
+        const long long dt = m_ms >= 0 ? ms - m_ms : -1;
+        m_ms = ms;
+        if (m_tilt < 0 || dt < 0 || dt > 500) {
+            // First reading, or a gap (the sensor paused): start over.
+            m_tilt = tilt;
+            m_roll = roll;
+            m_stillMs = 0;
+            return;
+        }
+        const double alpha = 1.0 - std::exp(-double(dt) / 250.0);
+        m_tilt += alpha * (tilt - m_tilt);
+        m_roll += alpha * (roll - m_roll);
+        m_stillMs = std::hypot(m_tilt, m_roll) < StillSpeed ? m_stillMs + dt : 0;
+    }
+
+private:
+    long long m_ms = -1;
+    double m_tilt = -1.0, m_roll = -1.0;
+    long long m_stillMs = 0;
+};
+
 struct FaceExposure {
     int count = 0;
     double luma = -1.0;    // mean of the largest face's centre, 0..1

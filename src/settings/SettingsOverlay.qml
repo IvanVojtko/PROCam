@@ -1013,8 +1013,8 @@ PinchArea {
                     // ProCam's recorder ignores gst-droid's flash, ISO and
                     // exposure modes.
                     return Settings.camera2VideoResolutions(captureView.camera2Viewfinder.cameraId).length > 1
-                            ? [ "timer", "resolution", "codec", "grid" ]
-                            : [ "timer", "codec", "grid" ]
+                            ? [ "timer", "resolution", "codec", "bitrate", "grid" ]
+                            : [ "timer", "codec", "bitrate", "grid" ]
                 }
                 if (camera2Still) {
                     if (!Settings.global.advancedMode) {
@@ -1112,6 +1112,7 @@ PinchArea {
                 case "ratio": return aspectSettingComponent
                 case "codec": return videoCodecSettingComponent
                 case "resolution": return videoResolutionSettingComponent
+                case "bitrate": return videoBitrateSettingComponent
                 case "rawSave": return rawSaveSettingComponent
                 case "speed": return speedSettingComponent
                 case "size": return sizeSettingComponent
@@ -1422,6 +1423,36 @@ PinchArea {
                     caption: "Codec"
                     valueLabel: function(value) { return value === "hevc" ? "HEVC" : "H.264" }
                     model: [ "avc", "hevc" ]
+                }
+            }
+
+            // Lower bitrates for smaller files (short clips to share): shares
+            // of the full rate for the current size and codec, in Mbit/s.
+            Component {
+                id: videoBitrateSettingComponent
+                TextSettingMenu {
+                    width: grid.menuWidth
+                    function bitrate(scale) {
+                        var viewfinder = captureView.camera2Viewfinder
+                        return Settings.camera2VideoBitrate(viewfinder ? viewfinder.videoResolution : "1080p",
+                                                            Settings.global.camera2VideoCodec, scale)
+                    }
+                    function mbit(scale) {
+                        var rate = bitrate(scale) / 1000000
+                        return rate >= 10 ? Math.round(rate).toString() : (Math.round(rate * 10) / 10).toString()
+                    }
+                    // With the 128 kbit/s audio track.
+                    title: {
+                        var scale = Settings.global.camera2VideoBitrateScale
+                        return mbit(scale) + " Mbit/s, about "
+                                + Math.round((bitrate(scale) + 128000) * 60 / 8 / 1000000) + " MB a minute"
+                    }
+                    header: upperHeader
+                    settings: Settings.global
+                    property: "camera2VideoBitrateScale"
+                    caption: "Bitrate"
+                    valueLabel: function(value) { return mbit(value) }
+                    model: [ 1, 0.5, 0.25, 0.125 ]
                 }
             }
 

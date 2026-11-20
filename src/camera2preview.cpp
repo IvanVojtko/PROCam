@@ -17,6 +17,7 @@
 #include <QMap>
 #include <QMetaObject>
 #include <QPointer>
+#include <QPolygonF>
 #include <QQuickWindow>
 #include <QSGSimpleTextureNode>
 #include <QSGTexture>
@@ -164,6 +165,16 @@ Camera2Preview::Camera2Preview(QQuickItem *parent)
     connect(&m_recordingStopTimer, &QTimer::timeout, this, [this]() {
         finishRecording(false, QStringLiteral("Recording did not finish"));
     });
+    m_scanPool.setMaxThreadCount(1);
+    // The QR chip and the document outline follow the drawn frame.
+    for (void (Camera2Preview::*changed)() : {&Camera2Preview::contentRectChanged,
+                                              &Camera2Preview::orientationChanged,
+                                              &Camera2Preview::mirrorChanged}) {
+        connect(this, changed, this, [this]() {
+            if (!m_qrCode.isEmpty()) emit qrCodeChanged();
+            if (m_documentHits >= 2) emit documentChanged();
+        });
+    }
 }
 
 Camera2Preview::~Camera2Preview()
@@ -216,6 +227,7 @@ void Camera2Preview::setCameraId(const QString &cameraId)
     }
     m_cameraId = effectiveId;
     stop();
+    clearScan();
     // Keep a blurred, dimmed last frame until the new camera delivers one,
     // instead of a blank or jumping viewfinder.
     // Stored as shown (the next camera may be mounted the other way round).
@@ -1061,6 +1073,284 @@ QPointF Camera2Preview::mapToSensor(qreal x, qreal y) const
     return QPointF(qBound<qreal>(0.0, sensorX, 1.0), qBound<qreal>(0.0, sensorY, 1.0));
 }
 
+QPointF Camera2Preview::mapFromFrame(const QPointF &point) const
+{
+    QRectF drawRect, sourceRect;
+    const QSize shown = displaySize();
+    if (!frameGeometry(shown, &drawRect, &sourceRect)
+            || sourceRect.width() <= 0 || sourceRect.height() <= 0) {
+        return QPointF(-1, -1);
+    }
+    // The display rotates the frame by m_orientation, then mirrors it.
+    qreal u = point.x(), v = point.y();
+    switch (((m_orientation % 360) + 360) % 360) {
+    case 90: u = 1.0 - point.y(); v = point.x(); break;
+    case 180: u = 1.0 - point.x(); v = 1.0 - point.y(); break;
+    case 270: u = point.y(); v = 1.0 - point.x(); break;
+    default: break;
+    }
+    if (m_mirror) {
+        u = 1.0 - u;
+    }
+    // Displayed frame (normalised) -> item, through the zoom crop.
+    return QPointF(drawRect.x() + (u * shown.width() - sourceRect.x()) / sourceRect.width() * drawRect.width(),
+                   drawRect.y() + (v * shown.height() - sourceRect.y()) / sourceRect.height() * drawRect.height());
+}
+
+void Camera2Preview::setQrDetection(bool enabled)
+{
+    if (m_qrDetection == enabled) {
+        return;
+    }
+    m_qrDetection = enabled;
+    if (!enabled && !m_qrCode.isEmpty()) {
+        m_qrCode.clear();
+        emit qrCodeChanged();
+    }
+    emit qrDetectionChanged();
+}
+
+void Camera2Preview::setDocumentDetection(bool enabled)
+{
+    if (m_documentDetection == enabled) {
+        return;
+    }
+    m_documentDetection = enabled;
+    if (!enabled) {
+        const bool shown = m_documentHits >= 2;
+        m_documentHits = 0;
+        m_documentMisses = 0;
+        if (shown) emit documentChanged();
+    }
+    emit documentDetectionChanged();
+}
+
+QRectF Camera2Preview::qrRect() const
+{
+    if (m_qrCode.isEmpty()) {
+        return QRectF();
+    }
+    QPolygonF polygon;
+    for (const QPointF &corner : m_qrCorners)
+        polygon << mapFromFrame(corner);
+    return polygon.boundingRect();
+}
+
+QVariantList Camera2Preview::documentCorners() const
+{
+    QVariantList corners;
+    if (m_documentHits >= 2) {
+        for (const QPointF &corner : m_document)
+            corners.append(mapFromFrame(corner));
+    }
+    return corners;
+}
+
+bool Camera2Preview::documentContains(qreal x, qreal y) const
+{
+    if (m_documentHits < 2) {
+        return false;
+    }
+    QPolygonF polygon;
+    for (const QPointF &corner : m_document)
+        polygon << mapFromFrame(corner);
+    return polygon.containsPoint(QPointF(x, y), Qt::OddEvenFill);
+}
+
+QVariantList Camera2Preview::documentPhotoCorners(int captureRotation) const
+{
+    if (m_documentHits < 2 || !hasFrame()) {
+        return QVariantList();
+    }
+    // As saveThumbnail() turns the frame into the photo: rotated, mirrored,
+    // cropped to the photo shape, then to the zoom.
+    const QSizeF frame = frameSize();
+    const QTransform rotation = QTransform().rotate(captureRotation);
+    const QRectF rotated = rotation.mapRect(QRectF(QPointF(0, 0), frame));
+    const QRectF photo = photoAspectRect(rotated.size(), m_photoAspect);
+    const qreal zoom = frameCropZoom();
+    SceneScan::Quad corners;
+    for (int i = 0; i < 4; ++i) {
+        QPointF point = rotation.map(QPointF(m_document[i].x() * frame.width(),
+                                             m_document[i].y() * frame.height())) - rotated.topLeft();
+        if (m_captureMirror) {
+            point.setX(rotated.width() - point.x());
+        }
+        qreal u = (point.x() - photo.x()) / photo.width(), v = (point.y() - photo.y()) / photo.height();
+        if (zoom > 1.01) {
+            u = (u - 0.5) * zoom + 0.5;
+            v = (v - 0.5) * zoom + 0.5;
+        }
+        corners[i] = QPointF(qBound<qreal>(0.0, u, 1.0), qBound<qreal>(0.0, v, 1.0));
+    }
+    QVariantList list;
+    for (const QPointF &corner : SceneScan::clockwise(corners))
+        list << corner.x() << corner.y();
+    return list;
+}
+
+namespace {
+
+struct ScanResult {
+    bool qrScanned = false;
+    bool documentScanned = false;
+    bool documentFound = false;
+    std::vector<SceneScan::QrCode> codes;
+    SceneScan::Document document;
+    // Time spent, for preview-stats.
+    qint64 qrNs = 0, documentNs = 0;
+};
+
+// quad's corners in the order (cyclic) that best matches reference's; the
+// mean corner distance in *distance.
+SceneScan::Quad aligned(const SceneScan::Quad &quad, const SceneScan::Quad &reference, double *distance)
+{
+    SceneScan::Quad best = quad;
+    *distance = -1;
+    for (int shift = 0; shift < 4; ++shift) {
+        SceneScan::Quad candidate;
+        double sum = 0;
+        for (int i = 0; i < 4; ++i) {
+            candidate[i] = quad[(i + shift) % 4];
+            sum += std::hypot(candidate[i].x() - reference[i].x(), candidate[i].y() - reference[i].y());
+        }
+        if (*distance < 0 || sum / 4 < *distance) {
+            *distance = sum / 4;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+}
+
+void Camera2Preview::startScan()
+{
+    m_scanTimer.restart();
+    // Documents five times a second, QR codes every other time (decoding a
+    // full frame costs several times more).
+    const bool qr = m_qrDetection && m_scanCount % 2 == 0;
+    const bool document = m_documentDetection;
+    ++m_scanCount;
+    if ((!qr && !document) || !hasFrame() || m_frameDisplayOriented) {
+        return;
+    }
+    // The frame data is shared, never modified once parsed.
+    const QByteArray yuv = m_yuvFrame;
+    const QImage rgb = m_frame;
+    const QSize size = frameSize();
+    const quint64 generation = m_scanGeneration;
+    m_scanRunning = true;
+    auto *watcher = new QFutureWatcher<ScanResult>(this);
+    connect(watcher, &QFutureWatcher<ScanResult>::finished, this, [this, watcher, generation]() {
+        const ScanResult result = watcher->result();
+        watcher->deleteLater();
+        m_scanRunning = false;
+        m_statsQrScans += result.qrScanned ? 1 : 0;
+        m_statsQrNs += result.qrNs;
+        m_statsDocumentScans += result.documentScanned ? 1 : 0;
+        m_statsDocumentNs += result.documentNs;
+        if (generation != m_scanGeneration) {
+            return;
+        }
+        if (result.qrScanned && m_qrDetection) {
+            if (!result.codes.empty()) {
+                // The code nearest the middle of the frame.
+                const SceneScan::QrCode *best = nullptr;
+                double bestDistance = 0;
+                for (const SceneScan::QrCode &code : result.codes) {
+                    const QPointF centre = (code.corners[0] + code.corners[1] + code.corners[2] + code.corners[3]) / 4;
+                    const double distance = std::hypot(centre.x() - 0.5, centre.y() - 0.5);
+                    if (!best || distance < bestDistance) {
+                        best = &code;
+                        bestDistance = distance;
+                    }
+                }
+                if (m_qrCode != best->text) {
+                    appendRawCaptureLog(QStringLiteral("scan qr camera=%1 length=%2")
+                                        .arg(m_cameraId).arg(best->text.size()));
+                }
+                m_qrCode = best->text;
+                m_qrCorners = best->corners;
+                m_qrSeen.restart();
+                emit qrCodeChanged();
+            } else if (!m_qrCode.isEmpty() && (!m_qrSeen.isValid() || m_qrSeen.elapsed() > 1500)) {
+                m_qrCode.clear();
+                emit qrCodeChanged();
+            }
+        }
+        if (result.documentScanned && m_documentDetection) {
+            const bool shown = m_documentHits >= 2;
+            if (result.documentFound) {
+                double distance = 1;
+                const SceneScan::Quad quad = m_documentHits > 0
+                        ? aligned(result.document.corners, m_document, &distance)
+                        : result.document.corners;
+                if (m_documentHits > 0 && distance < 0.05) {
+                    // The same document: steadied over the scans.
+                    for (int i = 0; i < 4; ++i)
+                        m_document[i] = (m_document[i] + quad[i]) / 2;
+                    m_documentHits = qMin(m_documentHits + 1, 1000);
+                } else {
+                    m_document = result.document.corners;
+                    m_documentHits = 1;
+                }
+                m_documentMisses = 0;
+                if (!shown && m_documentHits >= 2) {
+                    appendRawCaptureLog(QStringLiteral("scan document camera=%1 score=%2")
+                                        .arg(m_cameraId).arg(result.document.score, 0, 'f', 2));
+                }
+            } else if (m_documentHits > 0 && ++m_documentMisses >= 3) {
+                // Gone for three scans (0.6 s), not just a blurred frame.
+                m_documentHits = 0;
+                m_documentMisses = 0;
+            }
+            if (shown || m_documentHits >= 2) {
+                emit documentChanged();
+            }
+        }
+    });
+    watcher->setFuture(QtConcurrent::run(&m_scanPool, [yuv, rgb, size, qr, document]() {
+        ScanResult result;
+        result.qrScanned = qr;
+        result.documentScanned = document;
+        // The Y plane, or green of RGB.
+        const PreviewAnalysis::LumaView luma = yuv.isEmpty()
+                ? PreviewAnalysis::LumaView{rgb.constBits() + 1, rgb.width(), rgb.height(),
+                                            int(rgb.bytesPerLine()), 3}
+                : PreviewAnalysis::LumaView{reinterpret_cast<const uint8_t *>(yuv.constData()),
+                                            size.width(), size.height(), size.width(), 1};
+        QElapsedTimer timer;
+        timer.start();
+        if (qr) {
+            result.codes = SceneScan::findQrCodes(luma);
+            result.qrNs = timer.nsecsElapsed();
+        }
+        if (document) {
+            timer.restart();
+            result.documentFound = SceneScan::findDocument(luma, &result.document);
+            result.documentNs = timer.nsecsElapsed();
+        }
+        return result;
+    }));
+}
+
+void Camera2Preview::clearScan()
+{
+    ++m_scanGeneration;
+    m_scanTimer.invalidate();
+    if (!m_qrCode.isEmpty()) {
+        m_qrCode.clear();
+        emit qrCodeChanged();
+    }
+    const bool shown = m_documentHits >= 2;
+    m_documentHits = 0;
+    m_documentMisses = 0;
+    if (shown) {
+        emit documentChanged();
+    }
+}
+
 void Camera2Preview::geometryChanged(const QRectF &newGeometry, const QRectF &oldGeometry)
 {
     QQuickItem::geometryChanged(newGeometry, oldGeometry);
@@ -1776,6 +2066,7 @@ void Camera2Preview::checkCaptureResult()
 void Camera2Preview::restart()
 {
     stop();
+    clearScan();
     if (m_previewSize.width() <= 0 || m_previewSize.height() <= 0) {
         m_frame = QImage();
         m_yuvFrame.clear();
@@ -1812,6 +2103,7 @@ void Camera2Preview::startPreview()
     // Rates cover streaming only, not the camera start-up; a new session
     // (or camera) starts its viewfinder analysis afresh.
     m_motionMeter.reset();
+    m_gyroMeter.reset();
     m_faces.clear();
     m_lastFaces.clear();
     m_subjectFaces.clear();
@@ -2188,6 +2480,9 @@ void Camera2Preview::parseFrames()
             m_histogramTimer.restart();
             emit sceneChanged();
         }
+        if ((m_qrDetection || m_documentDetection) && !m_scanRunning
+                && (!m_scanTimer.isValid() || m_scanTimer.elapsed() >= 200))
+            startScan();
         if (frameSize() != previous || wasPlaceholder) {
             emit contentRectChanged();
         }
@@ -2202,14 +2497,24 @@ void Camera2Preview::parseFrames()
         if (!m_statsTimer.isValid()) {
             m_statsTimer.start();
         } else if (m_statsTimer.elapsed() >= 15000) {
-            appendRawCaptureLog(QStringLiteral("preview-stats camera=%1 size=%2x%3 format=%4 fps=%5 parse_ms=%6")
+            QString scans;
+            if (m_statsQrScans || m_statsDocumentScans) {
+                scans = QStringLiteral(" qr_scans=%1 qr_ms=%2 document_scans=%3 document_ms=%4")
+                        .arg(m_statsQrScans).arg(m_statsQrNs / 1e6 / qMax(1, m_statsQrScans), 0, 'f', 1)
+                        .arg(m_statsDocumentScans)
+                        .arg(m_statsDocumentNs / 1e6 / qMax(1, m_statsDocumentScans), 0, 'f', 1);
+            }
+            appendRawCaptureLog(QStringLiteral("preview-stats camera=%1 size=%2x%3 format=%4 fps=%5 parse_ms=%6%7")
                                 .arg(m_cameraId).arg(latestWidth).arg(latestHeight)
                                 .arg(latestYuv ? QStringLiteral("yuv") : QStringLiteral("rgb"))
                                 .arg(m_statsFrames * 1000.0 / m_statsTimer.elapsed(), 0, 'f', 1)
-                                .arg(m_statsParseNs / 1e6 / qMax(1, m_statsFrames), 0, 'f', 1));
+                                .arg(m_statsParseNs / 1e6 / qMax(1, m_statsFrames), 0, 'f', 1)
+                                .arg(scans));
             m_statsTimer.restart();
             m_statsFrames = 0;
             m_statsParseNs = 0;
+            m_statsQrScans = m_statsDocumentScans = 0;
+            m_statsQrNs = m_statsDocumentNs = 0;
         }
     }
     if (pos > 0) {
@@ -2256,6 +2561,12 @@ QVariantList Camera2Preview::faces() const
     return list;
 }
 
+void Camera2Preview::addGyroReading(qreal x, qreal y, qreal z)
+{
+    if (!m_motionClock.isValid()) m_motionClock.start();
+    m_gyroMeter.update(x, y, z, m_motionClock.elapsed());
+}
+
 QVariantMap Camera2Preview::sceneInfo() const
 {
     QString source;
@@ -2263,6 +2574,9 @@ QVariantMap Camera2Preview::sceneInfo() const
     QVariantMap info;
     info.insert(QStringLiteral("motion"), m_motionMeter.motion());
     info.insert(QStringLiteral("subjectMotion"), m_motionMeter.subjectMotion());
+    info.insert(QStringLiteral("gyroTilt"), m_gyroMeter.tiltSpeed());
+    info.insert(QStringLiteral("gyroRoll"), m_gyroMeter.rollSpeed());
+    info.insert(QStringLiteral("stillMs"), double(m_gyroMeter.stillMs()));
     info.insert(QStringLiteral("faceCount"), face ? int(effectiveFaces().size()) : 0);
     info.insert(QStringLiteral("faceSource"), source);
     info.insert(QStringLiteral("faceLuma"), face ? m_faceExposure.luma : -1.0);

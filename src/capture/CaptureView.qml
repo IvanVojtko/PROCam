@@ -12,6 +12,7 @@ import Nemo.Notifications 1.0
 import org.nemomobile.systemsettings 1.0
 import Sailfish.Silica 1.0
 import Sailfish.Policy 1.0
+import QtSensors 5.0
 import com.procam.camera 1.0
 
 import "../settings"
@@ -145,6 +146,12 @@ FocusScope {
     property int _camera2WarmRawBracketRenderIndex: 0
     // Exposure plan of the running equal-exposure burst (null for pairs).
     property var _camera2BurstPlan: null
+    // Document photos: the corners (Camera2Preview.documentPhotoCorners())
+    // of the document tapped in the viewfinder, by the path of the photo
+    // that is cut down to it before it is added; and those of a tap whose
+    // capture is still starting.
+    property var _documentCaptures: ({})
+    property var _pendingDocumentCorners: null
     // Shutter feedback is given when the sensor frames are captured, not when
     // the (slow) RAW render finishes, so the phone can be lowered right away.
     property bool _camera2FeedbackGiven
@@ -213,6 +220,19 @@ FocusScope {
     Connections {
         target: Settings
         onDeviceIdChanged: Settings.torch = false
+    }
+
+    // Hand shake for night bursts: the gyroscope sees the hand directly,
+    // also in the dark, and tells a tripod or a table from a steady hand
+    // (Camera2Preview.addGyroReading, the burst plan's gyroMotion).
+    Gyroscope {
+        active: captureView.effectiveActive && captureView._camera2NightCapture
+                && camera2Viewfinder !== null
+        dataRate: 50
+        onReadingChanged: {
+            if (camera2Viewfinder && typeof camera2Viewfinder.addGyroReading === "function")
+                camera2Viewfinder.addGyroReading(reading.x, reading.y, reading.z)
+        }
     }
     // HDR is a global switch: every photo is a merged RAW16 burst, in both
     // formats. Night mode is a burst too, of long frames.
@@ -413,9 +433,32 @@ FocusScope {
         }
     }
 
+    // The document outlined in the viewfinder, as a photo of its own.
+    function captureDocument() {
+        if (!_camera2ViewfinderActive || !camera2Viewfinder) return
+        var corners = camera2Viewfinder.documentPhotoCorners(_camera2CaptureRotation())
+        if (corners.length !== 8) return
+        extensions.logCaptureEvent("capture document")
+        _pendingDocumentCorners = corners
+        _triggerCapture()
+        // Refused, or waiting (busy, exposure): no document for a later shot.
+        if (!captureBusy && !captureTimer.running && !_captureQueued && !_captureOnFocus)
+            _pendingDocumentCorners = null
+    }
+
     // A finished photo goes to the photo list, or first becomes a HEIC
-    // (extensions.heicConverted adds it then).
+    // (extensions.heicConverted adds it then), or first is cut down to the
+    // document it was taken of (extensions.documentCropped publishes it).
     function _publishPhoto(imageUrl, mimeType) {
+        var path = String(imageUrl).replace(/^file:\/\//, "")
+        var corners = _documentCaptures[path]
+        if (corners !== undefined) {
+            delete _documentCaptures[path]
+            if (mimeType === "image/jpeg") {
+                extensions.cropDocument(path, corners, Settings.photoJpegQuality())
+                return
+            }
+        }
         if (Settings.global.photoFormat === "heic" && mimeType === "image/jpeg") {
             extensions.convertToHeic(imageUrl, Settings.mode.rawCaptureJpegQuality)
             return
@@ -424,6 +467,8 @@ FocusScope {
     }
 
     function _addPhoto(imageUrl, mimeType) {
+        // Finished (HEIC, document and EXIF done): its JSON is no longer needed.
+        if (!Settings.global.savePhotoInfo) extensions.removePhotoInfo(String(imageUrl))
         if (captureModel) {
             captureModel.appendCapture(imageUrl, mimeType)
         }
@@ -1652,6 +1697,8 @@ FocusScope {
                                                + " shutter=" + burstPlan.shutterNs
                                                + " night=" + (burstPlan.night === true)
                                                + " motion=" + scene.motion + " subject=" + scene.subjectMotion
+                                               + " gyro=" + burstPlan.gyroMotion + " still=" + burstPlan.stillSeconds
+                                               + " tripod=" + (burstPlan.tripod === true)
                                                + " faces=" + scene.faceCount + " faceLuma=" + scene.faceLuma)
                     console.log("burst plan frames=" + burstPlan.frames + " iso=" + burstPlan.iso
                                 + " motion=" + (scene.motion !== undefined ? scene.motion.toFixed(4) : "?")
@@ -1663,6 +1710,11 @@ FocusScope {
                 captureView._camera2BracketQueue = bracketSteps
                 captureView._camera2BracketIndex = 0
                 captureView._camera2BracketBasePath = Settings.photoCapturePath('jpg')
+                if (captureView._pendingDocumentCorners) {
+                    captureView._documentCaptures[captureView._camera2BracketBasePath] =
+                            captureView._pendingDocumentCorners
+                    captureView._pendingDocumentCorners = null
+                }
                 captureView._camera2BracketBaseShutterNs =
                         String(captureView._camera2CurrentShutterNs())
                 captureView._camera2BracketBaseIso = captureView._camera2CurrentIso()
@@ -2015,13 +2067,20 @@ FocusScope {
             captureView._clearPendingThumbnailIfIdle()
         }
 
+        onDocumentCropped: {
+            if (error)
+                camera2CaptureErrorNotification.publishMessage("Could not straighten the document; the whole photo is saved")
+            captureView._publishPhoto(captureView._localFileUrl(path), "image/jpeg")
+        }
+
         onBurstRenderFailed: {
             camera2CaptureErrorNotification.publishMessage(error)
             captureView._clearPendingThumbnailIfIdle()
         }
 
-        // Its RAW is retried at a capped frame rate or replaced by YUV frames
-        // (unless Keep trying RAW is on): the session and the menus follow
+        // Its RAW is retried at a capped frame rate (damage from an uncapped
+        // session) or replaced by YUV frames (unless Keep trying RAW is on):
+        // the session and the menus follow
         // once the bindings on its capabilities are read again.
         onCamera2RawDamaged: Settings.camera2RawRevision++
     }

@@ -126,7 +126,7 @@ ApplicationSettings {
 
     IconTextSwitch {
         automaticCheck: false
-        text: "Learned denoise (experimental)"
+        text: "Learned denoise"
         description: "Clean up noisy HDR and night photos with a small neural network on the graphics processor instead of the standard noise filter. Keeps more texture in dim light; adds about half a second per photo. Brighter photos keep the standard filter."
         enabled: AccessPolicy.cameraEnabled
         checked: Settings.global.learnedDenoise
@@ -186,12 +186,21 @@ ApplicationSettings {
     IconTextSwitch {
         automaticCheck: false
         icon.source: "image://theme/icon-m-qr"
-        text: "Enable QR-code recognition"
-        description: "Detect QR-code via camera."
-        visible: Settings.global.advancedMode || Settings.global.qrFilterEnabled
+        text: "Detect QR codes"
+        description: "A QR code in the photo viewfinder shows its link (or text) in a chip; tap the chip to open it."
         enabled: AccessPolicy.cameraEnabled
         checked: Settings.global.qrFilterEnabled
         onClicked: Settings.global.qrFilterEnabled = !Settings.global.qrFilterEnabled
+    }
+
+    IconTextSwitch {
+        automaticCheck: false
+        icon.source: "image://theme/icon-m-file-document"
+        text: "Detect documents"
+        description: "With the camera pointing down at a page, receipt or card, the photo viewfinder outlines it. Tap the outline to save a flat, straightened photo of just the document."
+        enabled: AccessPolicy.cameraEnabled
+        checked: Settings.global.documentDetection
+        onClicked: Settings.global.documentDetection = !Settings.global.documentDetection
     }
 
     ComboBox {
@@ -212,6 +221,15 @@ ApplicationSettings {
                 onClicked: Settings.global.photoFormat = "heic"
             }
         }
+    }
+
+    IconTextSwitch {
+        automaticCheck: false
+        text: "Save photo details"
+        description: "Keep a .json file next to each photo with its capture and processing details, for troubleshooting. The photo's own EXIF (exposure, ISO, location) is saved either way, and RAW + JSON files always keep theirs."
+        enabled: AccessPolicy.cameraEnabled
+        checked: Settings.global.savePhotoInfo
+        onClicked: Settings.global.savePhotoInfo = !checked
     }
 
     ComboBox {

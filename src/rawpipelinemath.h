@@ -131,12 +131,28 @@ struct MergeOptions {
     // frequencies far more than Hasinoff's ratio without musical noise.
     // 0 disables; otherwise the pilot's strength.
     double spatialPilot = 0.0;
+    // Optional factor on the expected noise variance per tile
+    // (mergeTileCount(width) x mergeTileCount(height), row major), e.g.
+    // relativeTileNoise() of an earlier merge; null or a wrong size for 1.
+    const std::vector<float> *tileNoise = nullptr;
 };
 struct MergeStats {
     // Average Wiener weight pulling alternates towards the reference: 0 when
     // every alternate merged fully, 1 when all were rejected as motion.
     double rejection = 0;
+    // Per tile (tilesX x tilesY, row major): how many frames the merge
+    // effectively averaged there, from the alternates' mean Wiener weights.
+    // The frame count where every alternate merged, 1 where all were
+    // rejected (motion, a flickering light).
+    int tilesX = 0, tilesY = 0;
+    std::vector<float> tileFrames;
 };
+// Noise variance of each tile of a merge relative to its typical tile (the
+// median), at least 1: tiles that averaged fewer frames kept more noise.
+std::vector<float> relativeTileNoise(const MergeStats &stats);
+// A per-tile map (as relativeTileNoise) per plane pixel, blended with the
+// merge's tile windows.
+std::vector<float> tileMapToPixels(const std::vector<float> &tiles, int width, int height);
 // frames[0] is the reference; alignments has one entry per other frame.
 Planes merge(const std::vector<const Planes *> &frames, const std::vector<Alignment> &alignments,
              const NoiseModel &noise, const MergeOptions &options, MergeStats *stats);
@@ -145,6 +161,15 @@ Planes merge(const std::vector<const Planes *> &frames, const std::vector<Alignm
 Planes merge(const std::vector<const BayerFrame *> &frames, const std::vector<double> &exposureGains,
              const std::vector<Alignment> &alignments, const NoiseModel &noise,
              const MergeOptions &options, MergeStats *stats);
+
+// Second, light frequency-domain shrinkage of already denoised planes
+// (the merge's spatial step on them alone, noise as in `residual`),
+// blended in by local brightness: fully below `fullBelow`, fading out by
+// `noneAbove` (plane units). For lifted night shadows, where grain the
+// learned denoiser leaves shows; brighter areas keep their texture.
+// tileNoise optionally scales `residual` per tile (MergeOptions::tileNoise).
+void shadowCleanup(Planes *planes, const NoiseModel &residual, double strength, double fullBelow,
+                   double noneAbove, const std::vector<float> *tileNoise = nullptr);
 
 // Multi-frame super-resolution of green at the full mosaic resolution
 // (Wronski et al. 2019, simplified): every green sample of every frame is
@@ -201,6 +226,10 @@ struct FinishOptions {
     // Night mode: dark scenes are lifted up to 8x the metered exposure (3x
     // otherwise), towards a dusk-like key rather than daylight.
     bool night = false;
+    // Noise of the merged planes (variance = scale * signal + offset at the
+    // captured exposure, normalised units); all zero when unknown. In night
+    // mode it limits the lift for scenes with little light (nightLiftCap).
+    NoiseModel mergedNoise;
     FaceRects faces;
     // Super-resolved green (superResolveGreen); its fine detail replaces the
     // demosaicked detail, scaled by detailStrength. Modified in place.
@@ -236,6 +265,9 @@ struct FinishOptions {
 struct FinishStats {
     double shortGain = 1, longGain = 1;
     double highlightLevel = 0, keyLevel = 0;
+    // Night mode: signal-to-noise of the key after merging (-1 unknown) and
+    // the largest lift it allowed.
+    double keySnr = -1, nightLiftCap = 0;
     double faceLevel = -1; // linear, at the captured exposure; -1 without a face
     double faceBright = -1; // its 90th percentile, the lit side
     double faceOutput = -1; // the face's lit side after tone mapping (gamma)
@@ -250,6 +282,13 @@ struct RgbImage {
     std::vector<uint8_t> rgb;
 };
 RgbImage finish(const Planes &merged, const FinishOptions &options, FinishStats *stats);
+
+// Night mode's largest shadow lift for a scene whose key (log-mean
+// brightness) has signal-to-noise `keySnr` after merging: 8x from 4 up,
+// below that 8x times the square root of keySnr / 4 (about 4x at 1), at
+// least 1.25x. A scene with almost no light then stays dark instead of
+// turning into lifted grain; < 0 (unknown) gives 8x.
+double nightLiftCap(double keySnr);
 
 // Cameras without RAW output (front, ultra-wide) deliver 8-bit YUV 4:2:0
 // frames, captured with the ISP's noise reduction and sharpening off. They
@@ -312,20 +351,36 @@ struct BurstPlan {
     int iso = 0;
     double targetGain = 1.0;
     double underexposureEv = 0.0;
+    // Night mode on a tripod or a table (BurstScene::stillSeconds): long
+    // frames, fewer of them.
+    bool tripod = false;
 };
 // clippedFraction: share of preview pixels in the top histogram bin.
 // equalExposure: frames at the metered exposure (YUV bursts, whose tone
 // curve is already applied, gain nothing from underexposure).
 // night: night mode, for scenes too dark for the preview's auto exposure:
-// all maxFrames frames (16 from the app), long (up to 1/5 s, held still),
-// collecting up to 2 EV more light than metered; the renderer brightens
-// further (FinishOptions::night).
+// all maxFrames frames (16 from the app), long (up to 1/3 s when held
+// still), collecting up to 2 EV more light than metered; the renderer
+// brightens further (FinishOptions::night). Still on a tripod or a table
+// (gyroscope), frames of up to 1 s, about 10 s in all.
+// Night mode on a tripod or a table: still this long by the gyroscope,
+// frames of up to TripodMaxFrameSeconds, about TripodTotalSeconds of
+// light in all (Night Sight uses frames of about a second there too).
+constexpr double TripodStillSeconds = 1.0;
+constexpr double TripodMaxFrameSeconds = 1.0;
+constexpr double TripodTotalSeconds = 10.0;
 // What the viewfinder saw just before the shot; negative = unknown.
 struct BurstScene {
     // Image motion (hand shake) in frame widths per second, and the share of
     // the frame moving on its own (subjects).
     double motion = -1.0;
     double subjectMotion = 0.0;
+    // The same hand shake from the gyroscope (frame widths per second), and
+    // how long the phone has been still (GyroMeter); negative = no
+    // gyroscope. Night mode prefers it: in the dark the viewfinder's shift
+    // estimate also measures noise.
+    double gyroMotion = -1.0;
+    double stillSeconds = 0.0;
     // Brightest detected face: mean luma (0..1) and clipped share in the
     // viewfinder.
     double faceLuma = -1.0;

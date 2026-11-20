@@ -48,6 +48,8 @@ template <class Function> void runAsync(const Function &function)
     QThreadPool::globalInstance()->start(new AsyncFunction<Function>(function));
 }
 
+// Photos from before 1.4.0-beta.7 have a ProCam_ prefix: sorted by their
+// time among the plain yyyyMMdd_HHmmss names.
 QByteArray cameraSortName(const QByteArray &fileName)
 {
     const QByteArray prefix = QByteArrayLiteral("ProCam_");

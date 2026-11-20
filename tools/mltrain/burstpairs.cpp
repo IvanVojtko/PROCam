@@ -10,7 +10,9 @@
 // (4, height/2, width/2). For comparison, every level below the full merge is
 // also written with the renderer's spatial denoise (k<N>_spatial.npy, same
 // strength as RawPipeline::renderImage would use for that many frames).
-// meta.json has the noise model and merge stats.
+// k<N>_tiles.npy / full_tiles.npy hold each merge's effective frame count per
+// tile (MergeStats::tileFrames). meta.json has the noise model and merge
+// stats.
 //
 //   burstpairs [--max-frames N] <burst folder> <output folder> [stem...]
 #include "../../src/rawframecheck.h"
@@ -86,6 +88,24 @@ bool writeNpy(const QString &path, const Planes &planes)
             file.write(reinterpret_cast<const char *>(row.data()), qint64(row.size() * sizeof(_Float16)));
         }
     }
+    return file.commit();
+}
+
+// The merge's effective frame count per tile (MergeStats::tileFrames) as a
+// float32 .npy of shape (tilesY, tilesX).
+bool writeTilesNpy(const QString &path, const MergeStats &stats)
+{
+    QByteArray header = QStringLiteral("{'descr': '<f4', 'fortran_order': False, 'shape': (%1, %2), }")
+            .arg(stats.tilesY).arg(stats.tilesX).toLatin1();
+    while ((10 + header.size() + 1) % 64) header.append(' ');
+    header.append('\n');
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    QByteArray prefix("\x93NUMPY\x01\x00", 8);
+    prefix.append(char(header.size() & 0xff)).append(char(header.size() >> 8));
+    file.write(prefix);
+    file.write(header);
+    file.write(reinterpret_cast<const char *>(stats.tileFrames.data()), qint64(stats.tileFrames.size() * sizeof(float)));
     return file.commit();
 }
 
@@ -239,6 +259,12 @@ bool exportBurst(const QString &stem, const QStringList &sidecars, const QString
         level.insert(QStringLiteral("frames"), k);
         level.insert(QStringLiteral("file"), name);
         level.insert(QStringLiteral("rejection"), stats.rejection);
+        const QString tilesName = k == count ? QStringLiteral("full_tiles.npy") : QStringLiteral("k%1_tiles.npy").arg(k);
+        if (!writeTilesNpy(target + QLatin1Char('/') + tilesName, stats)) {
+            out << stem << ": cannot write " << tilesName << Qt::endl;
+            return false;
+        }
+        level.insert(QStringLiteral("tiles_file"), tilesName);
         if (k < count) {
             // As RawPipeline::renderFullFrame (spatialDenoise 1, automatic
             // floor and pilot).

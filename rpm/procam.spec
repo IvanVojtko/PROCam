@@ -101,6 +101,7 @@ systemctl-user try-restart localsearch-3.service || :
 %files
 %license LICENSES/BSD-3-Clause.txt
 %license licenses/RawBracket-MIT.txt
+%license licenses/quirc-ISC.txt
 %{_datadir}/applications/procam.desktop
 %{_datadir}/icons/hicolor/500x500/apps/procam-sfos.png
 %dir %{_datadir}/procam
@@ -129,6 +130,23 @@ systemctl-user try-restart localsearch-3.service || :
 %{_datadir}/localsearch3/extract-rules/10-procam-heif.rule
 
 %changelog
+* Fri Nov 20 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.7-1
+- QR codes in the photo viewfinder (bundled quirc, ISC): a chip with the
+  link or text, opened on a tap. On by default.
+- Document scanning while the camera points down: a tap on the outline
+  saves the page flattened and straightened, EXIF kept. On by default.
+- Night: lift up to 8x (less in near darkness), a light shadow cleanup
+  after learned denoise, no grain square around small lights, gyroscope
+  hand-shake measure with a tripod plan (frames up to 1 s, ~10 s in all),
+  hand-held frames up to 1/3 s.
+- Learned denoise on by default; new model (78 bursts); per-tile noise map
+  from the merge; single frames only up to ISO 150.
+- HDR: no bright halo around trees against fog or an overcast sky.
+- Video bitrate option (full, 1/2, 1/4, 1/8).
+- File names yyyyMMdd_HHmmss without the ProCam_ prefix; "Save photo
+  details" setting for the per-photo JSON; warm RAW files removed.
+- Photo sessions capped at 30 fps on cameras that stream faster (Xperia
+  10 III); damage at the cap switches to YUV without a retry.
 * Sun Nov 08 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.6-1
 - HEIC photos (Settings: Photo format): the finished JPEG is encoded by the
   hardware HEIC encoder through the Camera2 bridge with its EXIF (date, GPS,
