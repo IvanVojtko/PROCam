@@ -366,6 +366,9 @@ struct BurstPlan {
 // Night mode on a tripod or a table: still this long by the gyroscope,
 // frames of up to TripodMaxFrameSeconds, about TripodTotalSeconds of
 // light in all (Night Sight uses frames of about a second there too).
+// maxExposureNs still applies: 0.66 s on the Jolla Phone 2 main camera,
+// whose driver takes no longer exposures (camera2DriverMaxShutterNs), so
+// 15 frames there.
 constexpr double TripodStillSeconds = 1.0;
 constexpr double TripodMaxFrameSeconds = 1.0;
 constexpr double TripodTotalSeconds = 10.0;

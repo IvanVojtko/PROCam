@@ -130,6 +130,11 @@ systemctl-user try-restart localsearch-3.service || :
 %{_datadir}/localsearch3/extract-rules/10-procam-heif.rule
 
 %changelog
+* Sat Nov 21 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.8-1
+- Jolla Phone 2 main camera: exposures up to 0.66 s, the longest its sensor
+  driver takes (longer requests wrapped around: 1 s ran as 0.32 s). Night
+  tripod shots take 15 frames of 0.66 s; Pro shutter up to 1/2 s.
+- Sailfish-style launcher icon (SpecSierra).
 * Fri Nov 20 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.7-1
 - QR codes in the photo viewfinder (bundled quirc, ISC): a chip with the
   link or text, opened on a tap. On by default.

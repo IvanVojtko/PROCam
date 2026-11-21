@@ -218,6 +218,37 @@ static QString camera2RawDamageFingerprint()
 static const int Camera2PhotoFpsCap = 30;
 static int camera2AdvertisedMaxFps(const QString &cameraId);
 
+// The phone's hw-release ID (Jolla Phone 2: "jp2601"), empty if unknown.
+static QString hardwareReleaseId()
+{
+    QFile file(QStringLiteral("/etc/hw-release"));
+    if (!file.open(QIODevice::ReadOnly)) return QString();
+    while (!file.atEnd()) {
+        const QString line = QString::fromUtf8(file.readLine()).trimmed();
+        if (!line.startsWith(QLatin1String("ID="))) continue;
+        QString value = line.mid(3);
+        if (value.size() >= 2 && value.startsWith(QLatin1Char('"')) && value.endsWith(QLatin1Char('"')))
+            value = value.mid(1, value.size() - 2);
+        return value;
+    }
+    return QString();
+}
+
+// The longest exposure a camera's sensor driver really takes where it is
+// shorter than the HAL's range, 0 if not known to be. Jolla Phone 2 main
+// camera (IMX766): the driver's set_shutter keeps the exposure as a 16-bit
+// line count, 65535 lines of 10.36 us in the 4096x3072 mode (about 0.68 s).
+// A longer request wraps around while the result metadata still reports it:
+// 1 s ran as 0.32 s (30979 lines in the kernel log, frames 0.33 s apart),
+// 2 s would run as 0.64 s. 0.66 s keeps a margin.
+static qint64 camera2DriverMaxShutterNs(const QString &cameraId)
+{
+    static const QString device = hardwareReleaseId();
+    if (device == QLatin1String("jp2601") && cameraId == QLatin1String("0"))
+        return 660000000;
+    return 0;
+}
+
 // Camera id -> why its RAW output was found damaged: {"reason", "fps_capped"}.
 // Damage at up to Camera2PhotoFpsCap (fps_capped) is final: photos come from
 // YUV frames. Damage from a faster session (a camera whose frame rates the
@@ -1478,11 +1509,20 @@ bool DeclarativeCameraExtensions::loadCamera2Capabilities(const QString &cameraI
              observedMaxShutterNs < m_camera2MaxShutterNs)) {
         m_camera2MaxShutterNs = observedMaxShutterNs;
     }
+    // A driver that takes less than the HAL declares: bursts, the Pro
+    // shutter steps and exposure brackets keep to it.
+    const qint64 driverMaxShutterNs = camera2DriverMaxShutterNs(
+                selectedCamera.value(QStringLiteral("id")).toString());
+    if (driverMaxShutterNs > 0 &&
+            (m_camera2MaxShutterNs <= 0 || driverMaxShutterNs < m_camera2MaxShutterNs)) {
+        m_camera2MaxShutterNs = driverMaxShutterNs;
+    }
     if (m_camera2HalMaxShutterNs > 0) {
         qDebug() << "shutter-limit"
                  << "camera=" + selectedCamera.value(QStringLiteral("id")).toString()
                  << "hal_max=" + QString::number(m_camera2HalMaxShutterNs)
                  << "observed_max=" + QString::number(m_camera2MaxShutterNs)
+                 << "driver_max=" + QString::number(driverMaxShutterNs)
                  << "profile=" + (m_camera2DeviceProfileId.isEmpty()
                                    ? QStringLiteral("none")
                                    : m_camera2DeviceProfileId);

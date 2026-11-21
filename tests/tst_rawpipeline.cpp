@@ -1028,6 +1028,11 @@ private slots:
         // A camera whose longest exposure is shorter keeps to it.
         BurstPlan shortSensor = planBurst(70000000, 17912, 0.0, minT, 400000000, 100, 19200, 16, false, true, tripod);
         QVERIFY(shortSensor.tripod && shortSensor.exposureNs <= 400000000 && shortSensor.frames == 16);
+        // Jolla Phone 2 main camera (driver limit 0.66 s): 15 frames, about
+        // 10 s, at the ISO for the shorter frames.
+        BurstPlan jollaTripod = planBurst(70000000, 17912, 0.0, minT, 660000000, 100, 19200, 16, false, true, tripod);
+        QVERIFY(jollaTripod.tripod && jollaTripod.exposureNs == 660000000 && jollaTripod.frames == 15);
+        QVERIFY(jollaTripod.iso > nightTripod.iso);
         // A face in hard light gets headroom (a front-camera YUV selfie).
         BurstScene blownFace;
         blownFace.faceLuma = 0.9;
