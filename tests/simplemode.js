@@ -24,6 +24,7 @@ const choices = {
     rawCaptureRotationModel: [0, 90, 180, 270]
 };
 const context = {
+    qsTrId: id => id,
     SimpleMode: simple, settingsDefaults: defaults, deviceId: '3',
     globalSettings: {advancedMode: false}, _normalizingCamera2Settings: false,
     _lastAppliedAdvancedMode: false,
@@ -178,8 +179,8 @@ assert.deepStrictEqual(Array.from(focusContext.camera2FocusModeModel()), ['none'
 const labelFunction = source.match(/    function rawCaptureSceneLabel\(scene\) \{[\s\S]*?\n    \}/);
 assert(labelFunction);
 vm.runInContext(labelFunction[0], context);
-assert.strictEqual(context.rawCaptureSceneLabel('manual'), 'Manual');
-assert.strictEqual(context.rawCaptureSceneLabel('auto'), 'Auto');
-assert.strictEqual(context.rawCaptureSceneLabel('face-priority'), 'face-priority');
+assert.strictEqual(context.rawCaptureSceneLabel('manual'), 'procam-common-manual');
+assert.strictEqual(context.rawCaptureSceneLabel('auto'), 'procam-common-auto');
+assert.strictEqual(context.rawCaptureSceneLabel('face-priority'), 'procam-scene-face-priority');
 assert.strictEqual(context.rawCaptureSceneLabel('unknown'), 'unknown');
 console.log('Simple mode validation, camera switching, recursion, Advanced restoration and scene normalization/labels passed.');

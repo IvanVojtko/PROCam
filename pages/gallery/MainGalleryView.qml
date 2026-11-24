@@ -20,7 +20,8 @@ GalleryView {
     }
 
     ViewPlaceholder {
-        text: "Captured photos and videos will appear here when you take some"
+        //% "Captured photos and videos will appear here when you take some"
+        text: qsTrId("procam-gallery-empty-hint")
         enabled: model.count === 0 && model.populated
     }
 }

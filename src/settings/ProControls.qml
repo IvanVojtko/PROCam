@@ -22,6 +22,11 @@ Item {
     // "", "ev", "shutter", "iso" or "focus".
     property string openDial
 
+    function autoText() {
+        //% "Auto"
+        return qsTrId("procam-common-auto")
+    }
+
     readonly property real spacing: Theme.paddingMedium
     readonly property real chipHeight: Theme.itemSizeExtraSmall
     readonly property real chipColumnWidth: Theme.itemSizeExtraLarge
@@ -108,11 +113,11 @@ Item {
             if (Settings.mode.rawCaptureShutterNs !== "0")
                 return Settings.rawCaptureShutterLabel(Settings.mode.rawCaptureShutterNs)
             return liveFresh() ? Settings.rawCaptureShutterLabel(String(exposureControl.actualTime))
-                               : "Auto"
+                               : autoText()
         case "iso":
             return "ISO " + (Settings.mode.rawCaptureIso > 0 ? Settings.mode.rawCaptureIso
                                                             : liveFresh() ? exposureControl.actualIso
-                                                                          : "Auto")
+                                                                          : autoText())
         default:
             return focusLabel(focusValue())
         }
@@ -272,7 +277,7 @@ Item {
             currentValue: Settings.mode.rawCaptureShutterNs
             model: Settings.camera2ShutterModel()
             valueLabel: function(value) {
-                return value === "0" ? "Auto" : Settings.rawCaptureShutterLabel(value)
+                return value === "0" ? autoText() : Settings.rawCaptureShutterLabel(value)
             }
         }
     }
@@ -292,7 +297,7 @@ Item {
             onValueSelected: { if (!root.exposureControl.setLock("iso", value)) rejectSelection() }
             currentValue: Settings.mode.rawCaptureIso
             model: Settings.camera2IsoModel()
-            valueLabel: function(value) { return value > 0 ? value : "Auto" }
+            valueLabel: function(value) { return value > 0 ? value : autoText() }
         }
     }
 

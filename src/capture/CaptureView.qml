@@ -845,10 +845,19 @@ FocusScope {
             // Never a silent shutter: say why, and log it for diagnosis.
             console.warn("Capture not ready:", _captureState())
             extensions.logCaptureEvent("capture refused " + _captureState())
-            camera2CaptureErrorNotification.publishMessage(
-                        extensions.pendingRenders >= 3 ? "Still processing earlier photos"
-                        : (_camera2CaptureRunning || _camera2CapturePending) ? "Previous photo still being captured"
-                        : "Camera not ready")
+            if (extensions.pendingRenders >= 3) {
+                //% "Still processing earlier photos"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-capture-still-processing"))
+            } else if (_camera2CaptureRunning || _camera2CapturePending) {
+                //% "Previous photo still being captured"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-capture-previous-still-running"))
+            } else {
+                //% "Camera not ready"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-capture-camera-not-ready"))
+            }
         }
     }
 
@@ -927,8 +936,9 @@ FocusScope {
         }
 
         urgency: Notification.Critical
-        body: "Camera audio won't be recorded, microphone disabled by "
-              + aboutSettings.baseOperatingSystemName + " Device Manager"
+        //% "Camera audio won't be recorded, microphone disabled by %1 Device Manager"
+        body: qsTrId("procam-video-microphone-disabled")
+                .arg(aboutSettings.baseOperatingSystemName)
     }
 
     Notification {
@@ -1145,7 +1155,13 @@ FocusScope {
             extensions.logCaptureEvent("camera2 recording " + (success ? "ok " : "failed ")
                                        + path + (error ? " " + error : ""))
             if (!success) {
-                camera2CaptureErrorNotification.publishMessage(error || "Recording failed")
+                if (error) {
+                    camera2CaptureErrorNotification.publishMessage(error)
+                } else {
+                    //% "Recording failed"
+                    camera2CaptureErrorNotification.publishMessage(
+                                qsTrId("procam-video-recording-failed"))
+                }
                 return
             }
             var finalUrl = Settings.completeCapture(captureView._localFileUrl(path))
@@ -1223,8 +1239,14 @@ FocusScope {
                 extensions.disableNotifications(captureView, true)
             } else {
                 extensions.logCaptureEvent("camera2 record-start refused " + path)
-                camera2CaptureErrorNotification.publishMessage(
-                            camera2Viewfinder.captureStartError() || "Recording could not start")
+                var startError = camera2Viewfinder.captureStartError()
+                if (startError) {
+                    camera2CaptureErrorNotification.publishMessage(startError)
+                } else {
+                    //% "Recording could not start"
+                    camera2CaptureErrorNotification.publishMessage(
+                                qsTrId("procam-video-recording-could-not-start"))
+                }
             }
         }
 
@@ -1326,11 +1348,18 @@ FocusScope {
 
         function _failCamera2ImageCapture(error) {
             var cameraId = String(captureView._camera2ResolvedCameraId)
+            var displayError = error
+            if (error === "Camera2 preview stopped during capture") {
+                //% "Camera2 preview stopped during capture"
+                displayError = qsTrId("procam-camera2-preview-stopped-during-capture")
+            }
             if (captureView._camera2BurstPlan && !captureView._camera2BracketMerging
                     && error.indexOf("cancelled") < 0
                     && captureView._burstFailedCameras.indexOf("|" + cameraId + "|") < 0) {
                 captureView._burstFailedCameras += "|" + cameraId + "|"
                 error += ". HDR is off for this camera until ProCam restarts; take the photo again"
+                //% "HDR is off for this camera until ProCam restarts; take the photo again"
+                displayError += ". " + qsTrId("procam-hdr-off-until-restart")
             }
             captureView._camera2BracketMerging = false
             captureView._camera2FeedbackGiven = false
@@ -1338,7 +1367,7 @@ FocusScope {
             extensions.discardRawBracket()
             console.warn("Camera2 image capture failed:", error)
             extensions.logCaptureEvent("capture failed camera=" + captureView._camera2ResolvedCameraId + " " + error)
-            camera2CaptureErrorNotification.publishMessage(error)
+            camera2CaptureErrorNotification.publishMessage(displayError)
             captureView._releaseCamera2BracketFocusHold()
             captureView._camera2CapturePending = false
             captureView._camera2CaptureRunning = false
@@ -1626,9 +1655,12 @@ FocusScope {
             }
 
             if (captureView._camera2ViewfinderActive && !exposureLogic.captureReady) {
-                exposureLogic.status = "Waiting for requested exposure before capture"
+                //% "Waiting for requested exposure before capture"
+                exposureLogic.status = qsTrId("procam-exposure-waiting-before-capture")
                 extensions.logCaptureEvent("capture waiting for exposure " + captureView._captureState())
-                camera2CaptureErrorNotification.publishMessage("Waiting for exposure, try again")
+                //% "Waiting for exposure, try again"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-exposure-waiting-try-again"))
                 return
             }
             var flashShot = captureView._camera2FlashFires()
@@ -1636,21 +1668,35 @@ FocusScope {
             var bracketRequested = !flashShot && captureView._camera2BracketSteps().length > 0
             if ((bracketRequested || burstRequested) &&
                     !(captureView._camera2CurrentIso() > 0 && captureView._camera2CurrentShutterNs() > 0)) {
-                exposureLogic.status = "Waiting for exposure results before bracketing"
+                //% "Waiting for exposure results before bracketing"
+                exposureLogic.status = qsTrId("procam-exposure-waiting-before-bracketing")
                 extensions.logCaptureEvent("capture without exposure results " + captureView._captureState())
-                camera2CaptureErrorNotification.publishMessage("No exposure reading from the camera yet, try again")
+                //% "No exposure reading from the camera yet, try again"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-exposure-no-reading"))
                 return
             }
             var burstPlan = burstRequested ? captureView._camera2PlanBurst() : null
             if (captureView._camera2HdrCapture && !burstPlan && !flashShot) {
                 // Say so instead of silently taking a single frame.
-                camera2CaptureErrorNotification.publishMessage(!captureView._warmRawReady
-                        ? (Settings.camera2BurstFormat(Settings.deviceId) === "yuv"
-                           ? "HDR needs the full-resolution YUV stream ("
-                             + (camera2Viewfinder ? camera2Viewfinder.rawStreamStatus : "no preview")
-                             + "); taking a normal photo"
-                           : "HDR needs the fast RAW16 preview (speed not Quality); taking a normal photo")
-                        : "No HDR plan for this exposure; taking a normal photo")
+                if (!captureView._warmRawReady) {
+                    if (Settings.camera2BurstFormat(Settings.deviceId) === "yuv") {
+                        //% "HDR needs the full-resolution YUV stream (%1); taking a normal photo"
+                        camera2CaptureErrorNotification.publishMessage(
+                                    qsTrId("procam-hdr-needs-yuv-stream")
+                                    .arg(camera2Viewfinder
+                                         ? camera2Viewfinder.rawStreamStatus
+                                         : "no preview"))
+                    } else {
+                        //% "HDR needs the fast RAW16 preview (speed not Quality); taking a normal photo"
+                        camera2CaptureErrorNotification.publishMessage(
+                                    qsTrId("procam-hdr-needs-fast-raw-preview"))
+                    }
+                } else {
+                    //% "No HDR plan for this exposure; taking a normal photo"
+                    camera2CaptureErrorNotification.publishMessage(
+                                qsTrId("procam-hdr-no-plan"))
+                }
             }
             var pair = bracketRequested ? captureView._camera2BracketSteps() : []
             if (pair.length > 0) {
@@ -1658,11 +1704,15 @@ FocusScope {
                 var shortTime = Number(extensions.camera2BracketShutterNs(
                             captureView._camera2ResolvedCameraId, String(baseTime), pair[1]))
                 if (!(shortTime > 0 && shortTime < baseTime)) {
-                    exposureLogic.status = "Shutter limit: no shorter bracket exposure available"
+                    //% "Shutter limit: no shorter bracket exposure available"
+                    exposureLogic.status =
+                            qsTrId("procam-bracket-no-shorter-exposure")
                     return
                 }
                 if (shortTime > baseTime * Math.pow(2, pair[1]) + 1)
-                    exposureLogic.status = "Shutter limit: reduced bracket separation"
+                    //% "Shutter limit: reduced bracket separation"
+                    exposureLogic.status =
+                            qsTrId("procam-bracket-reduced-separation")
             }
             captureView._captureExposureIso = exposureLogic.appliedIso
             captureView._captureExposureTime = String(Math.round(exposureLogic.appliedTime))
@@ -2060,7 +2110,9 @@ FocusScope {
         onHeicConverted: {
             if (!heicPath) {
                 console.warn("HEIC conversion failed, the photo stays a JPEG:", error)
-                camera2CaptureErrorNotification.publishMessage("Could not save as HEIC; the photo is a JPEG")
+                //% "Could not save as HEIC; the photo is a JPEG"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-heic-save-failed"))
             }
             captureView._addPhoto(captureView._localFileUrl(heicPath || jpegPath),
                                   heicPath ? "image/heic" : "image/jpeg")
@@ -2069,7 +2121,9 @@ FocusScope {
 
         onDocumentCropped: {
             if (error)
-                camera2CaptureErrorNotification.publishMessage("Could not straighten the document; the whole photo is saved")
+                //% "Could not straighten the document; the whole photo is saved"
+                camera2CaptureErrorNotification.publishMessage(
+                            qsTrId("procam-document-straighten-failed"))
             captureView._publishPhoto(captureView._localFileUrl(path), "image/jpeg")
         }
 

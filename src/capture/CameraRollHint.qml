@@ -21,7 +21,8 @@ Loader {
 
             anchors.fill: parent
             InteractionHintLabel {
-                text: "Swipe right to access the Camera Roll"
+                //% "Swipe right to access the Camera Roll"
+                text: qsTrId("procam-hint-camera-roll")
                 anchors.bottom: parent.bottom
                 opacity: touchInteractionHint.running ? 1.0 : 0.0
                 Behavior on opacity { FadeAnimation { duration: 1000 } }

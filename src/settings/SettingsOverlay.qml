@@ -94,9 +94,17 @@ PinchArea {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.Wrap
             font.pixelSize: Theme.fontSizeTiny
-            text: overlay.exposureControl ? (overlay.exposureControl.limitStatus
-                  ? overlay.exposureControl.limitStatus + " · " + overlay.exposureControl.residualEv.toFixed(1) + " EV shortfall"
-                  : (overlay.exposureControl.notice || overlay.exposureControl.status)) : ""
+            text: {
+                if (!overlay.exposureControl)
+                    return ""
+                if (overlay.exposureControl.limitStatus) {
+                    //% "%1 · %2 EV shortfall"
+                    return qsTrId("procam-exposure-ev-shortfall")
+                            .arg(overlay.exposureControl.limitStatus)
+                            .arg(overlay.exposureControl.residualEv.toFixed(1))
+                }
+                return overlay.exposureControl.notice || overlay.exposureControl.status
+            }
         }
     }
 
@@ -608,7 +616,8 @@ PinchArea {
                 height: parent.height
                 visible: !floatingTopBar.recording
                 // Fit shows exactly the photo's frame.
-                text: Settings.global.viewfinderFill ? "Full" : Settings.photoAspect
+                //% "Full"
+                text: Settings.global.viewfinderFill ? qsTrId("procam-viewfinder-full") : Settings.photoAspect
                 onClicked: Settings.global.viewfinderFill = !Settings.global.viewfinderFill
             }
 
@@ -625,7 +634,8 @@ PinchArea {
         visible: !!captureView && captureView.focusLocked && !overlay._exposed
                  && (floatingTopBar.visible || captureView.recording)
         checked: true
-        text: "AF locked"
+        //% "AF locked"
+        text: qsTrId("procam-focus-af-locked")
         onClicked: captureView.unlockFocus()
     }
 
@@ -1275,7 +1285,8 @@ PinchArea {
                 SettingsMenu {
                     width: grid.menuWidth
                     title: Settings.timerText
-                    caption: "Timer"
+                    //% "Timer"
+                    caption: qsTrId("procam-settings-timer")
                     header: upperHeader
                     model: [ 0, 3, 10, 15 ]
                     delegate: SettingsMenuItem {
@@ -1292,7 +1303,8 @@ PinchArea {
                 SettingsMenu {
                     width: grid.menuWidth
                     title: Settings.flashText
-                    caption: "Flash"
+                    //% "Flash"
+                    caption: qsTrId("procam-settings-flash")
                     header: upperHeader
                     model: CameraConfigs.supportedFlashModes.length > 0
                            ? CameraConfigs.supportedFlashModes : [Camera.FlashOff]
@@ -1310,7 +1322,8 @@ PinchArea {
                 SettingsMenu {
                     width: grid.menuWidth
                     title: Settings.exposureModeText
-                    caption: "Exposure"
+                    //% "Exposure"
+                    caption: qsTrId("procam-settings-exposure")
                     header: upperHeader
                     model: experimentalModes.value && CameraConfigs.supportedExposureModes.length > 0
                            ? CameraConfigs.supportedExposureModes : [Camera.ExposureManual]
@@ -1350,7 +1363,8 @@ PinchArea {
                 SettingsMenu {
                     width: grid.menuWidth
                     title: Settings.viewfinderGridText
-                    caption: "Grid"
+                    //% "Grid"
+                    caption: qsTrId("procam-settings-grid")
                     header: upperHeader
                     model: Settings.viewfinderGridValues
                     delegate: SettingsMenuItem {
@@ -1367,7 +1381,8 @@ PinchArea {
                 SettingsMenu {
                     width: grid.menuWidth
                     title: Settings.colorFiltersEnabledText
-                    caption: "Filter"
+                    //% "Filter"
+                    caption: qsTrId("procam-settings-filter")
                     header: upperHeader
                     model: [false, true]
                     delegate: SettingsMenuItem {
@@ -1383,11 +1398,13 @@ PinchArea {
                 id: aspectSettingComponent
                 TextSettingMenu {
                     width: grid.menuWidth
-                    title: "Photo aspect ratio"
+                    //% "Photo aspect ratio"
+                    title: qsTrId("procam-settings-photo-aspect-ratio")
                     header: upperHeader
                     settings: Settings.mode
                     property: "aspectRatio"
-                    caption: "Ratio"
+                    //% "Ratio"
+                    caption: qsTrId("procam-settings-ratio")
                     valueLabel: function(value) { return value === CameraConfigs.AspectRatio_16_9 ? "16:9" : "4:3" }
                     model: [ CameraConfigs.AspectRatio_4_3, CameraConfigs.AspectRatio_16_9 ]
                 }
@@ -1403,7 +1420,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.global
                     property: "camera2VideoResolution"
-                    caption: "Size"
+                    //% "Size"
+                    caption: qsTrId("procam-settings-size")
                     valueLabel: function(value) {
                         return value === "2160p" ? "4K" : value === "1440p" ? "1440p" : "1080p"
                     }
@@ -1415,12 +1433,20 @@ PinchArea {
                 id: videoCodecSettingComponent
                 TextSettingMenu {
                     width: grid.menuWidth
-                    title: Settings.global.camera2VideoCodec === "hevc"
-                           ? "HEVC: smaller files" : "H.264: plays everywhere"
+                    title: {
+                        if (Settings.global.camera2VideoCodec === "hevc") {
+                            //% "HEVC: smaller files"
+                            return qsTrId("procam-video-codec-hevc-description")
+                        } else {
+                            //% "H.264: plays everywhere"
+                            return qsTrId("procam-video-codec-h264-description")
+                        }
+                    }
                     header: upperHeader
                     settings: Settings.global
                     property: "camera2VideoCodec"
-                    caption: "Codec"
+                    //% "Codec"
+                    caption: qsTrId("procam-settings-codec")
                     valueLabel: function(value) { return value === "hevc" ? "HEVC" : "H.264" }
                     model: [ "avc", "hevc" ]
                 }
@@ -1444,13 +1470,16 @@ PinchArea {
                     // With the 128 kbit/s audio track.
                     title: {
                         var scale = Settings.global.camera2VideoBitrateScale
-                        return mbit(scale) + " Mbit/s, about "
-                                + Math.round((bitrate(scale) + 128000) * 60 / 8 / 1000000) + " MB a minute"
+                        //% "%1 Mbit/s, about %2 MB a minute"
+                        return qsTrId("procam-video-bitrate-description")
+                                .arg(mbit(scale))
+                                .arg(Math.round((bitrate(scale) + 128000) * 60 / 8 / 1000000))
                     }
                     header: upperHeader
                     settings: Settings.global
                     property: "camera2VideoBitrateScale"
-                    caption: "Bitrate"
+                    //% "Bitrate"
+                    caption: qsTrId("procam-settings-bitrate")
                     valueLabel: function(value) { return mbit(value) }
                     model: [ 1, 0.5, 0.25, 0.125 ]
                 }
@@ -1460,7 +1489,8 @@ PinchArea {
                 id: rawSaveSettingComponent
                 TextSettingMenu {
                     width: grid.menuWidth
-                    title: "RAW files next to the JPEG"
+                    //% "RAW files next to the JPEG"
+                    title: qsTrId("procam-settings-raw-files-next-to-jpeg")
                     header: upperHeader
                     settings: Settings.global
                     property: "rawCaptureSaveFormat"
@@ -1469,8 +1499,12 @@ PinchArea {
                         switch (value) {
                         case "raw16": return "RAW"
                         case "dng": return "DNG"
-                        case "both": return "Both"
-                        default: return "Off"
+                        case "both":
+                            //% "Both"
+                            return qsTrId("procam-common-both")
+                        default:
+                            //% "Off"
+                            return qsTrId("procam-common-off")
                         }
                     }
                     model: [ "none", "dng", "raw16", "both" ]
@@ -1481,13 +1515,29 @@ PinchArea {
                 id: advancedModeSettingComponent
                 TextSettingMenu {
                     width: grid.menuWidth
-                    title: Settings.global.advancedMode ? "Advanced mode on"
-                                                        : "Advanced mode off"
+                    title: {
+                        if (Settings.global.advancedMode) {
+                            //% "Advanced mode on"
+                            return qsTrId("procam-settings-advanced-mode-on")
+                        } else {
+                            //% "Advanced mode off"
+                            return qsTrId("procam-settings-advanced-mode-off")
+                        }
+                    }
                     header: upperHeader
                     settings: Settings.global
                     property: "advancedMode"
-                    caption: "Advanced"
-                    valueLabel: function(value) { return value ? "On" : "Off" }
+                    //% "Advanced"
+                    caption: qsTrId("procam-settings-advanced")
+                    valueLabel: function(value) {
+                        if (value) {
+                            //% "On"
+                            return qsTrId("procam-common-on")
+                        } else {
+                            //% "Off"
+                            return qsTrId("procam-common-off")
+                        }
+                    }
                     model: [ false, true ]
                 }
             }
@@ -1500,7 +1550,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureSpeedMode"
-                    caption: "Speed"
+                    //% "Speed"
+                    caption: qsTrId("procam-settings-speed")
                     valueLabel: Settings.rawCaptureSpeedLabel
                     model: Settings.camera2SpeedModel()
                 }
@@ -1514,7 +1565,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     settingProperty: "rawCaptureSize"
-                    caption: "Size"
+                    //% "Size"
+                    caption: qsTrId("procam-settings-size")
                     valueLabel: function(value) { return value.replace("x", " × ") }
                     model: Settings.camera2SizeModel(Settings.mode.camera2CaptureFormat, Settings.mode.rawCaptureRawFormat)
                 }
@@ -1542,7 +1594,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureRotation"
-                    caption: "Rotate"
+                    //% "Rotate"
+                    caption: qsTrId("procam-settings-rotate")
                     valueLabel: function(value) { return value + " deg" }
                     model: Settings.rawCaptureRotationModel()
                 }
@@ -1556,7 +1609,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureTimeout"
-                    caption: "Timeout"
+                    //% "Timeout"
+                    caption: qsTrId("procam-settings-timeout")
                     valueLabel: function(value) { return value + " s" }
                     model: [ 10, 30, 60 ]
                 }
@@ -1570,14 +1624,25 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureFocusMode"
-                    caption: "Focus"
+                    //% "Focus"
+                    caption: qsTrId("procam-settings-focus")
                     valueLabel: function(value) {
                         switch (value) {
-                        case "auto": return "Auto"
-                        case "continuous": return "Cont."
-                        case "manual": return "Manual"
-                        case "infinity": return "Infinity"
-                        default: return "None"
+                        case "auto":
+                            //% "Auto"
+                            return qsTrId("procam-common-auto")
+                        case "continuous":
+                            //% "Cont."
+                            return qsTrId("procam-focus-continuous-short")
+                        case "manual":
+                            //% "Manual"
+                            return qsTrId("procam-focus-manual")
+                        case "infinity":
+                            //% "Infinity"
+                            return qsTrId("procam-focus-infinity")
+                        default:
+                            //% "None"
+                            return qsTrId("procam-common-none")
                         }
                     }
                     model: Settings.camera2SelectableFocusModeModel()
@@ -1592,7 +1657,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     settingProperty: "rawCaptureFocusDistance"
-                    caption: "Distance"
+                    //% "Distance"
+                    caption: qsTrId("procam-settings-distance")
                     valueLabel: Settings.rawCaptureFocusDistanceLabel
                     model: Settings.camera2ManualFocusDistanceModel()
                 }
@@ -1606,7 +1672,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureFocusTimeout"
-                    caption: "AF wait"
+                    //% "AF wait"
+                    caption: qsTrId("procam-settings-af-wait")
                     valueLabel: function(value) { return value + " s" }
                     model: Settings.rawCaptureFocusTimeoutModel()
                 }
@@ -1626,11 +1693,20 @@ PinchArea {
                 TextSettingMenu {
                     width: grid.menuWidth
                     title: Settings.rawCaptureProgressiveJpegText
-                    caption: "JPEG mode"
+                    //% "JPEG mode"
+                    caption: qsTrId("procam-settings-jpeg-mode")
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureProgressiveJpeg"
-                    valueLabel: function(value) { return value ? "Progress." : "Standard" }
+                    valueLabel: function(value) {
+                        if (value) {
+                            //% "Progress."
+                            return qsTrId("procam-jpeg-progressive-short")
+                        } else {
+                            //% "Standard"
+                            return qsTrId("procam-common-standard")
+                        }
+                    }
                     model: [ false, true ]
                 }
             }
@@ -1640,7 +1716,8 @@ PinchArea {
                 TextSettingMenu {
                     width: grid.menuWidth
                     title: Settings.rawRenderEngineText
-                    caption: "Renderer"
+                    //% "Renderer"
+                    caption: qsTrId("procam-settings-renderer")
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawRenderEngine"
@@ -1668,7 +1745,8 @@ PinchArea {
                 TextSettingMenu {
                     width: grid.menuWidth
                     title: Settings.rawCaptureNoiseReductionText
-                    caption: "Noise"
+                    //% "Noise"
+                    caption: qsTrId("procam-settings-noise")
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureNoiseReduction"
@@ -1682,7 +1760,8 @@ PinchArea {
                 TextSettingMenu {
                     width: grid.menuWidth
                     title: Settings.rawCaptureBracketText
-                    caption: "Bracket"
+                    //% "Bracket"
+                    caption: qsTrId("procam-settings-bracket")
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureBracket"
@@ -1699,7 +1778,8 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureExposure"
-                    caption: "Exposure"
+                    //% "Exposure"
+                    caption: qsTrId("procam-settings-exposure")
                     valueLabel: function(value) { return "x" + value }
                     model: Settings.rawCaptureExposureModel()
                 }
@@ -1714,7 +1794,12 @@ PinchArea {
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureColorTemperature"
-                    valueLabel: function(value) { return value > 0 ? value + "K" : "Auto" }
+                    valueLabel: function(value) {
+                        if (value > 0)
+                            return value + "K"
+                        //% "Auto"
+                        return qsTrId("procam-common-auto")
+                    }
                     model: [ 0, 2000, 3200, 4500, 5500, 6500, 7500, 9000 ]
                 }
             }
@@ -1724,7 +1809,8 @@ PinchArea {
                 TextSettingMenu {
                     width: grid.menuWidth
                     title: Settings.rawCaptureColorTintText
-                    caption: "Tint"
+                    //% "Tint"
+                    caption: qsTrId("procam-settings-tint")
                     header: upperHeader
                     settings: Settings.mode
                     property: "rawCaptureColorTint"
@@ -2007,9 +2093,15 @@ PinchArea {
             textFormat: Text.AutoText
             color: _highlightColor
 
-            text: overlay.isPortrait
-                  ? "Select location for the portrait capture key"
-                  : "Select location for the landscape capture key"
+            text: {
+                if (overlay.isPortrait) {
+                    //% "Select location for the portrait capture key"
+                    return qsTrId("procam-capture-key-location-portrait")
+                } else {
+                    //% "Select location for the landscape capture key"
+                    return qsTrId("procam-capture-key-location-landscape")
+                }
+            }
         }
     }
 

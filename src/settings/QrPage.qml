@@ -33,8 +33,8 @@ Page {
 
             PageHeader {
                 id: header
-                //% "QR-code"
-                title: "QR code"
+                //% "QR code"
+                title: qsTrId("procam-qr-title")
             }
 
             Item {
@@ -62,7 +62,7 @@ Page {
                 id: button
 
                 //% "Copy"
-                text: "Copy"
+                text: qsTrId("procam-qr-copy")
                 preferredWidth: Screen.sizeCategory < Screen.Large && isPortrait
                                                     ? parent.width - Theme.horizontalPageMargin*2
                                                     : Theme.buttonWidthLarge

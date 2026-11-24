@@ -42,8 +42,10 @@ GalleryView {
     }
 
     ViewPlaceholder {
-        text: "New photos and videos you take will appear here"
-        hintText: "Unlock the device to access older photos and videos"
+        //% "New photos and videos you take will appear here"
+        text: qsTrId("procam-lockscreen-new-media-hint")
+        //% "Unlock the device to access older photos and videos"
+        hintText: qsTrId("procam-lockscreen-unlock-media-hint")
         enabled: count == 0
     }
 

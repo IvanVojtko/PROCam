@@ -20,9 +20,9 @@ for(const setting of ['off','ev1','ev2','ev3']) {
  c.Settings.mode.camera2CaptureFormat='jpeg';
  assert.equal(c._camera2BracketSteps().length,0);
 }
-const labels={};vm.createContext(labels);
+const labels={qsTrId:id=>id};vm.createContext(labels);
 vm.runInContext(read('src/settings.qml').match(/    function rawCaptureBracketLabel\(mode\) \{[\s\S]*?\n    \}/)[0],labels);
-assert.equal(labels.rawCaptureBracketLabel('ev3'),'6-stop pair');
+assert.equal(labels.rawCaptureBracketLabel('ev3'),'procam-bracket-6-stop-pair');
 assert(!source.includes('combineBracketImages'));
 assert(source.includes('if (captureView._warmRawReady) {'));
 assert(source.includes('onRawBracketFrameReady:'));
@@ -251,7 +251,7 @@ assert(read('src/camera2preview.cpp').includes('frames received)'));
   assert(ext.includes('(yuvFrame ? QLatin1String(".yuv")'));
   assert(source.includes('keepBurstFrames: Settings.global.keepBurstFrames'));
   assert(read('src/settings.qml').includes('property bool keepBurstFrames: false'));
-  assert(read('settings/SettingsPage.qml').includes('text: "Keep every burst frame"'));
+  assert(read('settings/SettingsPage.qml').includes('//% "Keep every burst frame"'));
   assert(read('dconf/00-procam.txt').includes('saveRawCaptureFiles=false'));
   assert(read('src/src.pro').includes('QMAKE_CXXFLAGS_RELEASE += -O3 -fno-math-errno'));
   console.log('Burst frames and build flag checks passed.');

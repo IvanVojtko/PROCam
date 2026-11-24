@@ -159,7 +159,7 @@ PagedView {
             var item = currentItem
             //: Delete an image
             //% "Deleting"
-            remorseAction("Deleting", function() {
+            remorseAction(qsTrId("procam-gallery-deleting"), function() {
                 root.captureModel.deleteFile(item.index)
                 item.ListView.delayRemove = false
             })

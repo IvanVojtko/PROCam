@@ -28,7 +28,7 @@ assert(math.samePair(100,10000000,100,10000001));
 const qml=fs.readFileSync(base+'ExposureController.qml','utf8');
 let now=1000;
 const logs=[];
-const c={ExposureMath:math,Settings:{global:{advancedMode:true,estimatedExposureMetering:true,exposureCompensation:0},
+const c={qsTrId:id=>id,ExposureMath:math,Settings:{global:{advancedMode:true,estimatedExposureMetering:true,exposureCompensation:0},
  mode:{rawCaptureIso:0,rawCaptureShutterNs:'0',rawCaptureScene:'manual'}},
  console:{log:line=>logs.push(line)},sampleReason:"waiting_calibration",lastLogState:"",loggedCamera:"",
  noticeTimer:{restart:()=>{}},lastRejection:"",notice:"",
@@ -95,7 +95,7 @@ assert.equal(c.appliedTime,20000000);assert.equal(c.appliedIso,100);
 c.Settings.global.exposureCompensation=0;c.reset();c.capabilities=Object.assign({},caps,{iso_range:[50,120]});sample();sample();sample();
 c.setLock('shutter',10000000);c.Settings.global.exposureCompensation=4;
 for(let i=0;i<15;i++)sample(c.appliedIso,c.appliedTime,0.2*c.appliedIso/100);
-assert.equal(c.appliedIso,120);assert.equal(c.timeLock,10000000);assert.equal(c.limitStatus,'ISO maximum');
+assert.equal(c.appliedIso,120);assert.equal(c.timeLock,10000000);assert.equal(c.limitStatus,'procam-exposure-limit-iso-maximum');
 assert(c.residualEv>1);
 
 // Diagnostic transitions do not repeat for ordinary frames or changing actual values.
