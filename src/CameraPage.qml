@@ -214,7 +214,7 @@ Page {
 
     DisabledByMdmView {
         //% "Camera"
-        activity: "Camera";
+        activity: qsTrId("procam-camera-activity")
         enabled: !AccessPolicy.cameraEnabled
     }
 

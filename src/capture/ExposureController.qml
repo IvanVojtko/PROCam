@@ -84,7 +84,10 @@ Item {
             if (control.busy) return
             if (!control.fresh) {
                 control.meterValid = false
-                if (control.partial) control.status = "Auto paused: waiting for exposure results"
+                if (control.partial) {
+                    //% "Auto paused: waiting for exposure results"
+                    control.status = qsTrId("procam-exposure-auto-paused-waiting")
+                }
             }
             control.logState()
         }
@@ -120,6 +123,25 @@ Item {
         onRawCaptureApertureChanged: control.invalidateCalibration("aperture_changed")
     }
     Component.onCompleted: reset()
+
+    function exposureLimitText(limit) {
+        switch (limit) {
+        case "ISO minimum":
+            //% "ISO minimum"
+            return qsTrId("procam-exposure-limit-iso-minimum")
+        case "ISO maximum":
+            //% "ISO maximum"
+            return qsTrId("procam-exposure-limit-iso-maximum")
+        case "Shutter minimum":
+            //% "Shutter minimum"
+            return qsTrId("procam-exposure-limit-shutter-minimum")
+        case "Shutter maximum":
+            //% "Shutter maximum"
+            return qsTrId("procam-exposure-limit-shutter-maximum")
+        default:
+            return limit
+        }
+    }
 
     function meterReason() {
         if (!Settings.global.estimatedExposureMetering) return "disabled"
@@ -190,8 +212,15 @@ Item {
         value = Number(value)
         if ((parameter !== "iso" && parameter !== "shutter") || !isFinite(value) || value < 0) return false
         if (value > 0 && !canLock) {
-            return rejectSelection(parameter, value, manualSupported ? "missing_actual" : "unsupported_manual",
-                                   manualSupported ? "Waiting for exposure results" : "Manual exposure unavailable")
+            if (manualSupported) {
+                //% "Waiting for exposure results"
+                return rejectSelection(parameter, value, "missing_actual",
+                                       qsTrId("procam-exposure-waiting-results"))
+            } else {
+                //% "Manual exposure unavailable"
+                return rejectSelection(parameter, value, "unsupported_manual",
+                                       qsTrId("procam-exposure-manual-unavailable"))
+            }
         }
         var nextIso = parameter === "iso" ? value : isoLock
         var nextTime = parameter === "shutter" ? value : timeLock
@@ -209,7 +238,9 @@ Item {
             var l = ExposureMath.limits(capabilities)
             if ((nextIso && (nextIso < l.isoMin || nextIso > l.isoMax)) ||
                     (nextTime && (nextTime < l.timeMin || nextTime > l.timeMax))) {
-                return rejectSelection(parameter, value, "outside_limits", "Manual selection exceeds camera limits")
+                //% "Manual selection exceeds camera limits"
+                return rejectSelection(parameter, value, "outside_limits",
+                                       qsTrId("procam-exposure-selection-outside-limits"))
             }
         }
         changing = true
@@ -220,7 +251,13 @@ Item {
         status = ""
         reconcile()
         if (fallback) {
-            notice = fallback === "both_auto" ? "Both Auto: metering unavailable" : "Full manual: metering unavailable"
+            if (fallback === "both_auto") {
+                //% "Both Auto: metering unavailable"
+                notice = qsTrId("procam-exposure-both-auto-unavailable")
+            } else {
+                //% "Full manual: metering unavailable"
+                notice = qsTrId("procam-exposure-full-manual-unavailable")
+            }
             noticeTimer.restart()
             logEvent("fallback:" + fallback)
         }
@@ -240,11 +277,19 @@ Item {
     function reconcile() {
         meterValid = false; filteredError = 0; limitStatus = ""
         if (!isoLock && !timeLock) { setPair(0, 0); return }
-        if (!manualSupported) { reset(); status = "Manual exposure unavailable"; return }
+        if (!manualSupported) {
+            reset()
+            //% "Manual exposure unavailable"
+            status = qsTrId("procam-exposure-manual-unavailable")
+            return
+        }
         if (fullyManual) {
             var l = ExposureMath.limits(capabilities)
             if (isoLock < l.isoMin || isoLock > l.isoMax || timeLock < l.timeMin || timeLock > l.timeMax) {
-                status = "Manual selection exceeds camera limits"; acknowledged = false; return
+                //% "Manual selection exceeds camera limits"
+                status = qsTrId("procam-exposure-selection-outside-limits")
+                acknowledged = false
+                return
             }
             setPair(isoLock, timeLock)
         } else if (reference > 0 && fresh && estimatedEnabled) {
@@ -271,7 +316,8 @@ Item {
                     ExposureMath.samePair(appliedIso, appliedTime, iso, time)
             if (!acknowledged) {
                 meterValid = false
-                status = "Waiting for requested exposure"
+                //% "Waiting for requested exposure"
+                status = qsTrId("procam-exposure-waiting-requested")
                 return
             }
         } else {
@@ -282,7 +328,12 @@ Item {
         if (!estimatedEnabled || !(luminance > 0.002 && luminance < 0.98) || Number(values.clipped) > 0.6) {
             sampleReason = "clipped_brightness"
             meterValid = false; stableSamples = 0
-            status = partial ? "Auto paused: metering unavailable" : ""
+            if (partial) {
+                //% "Auto paused: metering unavailable"
+                status = qsTrId("procam-exposure-auto-paused-unavailable")
+            } else {
+                status = ""
+            }
             return
         }
         if (!isoLock && !timeLock) {
@@ -299,7 +350,14 @@ Item {
         }
         if (!(reference > 0) || responseInvalid) {
             sampleReason = "waiting_calibration"
-            meterValid = false; status = partial ? "Auto paused: return both wheels to Auto to calibrate" : ""; return
+            meterValid = false
+            if (partial) {
+                //% "Auto paused: return both wheels to Auto to calibrate"
+                status = qsTrId("procam-exposure-auto-paused-calibrate")
+            } else {
+                status = ""
+            }
+            return
         }
         var product = iso * time
         if (lastProduct > 0 && lastLuminance > 0 && partial) {
@@ -310,7 +368,9 @@ Item {
                 if (responseFailures >= 3) {
                     responseInvalid = true
                     invalidateCalibration("unreliable_brightness")
-                    status = "Auto paused: preview response unreliable"; return
+                    //% "Auto paused: preview response unreliable"
+                    status = qsTrId("procam-exposure-auto-paused-unreliable")
+                    return
                 }
             }
         }
@@ -318,14 +378,20 @@ Item {
         meterEv = ExposureMath.stops(luminance / reference)
         meterValid = true
         sampleReason = "valid"
-        status = Number(values.flicker) === 1 || Number(values.flicker) === 2
-                ? "Estimated" : "Estimated · flicker unverified"
+        if (Number(values.flicker) === 1 || Number(values.flicker) === 2) {
+            //% "Estimated"
+            status = qsTrId("procam-exposure-estimated")
+        } else {
+            //% "Estimated · flicker unverified"
+            status = qsTrId("procam-exposure-estimated-flicker-unverified")
+        }
         if (!partial || !acknowledged || clockMs - lastCommandMs < 200) return
         var error = effectiveEv - meterEv
         filteredError = 0.5 * filteredError + 0.5 * error
         var target = product * Math.pow(2, error)
         var bounded = ExposureMath.solve(target, isoLock, timeLock, capabilities, Number(values.flicker))
-        if (bounded.limit || Math.abs(error) < 0.08) limitStatus = bounded.limit
+        if (bounded.limit || Math.abs(error) < 0.08)
+            limitStatus = exposureLimitText(bounded.limit)
         residualEv = bounded.residual
         if (Math.abs(filteredError) < 0.1) return
         var next = ExposureMath.solve(product * Math.pow(2, ExposureMath.clamp(filteredError, -0.25, 0.25)),

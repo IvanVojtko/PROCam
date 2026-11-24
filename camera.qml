@@ -224,7 +224,8 @@ ApplicationWindow {
         visible: camera2Preview.visible && camera2Preview.active
                  && (camera2Preview.previewSize.width <= 0
                      || camera2Preview.previewSize.height <= 0)
-        text: qsTr("Preview unavailable")
+        //% "Preview unavailable"
+        text: qsTrId("procam-viewfinder-preview-unavailable")
     }
 
     QrFilter {

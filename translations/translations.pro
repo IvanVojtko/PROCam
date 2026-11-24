@@ -7,8 +7,18 @@ TEMPLATE = aux
 
 TS_FILE = $$OUT_PWD/procam.ts
 EE_QM = $$OUT_PWD/procam_eng_en.qm
+CS_TS = $$IN_PWD/procam-cs_CZ.ts
+CS_QM = $$OUT_PWD/procam-cs_CZ.qm
 
-ts.commands += lupdate $$IN_PWD/.. -ts $$TS_FILE
+ts.commands += lupdate \
+        $$IN_PWD/../camera.qml \
+        $$IN_PWD/../lockscreen \
+        $$IN_PWD/../cover \
+        $$IN_PWD/../pages \
+        $$IN_PWD/../settings \
+        $$IN_PWD/../src \
+        -ts $$TS_FILE
+
 ts.CONFIG += no_check_exist no_link
 ts.output = $$TS_FILE
 ts.input = .
@@ -28,8 +38,18 @@ engineering_english_install.path = /usr/share/translations
 engineering_english_install.files = $$EE_QM
 engineering_english_install.CONFIG += no_check_exist
 
-QMAKE_EXTRA_TARGETS += ts engineering_english
 
-PRE_TARGETDEPS += ts engineering_english
+czech.commands += lrelease -idbased $$CS_TS -qm $$CS_QM
+czech.CONFIG += no_check_exist no_link
+czech.input = $$CS_TS
+czech.output = $$CS_QM
 
-INSTALLS += ts_install engineering_english_install
+czech_install.path = /usr/share/translations
+czech_install.files = $$CS_QM
+czech_install.CONFIG += no_check_exist
+
+QMAKE_EXTRA_TARGETS += ts engineering_english czech
+
+PRE_TARGETDEPS += ts engineering_english czech
+
+INSTALLS += ts_install engineering_english_install czech_install

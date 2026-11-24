@@ -38,7 +38,8 @@ Item {
         color: indicator.color
         font.pixelSize: minimumLabel.font.pixelSize
         font.bold: minimumLabel.font.bold
-        text: "Zoom"
+        //% "Zoom"
+        text: qsTrId("procam-zoom-label")
     }
 
     Rectangle {
@@ -82,7 +83,8 @@ Item {
         color: indicator.color
         font.pixelSize: Theme.fontSizeExtraSmall
         font.bold: true
-        text: "min"
+        //% "min"
+        text: qsTrId("procam-zoom-min")
     }
 
     Label {
@@ -96,7 +98,8 @@ Item {
         color: indicator.color
         font.pixelSize: minimumLabel.font.pixelSize
         font.bold: minimumLabel.font.bold
-        text: "max"
+        //% "max"
+        text: qsTrId("procam-zoom-max")
     }
 
     PauseAnimation {

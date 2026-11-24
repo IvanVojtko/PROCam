@@ -184,14 +184,17 @@ SettingsOverlay {
         var prevStatus = previousStoragePathStatus.value
         if (Settings.storagePathStatus == Settings.Unavailable) {
             if (prevStatus != Settings.storagePathStatus) {
-                notification.publishMessage("The selected storage is unavailable. Device memory will be used instead")
+                //% "The selected storage is unavailable. Device memory will be used instead"
+                notification.publishMessage(qsTrId("procam-storage-selected-unavailable"))
             }
         } else if (Settings.storagePathStatus == Settings.Available) {
             if (prevStatus == Settings.Unavailable || prevStatus == Settings.Mounting) {
-                notification.publishMessage("Using memory card")
+                //% "Using memory card"
+                notification.publishMessage(qsTrId("procam-storage-using-memory-card"))
             }
         } else if (Settings.storagePathStatus == Settings.Mounting) {
-            notification.publishMessage("Busy mounting the memory card. Device memory will be used instead")
+            //% "Busy mounting the memory card. Device memory will be used instead"
+            notification.publishMessage(qsTrId("procam-storage-memory-card-mounting"))
         }
         previousStoragePathStatus.value = Settings.storagePathStatus
 
@@ -478,7 +481,8 @@ SettingsOverlay {
 
             Label {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Hold still"
+                //% "Hold still"
+                text: qsTrId("procam-capture-hold-still")
                 font.pixelSize: Theme.fontSizeMedium
                 color: Theme.lightPrimaryColor
             }
@@ -517,14 +521,18 @@ SettingsOverlay {
         text: {
             if (captureView.recording) {
                 if (_recSecsRemaining >= 60) {
-                    return "Recording stops in " + Math.floor(_recSecsRemaining/60) + " min"
+                    //% "Recording stops in %1 min"
+                    return qsTrId("procam-recording-stops-minutes").arg(Math.floor(_recSecsRemaining/60))
                 } else {
-                    return "Recording stops in " + _recSecsRemaining + " sec"
+                    //% "Recording stops in %1 sec"
+                    return qsTrId("procam-recording-stops-seconds").arg(_recSecsRemaining)
                 }
             } else if (_recSecsRemaining == 0) {
-                return "Storage full"
+                //% "Storage full"
+                return qsTrId("procam-recording-storage-full")
             } else {
-                return Math.floor(_recSecsRemaining/60) + " min estimated recording time left"
+                //% "%1 min estimated recording time left"
+                return qsTrId("procam-recording-time-left").arg(Math.floor(_recSecsRemaining/60))
             }
         }
         font.pixelSize: Theme.fontSizeExtraSmall
@@ -787,7 +795,8 @@ SettingsOverlay {
         opacity: documentOutline.opacity
         enabled: documentOutline.shown
         checked: true
-        text: "Scan document"
+        //% "Scan document"
+        text: qsTrId("procam-capture-scan-document")
         onClicked: captureView.captureDocument()
     }
 

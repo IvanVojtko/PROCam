@@ -128,6 +128,9 @@ systemctl-user try-restart localsearch-3.service || :
 %{_libdir}/qt5/plugins/imageformats/libprocamheif.so
 %{_datadir}/procam/licenses
 %{_datadir}/localsearch3/extract-rules/10-procam-heif.rule
+%{_datadir}/translations/procam_eng_en.qm
+%{_datadir}/translations/procam-cs_CZ.qm
+%{_datadir}/translations/source/procam.ts
 
 %changelog
 * Sat Nov 21 2026 Ivan Vojtko <ivan.vojtko@gmail.com> - 1.4.0.beta.8-1

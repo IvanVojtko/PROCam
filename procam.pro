@@ -10,6 +10,7 @@ SUBDIRS = \
         src \
         settings/settings.pro \
         sfos-camera2-bridge/bridge.pro \
-        heif/heif.pro
+        heif/heif.pro \
+        translations/translations.pro
 
 OTHER_FILES = rpm/*.spec

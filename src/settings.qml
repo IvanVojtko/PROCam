@@ -433,13 +433,17 @@ SettingsBase {
     }
 
     function timerText(timer) {
-        return timer > 0
-                ? timer + " second delay"
-                : "No delay"
+        if (timer > 0) {
+            //% "%1 second delay"
+            return qsTrId("procam-timer-delay").arg(timer)
+        }
+        //% "No delay"
+        return qsTrId("procam-timer-no-delay")
     }
 
     function rawCaptureSizeText(size) {
-        return "Size " + size
+        //% "Size %1"
+        return qsTrId("procam-capture-size").arg(size)
     }
 
     function camera2SizeModel(format, rawFormat) {
@@ -576,15 +580,24 @@ SettingsBase {
     }
 
     function rawCaptureBracketText(mode) {
-        return "Bracket " + rawCaptureBracketLabel(mode)
+        //% "Bracket %1"
+        return qsTrId("procam-bracket-value").arg(rawCaptureBracketLabel(mode))
     }
 
     function rawCaptureBracketLabel(mode) {
         switch (mode) {
-        case "ev3": return "6-stop pair"
-        case "ev2": return "4-stop pair"
-        case "ev1": return "2-stop pair"
-        default: return "Off"
+        case "ev3":
+            //% "6-stop pair"
+            return qsTrId("procam-bracket-6-stop-pair")
+        case "ev2":
+            //% "4-stop pair"
+            return qsTrId("procam-bracket-4-stop-pair")
+        case "ev1":
+            //% "2-stop pair"
+            return qsTrId("procam-bracket-2-stop-pair")
+        default:
+            //% "Off"
+            return qsTrId("procam-common-off")
         }
     }
 
@@ -694,7 +707,12 @@ SettingsBase {
     }
 
     function camera2CaptureFormatText(format) {
-        return format === "jpeg" ? "Direct JPEG" : "RAW render"
+        if (format === "jpeg") {
+            //% "Direct JPEG"
+            return qsTrId("procam-capture-format-direct-jpeg")
+        }
+        //% "RAW render"
+        return qsTrId("procam-capture-format-raw-render")
     }
 
     function camera2CaptureFormatModel() {
@@ -746,35 +764,54 @@ SettingsBase {
     }
 
     function rawCaptureSpeedText(mode) {
-        return "Speed " + rawCaptureSpeedLabel(mode)
+        //% "Speed %1"
+        return qsTrId("procam-capture-speed").arg(rawCaptureSpeedLabel(mode))
     }
 
     function rawCaptureSpeedLabel(mode) {
         switch (mode) {
-        case "fast": return "Fast"
-        default: return "Balanced"
+        case "fast":
+            //% "Fast"
+            return qsTrId("procam-common-fast")
+        default:
+            //% "Balanced"
+            return qsTrId("procam-capture-speed-balanced")
         }
     }
 
     function rawCaptureFocusModeText(mode) {
         switch (mode) {
-        case "auto": return "Focus auto"
-        case "continuous": return "Focus continuous"
-        case "manual": return "Focus manual"
-        case "infinity": return "Focus infinity"
-        case "none": return "Focus none"
-        default: return "Focus " + mode
+        case "auto":
+            //% "Focus auto"
+            return qsTrId("procam-focus-auto")
+        case "continuous":
+            //% "Focus continuous"
+            return qsTrId("procam-focus-continuous")
+        case "manual":
+            //% "Focus manual"
+            return qsTrId("procam-focus-manual-mode")
+        case "infinity":
+            //% "Focus infinity"
+            return qsTrId("procam-focus-infinity-mode")
+        case "none":
+            //% "Focus none"
+            return qsTrId("procam-focus-none")
+        default:
+            //% "Focus %1"
+            return qsTrId("procam-focus-value").arg(mode)
         }
     }
 
     function rawCaptureFocusDistanceText(distance) {
-        return "Focus " + rawCaptureFocusDistanceLabel(distance)
+        //% "Focus %1"
+        return qsTrId("procam-focus-value").arg(rawCaptureFocusDistanceLabel(distance))
     }
 
     function rawCaptureFocusDistanceLabel(distance) {
         var diopters = parseFloat(distance)
         if (!diopters || diopters <= 0) {
-            return "Infinity"
+            //% "Infinity"
+            return qsTrId("procam-focus-infinity")
         }
 
         var meters = 1.0 / diopters
@@ -804,19 +841,27 @@ SettingsBase {
     }
 
     function rawCaptureTimeoutText(timeout) {
-        return "Capture " + timeout + " s"
+        //% "Capture %1 s"
+        return qsTrId("procam-capture-timeout").arg(timeout)
     }
 
     function rawCaptureFocusTimeoutText(timeout) {
-        return "AF " + timeout + " s"
+        //% "AF %1 s"
+        return qsTrId("procam-focus-timeout").arg(timeout)
     }
 
     function rawCaptureFocusFailureText(policy) {
-        return policy === "abort" ? "AF abort" : "AF capture"
+        if (policy === "abort") {
+            //% "AF abort"
+            return qsTrId("procam-focus-failure-abort")
+        }
+        //% "AF capture"
+        return qsTrId("procam-focus-failure-capture")
     }
 
     function rawCaptureExposureText(exposure) {
-        return "Exposure x" + exposure
+        //% "Exposure x%1"
+        return qsTrId("procam-exposure-multiplier").arg(exposure)
     }
 
     function rawCaptureExposureModel() {
@@ -828,11 +873,17 @@ SettingsBase {
     }
 
     function rawCaptureIsoText(iso) {
-        return iso > 0 ? "ISO " + iso : "ISO auto"
+        if (iso > 0) {
+            //% "ISO %1"
+            return qsTrId("procam-iso-value").arg(iso)
+        }
+        //% "ISO auto"
+        return qsTrId("procam-iso-auto")
     }
 
     function rawCaptureShutterText(shutterNs) {
-        return "Shutter " + rawCaptureShutterLabel(shutterNs)
+        //% "Shutter %1"
+        return qsTrId("procam-shutter-value").arg(rawCaptureShutterLabel(shutterNs))
     }
 
     function rawCaptureShutterLabel(shutterNs) {
@@ -863,7 +914,8 @@ SettingsBase {
                         ? "1/" + Math.round(1000000000 / ns)
                         : (ns / 1000000000).toFixed(ns % 1000000000 === 0 ? 0 : 1) + "s"
             }
-            return "auto"
+            //% "Auto"
+            return qsTrId("procam-common-auto")
         }
     }
 
@@ -880,34 +932,54 @@ SettingsBase {
     }
 
     function rawCaptureApertureText(aperture) {
-        return aperture > 0 ? "Aperture f/" + rawCaptureApertureLabel(aperture)
-                            : "Aperture auto"
+        if (aperture > 0) {
+            //% "Aperture f/%1"
+            return qsTrId("procam-aperture-value").arg(rawCaptureApertureLabel(aperture))
+        }
+        //% "Aperture auto"
+        return qsTrId("procam-aperture-auto")
     }
 
     function rawCaptureApertureLabel(aperture) {
-        return aperture > 0 ? (aperture / 10).toFixed(1) : "Auto"
+        if (aperture > 0)
+            return (aperture / 10).toFixed(1)
+        //% "Auto"
+        return qsTrId("procam-common-auto")
     }
 
     function rawCaptureNoiseReductionText(mode) {
-        return "Noise " + rawCaptureNoiseReductionLabel(mode)
+        //% "Noise %1"
+        return qsTrId("procam-noise-value").arg(rawCaptureNoiseReductionLabel(mode))
     }
 
     function rawCaptureNoiseReductionLabel(mode) {
         switch (mode) {
-        case 1: return "Fast"
-        case 2: return "High"
-        case 3: return "Minimal"
-        case 4: return "ZSL"
-        default: return "Off"
+        case 1:
+            //% "Fast"
+            return qsTrId("procam-common-fast")
+        case 2:
+            //% "High"
+            return qsTrId("procam-noise-high")
+        case 3:
+            //% "Minimal"
+            return qsTrId("procam-noise-minimal")
+        case 4:
+            //% "ZSL"
+            return qsTrId("procam-noise-zsl")
+        default:
+            //% "Off"
+            return qsTrId("procam-common-off")
         }
     }
 
     function rawCaptureJpegQualityText(quality) {
-        return "JPEG " + quality
+        //% "JPEG %1"
+        return qsTrId("procam-jpeg-quality").arg(quality)
     }
 
     function rawCaptureRotationText(rotation) {
-        return rotation === 0 ? "Rotate 0" : "Rotate " + rotation
+        //% "Rotate %1"
+        return qsTrId("procam-rotation-value").arg(rotation)
     }
 
     function rawCaptureRotationModel(mode) {
@@ -919,35 +991,78 @@ SettingsBase {
     }
 
     function rawCaptureSceneText(scene) {
-        return "Scene " + rawCaptureSceneLabel(scene)
+        //% "Scene %1"
+        return qsTrId("procam-scene-value").arg(rawCaptureSceneLabel(scene))
     }
 
     function rawCaptureSceneLabel(scene) {
         switch (scene) {
-        case "manual": return "Manual"
-        case "portrait": return "Portrait"
-        case "landscape": return "Landscape"
-        case "sport": return "Sport"
-        case "night": return "Night"
-        case "auto": return "Auto"
-        case "action": return "Action"
-        case "night-portrait": return "Night portrait"
-        case "theatre": return "Theatre"
-        case "beach": return "Beach"
-        case "snow": return "Snow"
-        case "sunset": return "Sunset"
-        case "steady-photo": return "Steady photo"
-        case "fireworks": return "Fireworks"
-        case "party": return "Party"
-        case "candlelight": return "Candlelight"
-        case "barcode": return "Barcode"
+        case "manual":
+            //% "Manual"
+            return qsTrId("procam-common-manual")
+        case "portrait":
+            //% "Portrait"
+            return qsTrId("procam-scene-portrait")
+        case "landscape":
+            //% "Landscape"
+            return qsTrId("procam-scene-landscape")
+        case "sport":
+            //% "Sport"
+            return qsTrId("procam-scene-sport")
+        case "night":
+            //% "Night"
+            return qsTrId("procam-scene-night")
+        case "auto":
+            //% "Auto"
+            return qsTrId("procam-common-auto")
+        case "action":
+            //% "Action"
+            return qsTrId("procam-scene-action")
+        case "night-portrait":
+            //% "Night portrait"
+            return qsTrId("procam-scene-night-portrait")
+        case "theatre":
+            //% "Theatre"
+            return qsTrId("procam-scene-theatre")
+        case "beach":
+            //% "Beach"
+            return qsTrId("procam-scene-beach")
+        case "snow":
+            //% "Snow"
+            return qsTrId("procam-scene-snow")
+        case "sunset":
+            //% "Sunset"
+            return qsTrId("procam-scene-sunset")
+        case "steady-photo":
+            //% "Steady photo"
+            return qsTrId("procam-scene-steady-photo")
+        case "fireworks":
+            //% "Fireworks"
+            return qsTrId("procam-scene-fireworks")
+        case "party":
+            //% "Party"
+            return qsTrId("procam-scene-party")
+        case "candlelight":
+            //% "Candlelight"
+            return qsTrId("procam-scene-candlelight")
+        case "barcode":
+            //% "Barcode"
+            return qsTrId("procam-scene-barcode")
+        case "face-priority":
+            //% "Face priority"
+            return qsTrId("procam-scene-face-priority")
         case "hdr": return "HDR"
         default: return scene
         }
     }
 
     function rawCaptureProgressiveJpegText(enabled) {
-        return enabled ? "Progressive JPEG" : "Standard JPEG"
+        if (enabled) {
+            //% "Progressive JPEG"
+            return qsTrId("procam-jpeg-progressive")
+        }
+        //% "Standard JPEG"
+        return qsTrId("procam-jpeg-standard")
     }
 
     function rawRenderEngineModel() {
@@ -956,17 +1071,29 @@ SettingsBase {
 
     function rawRenderEngineText(engine) {
         switch (engine) {
-        case "enhanced": return "Enhanced renderer"
-        case "fastjpeg": return "Fast JPEG converter"
-        default: return "Internal renderer"
+        case "enhanced":
+            //% "Enhanced renderer"
+            return qsTrId("procam-renderer-enhanced")
+        case "fastjpeg":
+            //% "Fast JPEG converter"
+            return qsTrId("procam-renderer-fast-jpeg")
+        default:
+            //% "Internal renderer"
+            return qsTrId("procam-renderer-internal")
         }
     }
 
     function rawRenderEngineLabel(engine) {
         switch (engine) {
-        case "enhanced": return "Enhanced"
-        case "fastjpeg": return "Fast JPEG"
-        default: return "Internal"
+        case "enhanced":
+            //% "Enhanced"
+            return qsTrId("procam-renderer-enhanced-short")
+        case "fastjpeg":
+            //% "Fast JPEG"
+            return qsTrId("procam-renderer-fast-jpeg-short")
+        default:
+            //% "Internal"
+            return qsTrId("procam-renderer-internal-short")
         }
     }
 
@@ -975,7 +1102,11 @@ SettingsBase {
     }
 
     function rawCaptureRawFormatText(format) {
-        return format === "raw10" ? "RAW10 packed" : "RAW16"
+        if (format === "raw10") {
+            //% "RAW10 packed"
+            return qsTrId("procam-raw10-packed")
+        }
+        return "RAW16"
     }
 
     function rawCaptureRawFormatLabel(format) {
@@ -983,11 +1114,17 @@ SettingsBase {
     }
 
     function rawCaptureColorTemperatureText(temperature) {
-        return temperature > 0 ? "WB " + temperature + " K" : "Auto WB"
+        if (temperature > 0) {
+            //% "WB %1 K"
+            return qsTrId("procam-wb-temperature").arg(temperature)
+        }
+        //% "Auto WB"
+        return qsTrId("procam-wb-auto")
     }
 
     function rawCaptureColorTintText(tint) {
-        return tint === 0 ? "Tint 0" : "Tint " + tint
+        //% "Tint %1"
+        return qsTrId("procam-tint-value").arg(tint)
     }
 
     function colorFiltersIcon(enabled) {
@@ -995,16 +1132,21 @@ SettingsBase {
     }
 
     function colorFiltersEnabledText(enabled) {
-        return enabled
-                ? "Color filters on"
-                : "Color filters off"
+        if (enabled) {
+            //% "Color filters on"
+            return qsTrId("procam-color-filters-on")
+        }
+        //% "Color filters off"
+        return qsTrId("procam-color-filters-off")
     }
 
     function isoText(iso) {
         if (iso == 0) {
-            return "Light sensitivity - Automatic"
+            //% "Light sensitivity - Automatic"
+            return qsTrId("procam-iso-automatic")
         } else {
-            return "Light sensitivity - ISO " + iso
+            //% "Light sensitivity - ISO %1"
+            return qsTrId("procam-iso-sensitivity").arg(iso)
         }
     }
 
@@ -1030,11 +1172,21 @@ SettingsBase {
 
     function exposureModeText(exposureMode) {
         switch (exposureMode) {
-        case Camera.ExposureManual:         return "Automatic exposure"
-        case Camera.ExposurePortrait:       return "Portrait exposure"
-        case Camera.ExposureNight:          return "Night exposure"
-        case Camera.ExposureSports:         return "Sports exposure"
-        case Camera.ExposureHDR:            return "HDR exposure"
+        case Camera.ExposureManual:
+            //% "Automatic exposure"
+            return qsTrId("procam-exposure-automatic")
+        case Camera.ExposurePortrait:
+            //% "Portrait exposure"
+            return qsTrId("procam-exposure-portrait")
+        case Camera.ExposureNight:
+            //% "Night exposure"
+            return qsTrId("procam-exposure-night")
+        case Camera.ExposureSports:
+            //% "Sports exposure"
+            return qsTrId("procam-exposure-sports")
+        case Camera.ExposureHDR:
+            //% "HDR exposure"
+            return qsTrId("procam-exposure-hdr")
         default:
             return "" // not supported
         }
@@ -1055,11 +1207,21 @@ SettingsBase {
 
     function flashText(flash) {
         switch (flash) {
-        case Camera.FlashAuto:       return "Flash automatic"
-        case Camera.FlashOff:        return "Flash disabled"
-        case Camera.FlashOn:         return "Flash enabled"
-        case Camera.FlashTorch:      return "Flash on"
-        case Camera.FlashRedEyeReduction: return "Flash red eye"
+        case Camera.FlashAuto:
+            //% "Flash automatic"
+            return qsTrId("procam-flash-automatic")
+        case Camera.FlashOff:
+            //% "Flash disabled"
+            return qsTrId("procam-flash-disabled")
+        case Camera.FlashOn:
+            //% "Flash enabled"
+            return qsTrId("procam-flash-enabled")
+        case Camera.FlashTorch:
+            //% "Flash on"
+            return qsTrId("procam-flash-on")
+        case Camera.FlashRedEyeReduction:
+            //% "Flash red eye"
+            return qsTrId("procam-flash-red-eye")
         default:
             return "" // not supported
         }
@@ -1081,13 +1243,27 @@ SettingsBase {
 
     function whiteBalanceText(balance) {
         switch (balance) {
-        case CameraImageProcessing.WhiteBalanceAuto:        return "Automatic"
-        case CameraImageProcessing.WhiteBalanceSunlight:    return "Sunny"
-        case CameraImageProcessing.WhiteBalanceCloudy:      return "Cloudy"
-        case CameraImageProcessing.WhiteBalanceShade:       return "Shade"
-        case CameraImageProcessing.WhiteBalanceSunset:      return "Sunset"
-        case CameraImageProcessing.WhiteBalanceFluorescent: return "Fluorescent"
-        case CameraImageProcessing.WhiteBalanceTungsten:    return "Tungsten"
+        case CameraImageProcessing.WhiteBalanceAuto:
+            //% "Automatic"
+            return qsTrId("procam-wb-automatic")
+        case CameraImageProcessing.WhiteBalanceSunlight:
+            //% "Sunny"
+            return qsTrId("procam-wb-sunny")
+        case CameraImageProcessing.WhiteBalanceCloudy:
+            //% "Cloudy"
+            return qsTrId("procam-wb-cloudy")
+        case CameraImageProcessing.WhiteBalanceShade:
+            //% "Shade"
+            return qsTrId("procam-wb-shade")
+        case CameraImageProcessing.WhiteBalanceSunset:
+            //% "Sunset"
+            return qsTrId("procam-wb-sunset")
+        case CameraImageProcessing.WhiteBalanceFluorescent:
+            //% "Fluorescent"
+            return qsTrId("procam-wb-fluorescent")
+        case CameraImageProcessing.WhiteBalanceTungsten:
+            //% "Tungsten"
+            return qsTrId("procam-wb-tungsten")
         default:
             return "" // not supported
         }
@@ -1096,23 +1272,32 @@ SettingsBase {
     function colorFilterText(filter) {
         switch (filter) {
         case CameraImageProcessing.ColorFilterNone:
-            return "Normal"
+            //% "Normal"
+            return qsTrId("procam-filter-normal")
         case CameraImageProcessing.ColorFilterGrayscale:
-            return "Grayscale"
+            //% "Grayscale"
+            return qsTrId("procam-filter-grayscale")
         case CameraImageProcessing.ColorFilterNegative:
-            return "Negative"
+            //% "Negative"
+            return qsTrId("procam-filter-negative")
         case CameraImageProcessing.ColorFilterSolarize:
-            return "Solarize"
+            //% "Solarize"
+            return qsTrId("procam-filter-solarize")
         case CameraImageProcessing.ColorFilterSepia:
-            return "Sepia"
+            //% "Sepia"
+            return qsTrId("procam-filter-sepia")
         case CameraImageProcessing.ColorFilterPosterize:
-            return "Posterize"
+            //% "Posterize"
+            return qsTrId("procam-filter-posterize")
         case CameraImageProcessing.ColorFilterWhiteboard:
-            return "Whiteboard"
+            //% "Whiteboard"
+            return qsTrId("procam-filter-whiteboard")
         case CameraImageProcessing.ColorFilterBlackboard:
-            return "Blackboard"
+            //% "Blackboard"
+            return qsTrId("procam-filter-blackboard")
         case CameraImageProcessing.ColorFilterAqua:
-            return "Aqua"
+            //% "Aqua"
+            return qsTrId("procam-filter-aqua")
         default:
             return "" // not supported
         }
@@ -1129,9 +1314,11 @@ SettingsBase {
     function viewfinderGridText(grid) {
         switch (grid) {
         case "none":
-            return "No grid"
+            //% "No grid"
+            return qsTrId("procam-grid-none")
         case "thirds":
-            return "Thirds grid"
+            //% "Thirds grid"
+            return qsTrId("procam-grid-thirds")
         default: return ""
         }
     }

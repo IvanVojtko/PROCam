@@ -16,7 +16,8 @@ Loader {
             anchors.fill: parent
 
             InteractionHintLabel {
-                text: "Swipe down to access camera settings"
+                //% "Swipe down to access camera settings"
+                text: qsTrId("procam-hint-camera-settings")
                 anchors.bottom: parent.bottom
                 opacity: touchInteractionHint.running ? 1.0 : 0.0
                 Behavior on opacity { FadeAnimation { duration: 800 } }

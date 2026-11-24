@@ -29,6 +29,7 @@ ui_*.h
 *.moc
 *.qm
 *.ts
+!translations/procam-*.ts
 # Binaries an in-tree build leaves next to their sources.
 /procam
 /sfos-camera2-probe
