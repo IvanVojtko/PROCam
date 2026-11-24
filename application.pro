@@ -20,6 +20,7 @@ OTHER_FILES += \
         pages/*.qml \
         pages/gallery/*.qml \
         icons/procam-sfos.png \
+        icons/procam-sfos-172.png \
         dconf/00-procam.txt
 
 target.path = $$TARGETPATH
@@ -28,8 +29,11 @@ desktop.path = /usr/share/applications
 desktop.files = \
             procam.desktop
 
-icons.path = /usr/share/icons/hicolor/500x500/apps
-icons.files = icons/procam-sfos.png
+icons500.path = /usr/share/icons/hicolor/500x500/apps
+icons500.files = icons/procam-sfos.png
+
+icons172.path = /usr/share/icons/hicolor/172x172/apps
+icons172.files = icons/procam-sfos-172.png
 
 DEPLOYMENT_PATH = /usr/share/$$TARGET
 DEFINES *= DEPLOYMENT_PATH=\"\\\"\"$${DEPLOYMENT_PATH}/\"\\\"\"
@@ -45,7 +49,7 @@ oneshot.path  = /usr/lib/oneshot.d
 schema.files = dconf/00-procam.txt
 schema.path  = /etc/dconf/db/vendor.d/
 
-INSTALLS += target desktop icons qml service schema
+INSTALLS += target desktop icons500 icons172 qml service schema
 
 packagesExist(qdeclarative5-boostable) {
     message("Building with qdeclarative-boostable support")
